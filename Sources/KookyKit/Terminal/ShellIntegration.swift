@@ -668,7 +668,12 @@ enum KookyShellIntegration {
             # stay dormant. `\a` (BEL) terminator matches ghostty's own
             # zsh shell-integration script exactly.
             printf '\e]133;A;cl=line\a'
-            [[ "$PROMPT" != *$'\e]133;B\a'* ]] && PROMPT="${PROMPT}"$'\e]133;B\a'
+            # Wrap the OSC 133 B marker in zsh's zero-width brackets (%{ ... %}).
+            # Without them zsh counts every byte of the escape sequence (ESC, ],
+            # `133;B`, BEL) toward the PROMPT's visible width, miscalculates the
+            # wrap column by ~8 cells, and ZLE redraws the input on the wrong
+            # row the moment a long input wraps — wiping the first visible line.
+            [[ "$PROMPT" != *$'\e]133;B\a'* ]] && PROMPT="${PROMPT}"$'%{\e]133;B\a%}'
             _kooky_env_status
             # Same masking concern as `_kooky_env_status` itself: the kooky
             # hooks must not leak `$?` into user prompts that downstream

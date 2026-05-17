@@ -307,15 +307,21 @@ final class GhosttySurfaceView: NSView {
             updateDrawTimer()
         }
     }
-    /// IME composition flag. `setMarkedText` / `unmarkText` / `insertText`
-    /// forward the preedit string through `ghostty_surface_preedit`,
-    /// which both renders the in-progress glyphs on-surface and clears
-    /// them cleanly on commit / cancel — without that wiring AppKit's own
-    /// composition overlay would ghost over the terminal in TUIs that
-    /// don't aggressively redraw (Codex). The flag here is load-bearing
-    /// for keyDown's Enter / arrow / Esc gating while a candidate window
-    /// is open.
-    private var isComposing = false
+    /// In-progress IME preedit string. `setMarkedText` writes it,
+    /// `unmarkText` / `insertText` clear it. Mirrors ghostty.app's
+    /// `markedText` field — `hasMarkedText() = !markedText.isEmpty`,
+    /// load-bearing for keyDown's Enter / arrow / Esc gating while a
+    /// candidate window is open.
+    private var markedText: String = ""
+    /// Non-nil signals "we're inside `keyDown`'s `handleEvent` call".
+    /// IME callbacks during that window batch into here instead of
+    /// pushing each transient state straight to libghostty — without
+    /// batching, libghostty receives a noisy sequence of preedit /
+    /// clear / commit for every keystroke and leaves stray cells on
+    /// long sequences (the v0.11.4 `\u{3000}`-looking phantom space
+    /// between 发's). Cleared by keyDown's `defer`. Mirrors ghostty's
+    /// `keyTextAccumulator` pattern verbatim.
+    private var keyTextAccumulator: [String]?
 
     override init(frame: NSRect) {
         super.init(frame: frame)
@@ -628,8 +634,65 @@ final class GhosttySurfaceView: NSView {
 
         // Regular text + IME composition. inputContext routes through
         // NSTextInputClient: insertText for committed input, setMarkedText
-        // for in-progress composition.
+        // for in-progress composition. We batch all IME effects via
+        // keyTextAccumulator so libghostty sees one atomic preedit-sync
+        // + one text-commit per keystroke instead of per-IME-callback —
+        // critical for CJK composition where rapid transient preedit
+        // states otherwise leak phantom cells.
+        let hadMarkedTextBefore = !markedText.isEmpty
+        keyTextAccumulator = []
+        defer { keyTextAccumulator = nil }
         inputContext?.handleEvent(event)
+        // Only sync preedit when there's a state change to communicate.
+        // Sending `ghostty_surface_preedit(nil, 0)` on every keystroke
+        // (including pure ASCII typing) was confusing libghostty's wrap
+        // accounting on long lines — once the line wrapped, the original
+        // first row would scroll out of view as if the surface were only
+        // a few rows tall.
+        syncPreedit(clearIfNeeded: hadMarkedTextBefore)
+        if let accumulated = keyTextAccumulator, !accumulated.isEmpty {
+            for text in accumulated {
+                sendKeyText(text, to: surface)
+            }
+        }
+    }
+
+    private func syncPreedit(clearIfNeeded: Bool = true) {
+        guard let surface else { return }
+        if !markedText.isEmpty {
+            markedText.withCString { cstr in
+                ghostty_surface_preedit(surface, cstr, UInt(strlen(cstr)))
+            }
+        } else if clearIfNeeded {
+            ghostty_surface_preedit(surface, nil, 0)
+        }
+    }
+
+    /// Commits text from an IME composition or AppKit text-input session through
+    /// libghostty's key-event API. We do this instead of `ghostty_surface_text_input`
+    /// because the key-event path keeps cursor/wrap accounting in sync with how
+    /// libghostty's grid expects user-driven keystrokes to advance; `text_input`
+    /// is a lower-level injection that miscalculates wrap on long multi-byte
+    /// sequences. Control bytes (< 0x20) still go through `text_input` — those
+    /// are post-translation control sequences kooky already encodes itself.
+    /// Mirrors ghostty.app's `committedPreeditTextAction` pattern.
+    private func sendKeyText(_ text: String, to surface: ghostty_surface_t) {
+        guard !text.isEmpty else { return }
+        if let first = text.utf8.first, first < 0x20 {
+            sendInputBytes(text, to: surface)
+            return
+        }
+        text.withCString { ptr in
+            var key_ev = ghostty_input_key_s()
+            key_ev.action = GHOSTTY_ACTION_PRESS
+            key_ev.keycode = 0
+            key_ev.text = ptr
+            key_ev.composing = false
+            key_ev.mods = GHOSTTY_MODS_NONE
+            key_ev.consumed_mods = GHOSTTY_MODS_NONE
+            key_ev.unshifted_codepoint = 0
+            _ = ghostty_surface_key(surface, key_ev)
+        }
     }
 
     private func sendInputBytes(_ bytes: String, to surface: ghostty_surface_t) {
@@ -1045,42 +1108,46 @@ private extension ghostty_input_mouse_button_e {
 
 extension GhosttySurfaceView: @preconcurrency NSTextInputClient {
     func insertText(_ string: Any, replacementRange: NSRange) {
-        guard let surface else { return }
         let text = (string as? NSAttributedString)?.string ?? (string as? String) ?? ""
-        // Clear the preedit before sending the committed text — covers
-        // empty commits too (some IMEs call insertText("") on cancel).
-        ghostty_surface_preedit(surface, nil, 0)
-        isComposing = false
-        guard !text.isEmpty else { return }
-        sendInputBytes(text, to: surface)
+        // Commit ends composition. If we're inside keyDown's IME batching
+        // window the actual byte send is deferred until after the preedit
+        // sync (one atomic transaction); otherwise (e.g. dictation outside
+        // a real keystroke) we send immediately.
+        markedText = ""
+        if keyTextAccumulator != nil {
+            keyTextAccumulator?.append(text)
+        } else if let surface, !text.isEmpty {
+            ghostty_surface_preedit(surface, nil, 0)
+            sendKeyText(text, to: surface)
+        }
     }
 
     func setMarkedText(_ string: Any, selectedRange: NSRange, replacementRange: NSRange) {
-        guard let surface else { return }
-        let text = (string as? NSAttributedString)?.string ?? (string as? String) ?? ""
-        isComposing = !text.isEmpty
-        text.withCString { cstr in
-            ghostty_surface_preedit(surface, cstr, UInt(strlen(cstr)))
+        markedText = (string as? NSAttributedString)?.string ?? (string as? String) ?? ""
+        // Inside keyDown we defer the libghostty sync until handleEvent
+        // returns; outside (rare — layout change mid-compose) we sync
+        // immediately so the candidate window has a current anchor.
+        if keyTextAccumulator == nil {
+            syncPreedit()
         }
     }
 
     func unmarkText() {
-        isComposing = false
-        if let surface {
-            ghostty_surface_preedit(surface, nil, 0)
+        markedText = ""
+        if keyTextAccumulator == nil {
+            syncPreedit()
         }
     }
 
     func selectedRange() -> NSRange { NSRange(location: NSNotFound, length: 0) }
 
     func markedRange() -> NSRange {
-        // Length 1 is a non-zero sentinel — AppKit only uses this length
-        // as a "currently composing?" gate for candidate-window plumbing;
-        // libghostty owns rendering the marked glyphs on-surface.
-        isComposing ? NSRange(location: 0, length: 1) : NSRange(location: NSNotFound, length: 0)
+        markedText.isEmpty
+            ? NSRange(location: NSNotFound, length: 0)
+            : NSRange(location: 0, length: markedText.utf16.count)
     }
 
-    func hasMarkedText() -> Bool { isComposing }
+    func hasMarkedText() -> Bool { !markedText.isEmpty }
 
     func attributedSubstring(forProposedRange range: NSRange, actualRange: NSRangePointer?) -> NSAttributedString? { nil }
 
