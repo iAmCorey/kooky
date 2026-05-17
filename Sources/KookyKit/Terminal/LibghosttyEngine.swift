@@ -307,11 +307,14 @@ final class GhosttySurfaceView: NSView {
             updateDrawTimer()
         }
     }
-    /// IME composition flag. We never render the marked text ourselves —
-    /// `firstRect(forCharacterRange:actualRange:)` returns a sentinel rect to
-    /// keep the system's marked-text overlay off the surface — but
-    /// `hasMarkedText()` is load-bearing: keyDown checks it to gate Enter /
-    /// arrow / Esc routing while a candidate window is open.
+    /// IME composition flag. `setMarkedText` / `unmarkText` / `insertText`
+    /// forward the preedit string through `ghostty_surface_preedit`,
+    /// which both renders the in-progress glyphs on-surface and clears
+    /// them cleanly on commit / cancel — without that wiring AppKit's own
+    /// composition overlay would ghost over the terminal in TUIs that
+    /// don't aggressively redraw (Codex). The flag here is load-bearing
+    /// for keyDown's Enter / arrow / Esc gating while a candidate window
+    /// is open.
     private var isComposing = false
 
     override init(frame: NSRect) {
@@ -1044,24 +1047,36 @@ extension GhosttySurfaceView: @preconcurrency NSTextInputClient {
     func insertText(_ string: Any, replacementRange: NSRange) {
         guard let surface else { return }
         let text = (string as? NSAttributedString)?.string ?? (string as? String) ?? ""
+        // Clear the preedit before sending the committed text — covers
+        // empty commits too (some IMEs call insertText("") on cancel).
+        ghostty_surface_preedit(surface, nil, 0)
+        isComposing = false
         guard !text.isEmpty else { return }
         sendInputBytes(text, to: surface)
-        isComposing = false
     }
 
     func setMarkedText(_ string: Any, selectedRange: NSRange, replacementRange: NSRange) {
-        let length = (string as? NSAttributedString)?.length ?? (string as? String)?.count ?? 0
-        isComposing = length > 0
+        guard let surface else { return }
+        let text = (string as? NSAttributedString)?.string ?? (string as? String) ?? ""
+        isComposing = !text.isEmpty
+        text.withCString { cstr in
+            ghostty_surface_preedit(surface, cstr, UInt(strlen(cstr)))
+        }
     }
 
-    func unmarkText() { isComposing = false }
+    func unmarkText() {
+        isComposing = false
+        if let surface {
+            ghostty_surface_preedit(surface, nil, 0)
+        }
+    }
 
     func selectedRange() -> NSRange { NSRange(location: NSNotFound, length: 0) }
 
     func markedRange() -> NSRange {
-        // Length here is a sentinel — IME just needs to see a non-zero
-        // marked range while composing. The actual marked string isn't
-        // rendered (firstRect pushes it off-surface).
+        // Length 1 is a non-zero sentinel — AppKit only uses this length
+        // as a "currently composing?" gate for candidate-window plumbing;
+        // libghostty owns rendering the marked glyphs on-surface.
         isComposing ? NSRange(location: 0, length: 1) : NSRange(location: NSNotFound, length: 0)
     }
 
@@ -1072,17 +1087,22 @@ extension GhosttySurfaceView: @preconcurrency NSTextInputClient {
     func characterIndex(for point: NSPoint) -> Int { NSNotFound }
 
     func firstRect(forCharacterRange range: NSRange, actualRange: NSRangePointer?) -> NSRect {
-        // libghostty doesn't expose the cursor cell rect, so we can't anchor
-        // the IME marked text inline at the cursor. If we return a rect
-        // inside the view, the system paints "nihao" composition over the
-        // surface and TUIs that don't redraw aggressively (Codex) leave a
-        // ghost (`nihao你好`). Returning a 1×1 rect just below the window
-        // pushes both marked text and the candidate window outside the
-        // surface, accepting an off-anchor candidate window in exchange for
-        // no ghost residue inside the terminal.
-        guard let window else { return .zero }
-        let frame = window.frame
-        return NSRect(x: frame.minX, y: frame.minY - 4, width: 1, height: 1)
+        // Anchor the IME candidate window at the real cursor cell so 中日韩
+        // composition reads naturally. libghostty hands us the rect in
+        // surface-local top-left coords; AppKit's NSView is bottom-left,
+        // so flip Y before handing the rect up to the window → screen
+        // conversion chain that NSTextInputClient expects.
+        guard let surface, let window else { return .zero }
+        var x: Double = 0, y: Double = 0, w: Double = 0, h: Double = 0
+        ghostty_surface_ime_point(surface, &x, &y, &w, &h)
+        let viewRect = NSRect(
+            x: x,
+            y: bounds.height - y - h,
+            width: w,
+            height: h
+        )
+        let windowRect = convert(viewRect, to: nil)
+        return window.convertToScreen(windowRect)
     }
 
     func validAttributesForMarkedText() -> [NSAttributedString.Key] { [] }
