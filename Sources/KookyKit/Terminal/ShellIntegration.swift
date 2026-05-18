@@ -456,7 +456,31 @@ enum KookyShellIntegration {
         bind '"\\e[1;3D": backward-word'     # Alt+Left
         bind '"\\e[1;3C": forward-word'      # Alt+Right
 
-        [[ -r "$HOME/.bashrc" ]] && source "$HOME/.bashrc"
+        # bash is launched as interactive non-login (`--rcfile` is incompatible
+        # with `-l`), so it would normally skip the login rc chain. macOS users
+        # traditionally put PATH / env in ~/.bash_profile (Apple Terminal starts
+        # bash as login), so without this they'd see env vars vanish. Replay
+        # the first existing login rc, matching bash's own lookup order.
+        _kooky_login_rc_loaded=
+        for _kooky_rc in "$HOME/.bash_profile" "$HOME/.bash_login" "$HOME/.profile"; do
+            if [[ -r "$_kooky_rc" ]]; then
+                source "$_kooky_rc"
+                _kooky_login_rc_loaded=1
+                break
+            fi
+        done
+        unset _kooky_rc
+
+        # No login rc existed, so its standard `source ~/.bashrc` chain never
+        # ran — fall back so the user's interactive config still loads. Skip
+        # when a login rc was found: bash login shells don't auto-source
+        # .bashrc, and the user's profile chain (if they want it) handles
+        # that. Avoids double-load when .bash_profile already chained .bashrc
+        # (NVM / oh-my-bash / PROMPT_COMMAND duplication = 150-300ms).
+        if [[ -z "$_kooky_login_rc_loaded" && -r "$HOME/.bashrc" ]]; then
+            source "$HOME/.bashrc"
+        fi
+        unset _kooky_login_rc_loaded
 
         # User rc may rewrite PATH; re-prepend the kooky wrapper directory so
         # `claude` etc. resolve to our shims first.
@@ -505,19 +529,36 @@ enum KookyShellIntegration {
         bindkey '^[[1;3D' backward-word    # Alt+Left
         bindkey '^[[1;3C' forward-word     # Alt+Right
 
-        [[ -f "$HOME/.zshrc" ]] && source "$HOME/.zshrc"
-
-        # zsh has now consumed ZDOTDIR to locate this rc; restore the user's
-        # original (almost always empty) so child processes look at the real
-        # ~/.zshrc. Without this, `curl | bash`-style installers (opencode,
-        # rustup, etc.) detect `$ZDOTDIR/.zshrc` and append PATH exports to
-        # our ephemeral wrapper rc — gone the moment kooky exits.
+        # Restore ZDOTDIR to the user's original (almost always unset) *before*
+        # replaying their rc chain. zsh has already consumed ZDOTDIR to locate
+        # this wrapper rc — changing it now is safe and ensures any
+        # `$ZDOTDIR/...` reference inside .zshenv / .zprofile / .zshrc
+        # (compinit's `.zcompdump`, plugin caches, znap/zinit roots, HISTFILE
+        # overrides) resolves to real `$HOME` instead of our ephemeral
+        # kooky-zsh-<pid> dir. Also stops `curl | bash`-style installers
+        # (opencode, rustup) from writing PATH exports to our ephemeral rc.
         if [[ -n "$KOOKY_ORIGINAL_ZDOTDIR" ]]; then
             export ZDOTDIR="$KOOKY_ORIGINAL_ZDOTDIR"
             unset KOOKY_ORIGINAL_ZDOTDIR
         else
             unset ZDOTDIR
         fi
+
+        # macOS `/etc/zshrc` (already ran) resolved HISTFILE against our
+        # ephemeral ZDOTDIR; `cleanup()` deletes that dir on quit, taking
+        # history with it. Reset to the real path *before* user rc so a user
+        # HISTFILE override in any of the three files below still wins.
+        export HISTFILE="$HOME/.zsh_history"
+
+        # Replay the rc files zsh would have run if ZDOTDIR had pointed at the
+        # user's real dir. Resolve via `${ZDOTDIR:-$HOME}` after each source —
+        # so users who park their zsh config in a custom dir (e.g.
+        # `~/.config/zsh` via parent-shell ZDOTDIR, or via `export ZDOTDIR=...`
+        # inside .zshenv itself) get the full chain. Re-resolve after each
+        # source because .zshenv / .zprofile may mutate ZDOTDIR.
+        [[ -r "${ZDOTDIR:-$HOME}/.zshenv" ]] && source "${ZDOTDIR:-$HOME}/.zshenv"
+        [[ -r "${ZDOTDIR:-$HOME}/.zprofile" ]] && source "${ZDOTDIR:-$HOME}/.zprofile"
+        [[ -r "${ZDOTDIR:-$HOME}/.zshrc" ]] && source "${ZDOTDIR:-$HOME}/.zshrc"
 
         # User rc may rewrite PATH; re-prepend the kooky wrapper directory so
         # `claude` etc. resolve to our shims first.
