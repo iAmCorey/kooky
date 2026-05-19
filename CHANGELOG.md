@@ -2,6 +2,14 @@
 
 Notable changes per release. Tagged commits use `vX.Y.Z` shortform.
 
+## v0.11.7 — 2026-05-19
+
+- Imported upstream fixes from iAmCorey/kooky `v0.11.4..v0.11.6`:
+  - Fixed: Chinese / Japanese / Korean IME candidate window now appears right under the cursor instead of flying out of the window to the bottom-left of the screen. Pinyin, kana, hangul compose inline like in every other macOS app.
+  - Fixed: long CJK inputs no longer leave a phantom space mid-line; when the input wraps to a second line, the first line no longer disappears.
+  - Fixed: shell history and Tab completion now survive kooky restarts.
+  - Fixed: environment variables in `~/.zshenv`, `~/.zprofile`, `~/.bash_profile` now load in kooky terminals.
+
 ## v0.11.6 — 2026-05-19
 
 - Fixed: ⌘V (paste) and ⌘C (copy) now fire on non-Latin keyboard layouts — Russian, Greek, Dvorak, AZERTY, anything where the physical V/C keys produce different characters. The pane's `keyDown` used to match by `event.charactersIgnoringModifiers`, which despite the name still reflects the active keyboard layout: on a Russian layout that key produces «м», so the comparison against `"v"` silently no-op'd and the paste branch was skipped. Switched to physical keyCode matching (`kVK_ANSI_V` = 9, `kVK_ANSI_C` = 8), same pattern already used a few lines below for ⌘← / ⌘→ / ⌘⌫. Layout-independent by construction.
