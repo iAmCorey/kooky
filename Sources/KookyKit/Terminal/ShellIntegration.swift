@@ -465,11 +465,15 @@ enum KookyShellIntegration {
         _kooky_osc7_pwd() { printf '\\e]7;file://%s%s\\e\\\\' "$HOSTNAME" "$PWD"; }
         \(envStatusBlock)
 
-        PROMPT_COMMAND="_kooky_osc7_pwd;_kooky_env_status${PROMPT_COMMAND:+;$PROMPT_COMMAND}"
+        \(agentLaunchBlock)
+
+        # __kooky_agent_launch goes FIRST so the agent owns the terminal
+        # before _kooky_osc7_pwd / _kooky_env_status fire — they re-run on
+        # the next prompt cycle (when the agent exits) and catch the
+        # post-agent state. Order within PROMPT_COMMAND is positional.
+        PROMPT_COMMAND="__kooky_agent_launch;_kooky_osc7_pwd;_kooky_env_status${PROMPT_COMMAND:+;$PROMPT_COMMAND}"
         _kooky_osc7_pwd
         _kooky_env_status
-
-        \(agentLaunchBlock)
         """
         writeFile(at: rcfilePath, contents: bashrc)
 
@@ -528,7 +532,22 @@ enum KookyShellIntegration {
 
         \(osc133Block)
 
-        \(agentLaunchBlock)
+        # Agent launch via zle-line-init — fires AFTER the entire
+        # precmd_functions chain completes (so Powerlevel10k's
+        # `_p9k_precmd` has finalized instant-prompt and restored stdio)
+        # and BEFORE zle reads input. BUFFER + accept-line submits the
+        # launch command as if the user typed it. See `agentLaunchBlock`
+        # docs for the long-form rationale.
+        autoload -Uz add-zle-hook-widget
+        __kooky_zle_line_init_launch() {
+            [[ -n "$KOOKY_AGENT_LAUNCHED" ]] && return 0
+            [[ -z "$KOOKY_AGENT" ]] && return 0
+            export KOOKY_AGENT_LAUNCHED=1
+            BUFFER="$KOOKY_AGENT"
+            unset KOOKY_AGENT
+            zle accept-line
+        }
+        add-zle-hook-widget zle-line-init __kooky_zle_line_init_launch
         """
         writeFile(at: (dir as NSString).appendingPathComponent(".zshrc"), contents: zshrc)
         return dir
@@ -551,19 +570,40 @@ enum KookyShellIntegration {
 
     // MARK: - Internals
 
-    /// Inline agent launch — invoked by both wrapper rcs to start KOOKY_AGENT
-    /// before the first prompt prints. KOOKY_AGENT_LAUNCHED guards against
-    /// re-entry from subshells the agent itself may spawn.
-    private static let agentLaunchBlock = """
-        if [[ -n "$KOOKY_AGENT" && -z "$KOOKY_AGENT_LAUNCHED" ]]; then
+    /// Defines `__kooky_agent_launch` — used by the bash wrapper rc via
+    /// PROMPT_COMMAND. zsh uses a different mechanism (zle-line-init +
+    /// BUFFER + zle accept-line, inlined in `zshDirectory` below).
+    ///
+    /// Why zsh diverges: launching from precmd looked correct, but
+    /// Powerlevel10k's main precmd hook (`_p9k_precmd`, the one that
+    /// finalizes instant-prompt and restores stdio) appends to
+    /// `precmd_functions` *lazily* — it can end up AFTER hooks we
+    /// registered earlier from the wrapper rc. Agents then fire with
+    /// p10k's stdio still redirected to its capture buffer, inherit a
+    /// non-TTY stdout/stdin, and switch into non-interactive mode.
+    /// Claude Code 2.x in that state errors with `Input must be
+    /// provided either through stdin or as a prompt argument when using
+    /// --print`. Codex / gemini hit analogous paths.
+    ///
+    /// `zle-line-init` fires once the entire precmd chain is done and
+    /// zle is about to accept input — stdio is fully restored by then.
+    /// Setting BUFFER + zle accept-line submits the launch command as
+    /// if the user typed it, so the agent runs as a real foreground
+    /// command with proper OSC 133 preexec/postexec bracketing.
+    /// `KOOKY_AGENT_LAUNCHED` guards re-entry from agent-spawned
+    /// subshells.
+    static let agentLaunchBlock = """
+        __kooky_agent_launch() {
+            [[ -n "$KOOKY_AGENT_LAUNCHED" ]] && return 0
+            [[ -z "$KOOKY_AGENT" ]] && return 0
             export KOOKY_AGENT_LAUNCHED=1
-            _kooky_cmd="$KOOKY_AGENT"
+            local _kooky_cmd="$KOOKY_AGENT"
             unset KOOKY_AGENT
             # `eval` lets KOOKY_AGENT carry multi-word commands (e.g. an
             # editor + file path); single-word agent commands like `claude`
             # behave identically.
             eval "$_kooky_cmd"
-        fi
+        }
         """
 
     /// Two layers of memoization in this hook avoid heavy per-prompt work:

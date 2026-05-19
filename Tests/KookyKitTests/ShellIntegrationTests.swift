@@ -66,6 +66,26 @@ final class ShellIntegrationTests: XCTestCase {
         XCTAssertTrue(body.contains("kooky-managed-do-not-edit"), "plugin must carry the upgrade-safety marker")
     }
 
+    func testAgentLaunchBlockDefinesFunctionAndDoesNotInlineEval() {
+        // Inline `eval "$KOOKY_AGENT"` during zshrc parsing inherits
+        // Powerlevel10k's redirected stdio (p10k captures stdout/stderr
+        // until first prompt renders), so agents launched there see a
+        // non-TTY stdin/stdout and silently switch into non-interactive
+        // mode — Claude Code 2.x then errors with "Input must be provided
+        // ... when using --print". The launch path must define a function
+        // we can hook into precmd / PROMPT_COMMAND instead.
+        let body = KookyShellIntegration.agentLaunchBlock
+
+        XCTAssertTrue(body.contains("__kooky_agent_launch()"),
+                      "agentLaunchBlock must declare __kooky_agent_launch as a function")
+        XCTAssertTrue(body.contains("KOOKY_AGENT_LAUNCHED"),
+                      "must guard against re-entry from agent-spawned subshells")
+        XCTAssertTrue(body.contains(#"eval "$_kooky_cmd""#),
+                      "must still eval the launch command after guards pass")
+        XCTAssertFalse(body.contains(#"if [[ -n "$KOOKY_AGENT" && -z "$KOOKY_AGENT_LAUNCHED" ]]; then"#),
+                      "must NOT inline-eval during zshrc parsing — defer to precmd")
+    }
+
     func testEnvStatusBlockReportsLiveShellEnvironment() {
         let body = KookyShellIntegration.envStatusBlock
 

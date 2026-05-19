@@ -2,6 +2,14 @@
 
 Notable changes per release. Tagged commits use `vX.Y.Z` shortform.
 
+## v0.11.5 — 2026-05-19
+
+- Fixed properly: agents launched from the `+` menu under Powerlevel10k's *instant prompt* feature no longer fail with `Input must be provided either through stdin or as a prompt argument when using --print`. v0.11.4 attempted this via a `precmd` hook, but p10k's main `_p9k_precmd` (the one that actually restores stdio) appends itself to `precmd_functions` lazily and ends up AFTER any hook the kooky wrapper rc registered — so the agent still inherited captured stdio. Switched zsh's launch path to a `zle-line-init` widget (via `add-zle-hook-widget`), which fires once the entire precmd chain is done and zle is ready to read input. Setting `BUFFER` + `zle accept-line` submits the launch command as if the user typed it, so the agent runs as a real foreground command with TTY stdio and proper OSC 133 preexec/postexec bracketing. bash continues to use `PROMPT_COMMAND` (no p10k-equivalent for bash to step on us).
+
+## v0.11.4 — 2026-05-19
+
+- Fixed: agents launched from the `+` menu (Claude Code, Codex, …) no longer fail with `Input must be provided either through stdin or as a prompt argument when using --print` when the user's `~/.zshrc` enables Powerlevel10k's *instant prompt* feature. The wrapper rc used to run `eval "$KOOKY_AGENT"` inline while parsing zshrc — but p10k redirects stdout/stderr into a capture buffer until the first prompt renders, so the agent inherited non-TTY stdio, silently switched into non-interactive mode, then errored because no input was piped. Launch is now deferred to a one-shot `precmd` hook (zsh) / `PROMPT_COMMAND` entry (bash) that fires only after p10k restores stdio. Plain (non-p10k) users see no behavioral change. *(Note: this fix was incomplete — see v0.11.5.)*
+
 ## v0.11.3 — 2026-05-16
 
 - Drag a file or folder from Finder onto any kooky terminal pane → its absolute path drops in at the cursor as backslash-escaped text (`/Users/corey/My\ Folder/file.txt`), same shape Finder→Terminal.app / ghostty.app use. Multiple files at once → space-separated. Works in any shell, agent, or TUI — kooky just types the path; what you do with it is up to whatever's on the other side.
