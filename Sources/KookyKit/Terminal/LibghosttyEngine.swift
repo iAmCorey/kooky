@@ -428,7 +428,16 @@ final class GhosttySurfaceView: NSView {
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         if window != nil {
+            // Tab/workspace swap detaches the view; output streamed in while
+            // we were off-screen leaves libghostty's viewport anchored above
+            // the cursor. AppKit skips `setFrameSize` when the frame is
+            // unchanged on re-attach, so the usual size-driven re-anchor
+            // doesn't fire — force one ourselves. `surface != nil` here means
+            // a prior attach already created the surface (i.e. re-attach),
+            // not first mount where the empty surface has nothing to anchor.
+            let isReattach = surface != nil
             createSurfaceIfReady()
+            if isReattach { reanchorToCursor() }
             // Defer until after SwiftUI's hosting finishes its current event
             // loop pass, otherwise the originating button click reclaims focus.
             DispatchQueue.main.async { [weak self] in
@@ -437,6 +446,17 @@ final class GhosttySurfaceView: NSView {
             }
         }
         updateDrawTimer()
+    }
+
+    /// Jumps the viewport to the cursor row via libghostty's `scroll_to_bottom`
+    /// binding. Used on view re-attach to fix the tab-swap "buffer creeps
+    /// upward" symptom — counterpart to the same-named guard in
+    /// `propagateSizeToSurface`, just covering the no-frame-change branch.
+    private func reanchorToCursor() {
+        guard let surface else { return }
+        "scroll_to_bottom".withCString {
+            _ = ghostty_surface_binding_action(surface, $0, UInt(strlen($0)))
+        }
     }
 
     /// Draw timer runs only when the surface exists AND the view is in a window.
