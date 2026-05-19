@@ -2,6 +2,10 @@
 
 Notable changes per release. Tagged commits use `vX.Y.Z` shortform.
 
+## v0.11.6 — 2026-05-19
+
+- Fixed: ⌘V (paste) and ⌘C (copy) now fire on non-Latin keyboard layouts — Russian, Greek, Dvorak, AZERTY, anything where the physical V/C keys produce different characters. The pane's `keyDown` used to match by `event.charactersIgnoringModifiers`, which despite the name still reflects the active keyboard layout: on a Russian layout that key produces «м», so the comparison against `"v"` silently no-op'd and the paste branch was skipped. Switched to physical keyCode matching (`kVK_ANSI_V` = 9, `kVK_ANSI_C` = 8), same pattern already used a few lines below for ⌘← / ⌘→ / ⌘⌫. Layout-independent by construction.
+
 ## v0.11.5 — 2026-05-19
 
 - Fixed properly: agents launched from the `+` menu under Powerlevel10k's *instant prompt* feature no longer fail with `Input must be provided either through stdin or as a prompt argument when using --print`. v0.11.4 attempted this via a `precmd` hook, but p10k's main `_p9k_precmd` (the one that actually restores stdio) appends itself to `precmd_functions` lazily and ends up AFTER any hook the kooky wrapper rc registered — so the agent still inherited captured stdio. Switched zsh's launch path to a `zle-line-init` widget (via `add-zle-hook-widget`), which fires once the entire precmd chain is done and zle is ready to read input. Setting `BUFFER` + `zle accept-line` submits the launch command as if the user typed it, so the agent runs as a real foreground command with TTY stdio and proper OSC 133 preexec/postexec bracketing. bash continues to use `PROMPT_COMMAND` (no p10k-equivalent for bash to step on us).

@@ -556,8 +556,12 @@ final class GhosttySurfaceView: NSView {
         // Cmd+V: read the system pasteboard directly and inject as text via
         // the paste path so bracketed-paste mode wraps it correctly. The
         // right-click Paste menu shares the same path via `paste(_:)`.
+        // Match by physical keyCode (kVK_ANSI_V = 9), not
+        // `charactersIgnoringModifiers` — the latter still reflects the
+        // active keyboard layout, so on Cyrillic/Dvorak/AZERTY Cmd+V would
+        // compare against "м"/"."/"…" and silently no-op.
         if cmdOnly,
-           event.charactersIgnoringModifiers?.lowercased() == "v",
+           event.keyCode == 9,
            let pasted = NSPasteboard.general.string(forType: .string),
            !pasted.isEmpty
         {
@@ -566,9 +570,10 @@ final class GhosttySurfaceView: NSView {
         }
 
         // Cmd+C with a live selection — without this branch libghostty's
-        // bypassed keybinding system would leave Cmd+C dead.
+        // bypassed keybinding system would leave Cmd+C dead. keyCode 8 =
+        // kVK_ANSI_C, layout-independent (see Cmd+V comment above).
         if cmdOnly,
-           event.charactersIgnoringModifiers?.lowercased() == "c",
+           event.keyCode == 8,
            ghostty_surface_has_selection(surface)
         {
             performCopy()
