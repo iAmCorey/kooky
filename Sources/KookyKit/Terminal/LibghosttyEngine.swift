@@ -634,12 +634,31 @@ final class GhosttySurfaceView: NSView {
             return
         }
 
-        // Special / navigation keys with full modifier handling (CSI mod
-        // digit 2…8 = 1 + Shift + 2·Alt + 4·Ctrl). Skipped while IME is
-        // composing so Enter / Esc / arrows can dismiss / accept the
+        // Shift+Enter: send `\` then CR — zsh line-continuation and Claude
+        // Code's `\` + Enter → newline trick both honor this. `\n` alone is
+        // useless: ZLE binds it to accept-line. kooky-specific override that
+        // libghostty's key encoder doesn't produce, so we handle it before
+        // the libghostty hand-off.
+        if !hasMarkedText(),
+           event.keyCode == 36,
+           mods.contains(.shift),
+           !cmd, !mods.contains(.control), !mods.contains(.option)
+        {
+            sendInputBytes("\\\r", to: surface)
+            return
+        }
+
+        // Special / navigation / function keys: hand off to libghostty's key
+        // encoder so DECCKM (application cursor mode), DECKPAM, and any
+        // kitty-keyboard-protocol state pick the correct byte sequence. We
+        // used to build escape sequences in Swift here, which always emitted
+        // the CSI form (`\e[A` etc.). That broke ncurses TUIs (mc, dialog,
+        // …) — their terminfo for xterm-256color declares `kcuu1=\EOA` so
+        // they only recognise the SS3 form when smkx is active. Skipped
+        // while IME is composing so Enter / Esc / arrows can dismiss the
         // candidate window without leaking through to the PTY.
-        if !hasMarkedText(), let bytes = Self.escapeSequence(for: event) {
-            sendInputBytes(bytes, to: surface)
+        if !hasMarkedText(), Self.isSpecialKey(event.keyCode) {
+            sendKey(event: event, action: GHOSTTY_ACTION_PRESS, surface: surface)
             return
         }
 
@@ -726,79 +745,27 @@ final class GhosttySurfaceView: NSView {
         sendInputBytes(text, to: surface)
     }
 
-    /// Map an NSEvent to the byte sequence a TUI expects on the PTY. Returns
-    /// `nil` for anything that's just plain typed text (handled by the caller
-    /// via `event.characters`).
-    private static func escapeSequence(for event: NSEvent) -> String? {
-        let code = event.keyCode
-        let mods = event.modifierFlags
-        let modDigit = csiModifierDigit(shift: mods.contains(.shift),
-                                        alt: mods.contains(.option),
-                                        ctrl: mods.contains(.control))
-
-        switch code {
-        // Functional
-        case 36:
-            // Shift+Enter: send `\` then CR — zsh line-continuation and
-            // Claude Code's documented `\` + Enter → newline trick both
-            // honor this. `\n` alone is useless: ZLE binds it to accept-line.
-            return mods.contains(.shift) ? "\\\r" : "\r"
-        case 48:  return mods.contains(.shift) ? "\u{1B}[Z" : "\t"  // Tab / Shift+Tab
-        case 51:  return "\u{7F}"                          // Backspace (DEL)
-        case 53:  return "\u{1B}"                          // Escape
-
-        // Arrows
-        case 123: return csiArrow("D", modDigit: modDigit)
-        case 124: return csiArrow("C", modDigit: modDigit)
-        case 125: return csiArrow("B", modDigit: modDigit)
-        case 126: return csiArrow("A", modDigit: modDigit)
-
-        // Control pad
-        case 115: return csiArrow("H", modDigit: modDigit)  // Home
-        case 119: return csiArrow("F", modDigit: modDigit)  // End
-        case 116: return csiTilde("5", modDigit: modDigit)  // Page Up
-        case 121: return csiTilde("6", modDigit: modDigit)  // Page Down
-        case 117: return csiTilde("3", modDigit: modDigit)  // Forward Delete
-        case 114: return csiTilde("2", modDigit: modDigit)  // Help / Insert
-
-        // Function keys
-        case 122: return ssFnKey("P", modDigit: modDigit)   // F1
-        case 120: return ssFnKey("Q", modDigit: modDigit)   // F2
-        case 99:  return ssFnKey("R", modDigit: modDigit)   // F3
-        case 118: return ssFnKey("S", modDigit: modDigit)   // F4
-        case 96:  return csiTilde("15", modDigit: modDigit) // F5
-        case 97:  return csiTilde("17", modDigit: modDigit) // F6
-        case 98:  return csiTilde("18", modDigit: modDigit) // F7
-        case 100: return csiTilde("19", modDigit: modDigit) // F8
-        case 101: return csiTilde("20", modDigit: modDigit) // F9
-        case 109: return csiTilde("21", modDigit: modDigit) // F10
-        case 103: return csiTilde("23", modDigit: modDigit) // F11
-        case 111: return csiTilde("24", modDigit: modDigit) // F12
-
-        default:  return nil
+    /// Keys whose PTY byte sequence depends on terminal mode state (DECCKM,
+    /// keypad application mode, kitty keyboard protocol). We dispatch these
+    /// through libghostty's key API instead of building the bytes in Swift
+    /// so the encoder can pick CSI vs SS3 (e.g. `\e[A` vs `\eOA`) based on
+    /// the current mode. Letters / digits / punctuation are intentionally
+    /// excluded so they still flow through the IME / text-input path.
+    private static func isSpecialKey(_ keyCode: UInt16) -> Bool {
+        switch keyCode {
+        case 36, 48, 51, 53:                          // Enter, Tab, Backspace, Escape
+            return true
+        case 114, 115, 116, 117, 119, 121:            // Help/Home/PgUp/Del/End/PgDn
+            return true
+        case 123, 124, 125, 126:                      // Arrows ←/→/↓/↑
+            return true
+        case 64, 79, 80, 96, 97, 98, 99, 100, 101,    // F-keys (see mapAppleKeyCode
+             103, 105, 106, 107, 109, 111, 113, 118,  // for the full kVK → Fn map)
+             120, 122:
+            return true
+        default:
+            return false
         }
-    }
-
-    /// CSI modifier digit: 2 = Shift, 3 = Alt, 4 = Shift+Alt, 5 = Ctrl, … 8.
-    /// Returns nil when no modifier is set so the unmodified sequence is used.
-    private static func csiModifierDigit(shift: Bool, alt: Bool, ctrl: Bool) -> Int? {
-        let mask = (shift ? 1 : 0) + (alt ? 2 : 0) + (ctrl ? 4 : 0)
-        return mask == 0 ? nil : mask + 1
-    }
-
-    private static func csiArrow(_ final: String, modDigit: Int?) -> String {
-        if let m = modDigit { return "\u{1B}[1;\(m)\(final)" }
-        return "\u{1B}[\(final)"
-    }
-
-    private static func csiTilde(_ number: String, modDigit: Int?) -> String {
-        if let m = modDigit { return "\u{1B}[\(number);\(m)~" }
-        return "\u{1B}[\(number)~"
-    }
-
-    private static func ssFnKey(_ final: String, modDigit: Int?) -> String {
-        if let m = modDigit { return "\u{1B}[1;\(m)\(final)" }
-        return "\u{1B}O\(final)"
     }
 
     override func keyUp(with event: NSEvent) {
