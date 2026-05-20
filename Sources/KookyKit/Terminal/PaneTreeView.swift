@@ -80,10 +80,8 @@ private struct PaneView: View {
                             .padding(.trailing, Theme.space3)
                         }
                     }
-                if active.gitStatus.branch != nil || !active.environment.isEmpty {
-                    Rectangle().fill(Theme.chromeHairline).frame(height: 1)
-                    PaneStatusBar(session: active)
-                }
+                Rectangle().fill(Theme.chromeHairline).frame(height: 1)
+                PaneStatusBar(session: active)
             } else {
                 Color.clear
             }
@@ -109,6 +107,7 @@ private struct PaneStatusBar: View {
         FlowLayout(alignment: .trailing, spacing: 8, rowSpacing: 4) {
             pythonSegment
             nodeSegment
+            cwdSegment
             proxySegment
             branchSegment
             diffSegment
@@ -154,6 +153,11 @@ private struct PaneStatusBar: View {
         if let info = session.environment.proxy {
             ProxyStatusSegment(info: info, session: session)
         }
+    }
+
+    @ViewBuilder
+    private var cwdSegment: some View {
+        CwdStatusSegment(session: session)
     }
 
     @ViewBuilder
@@ -469,6 +473,65 @@ private struct ProxyEntryRow: View {
             RoundedRectangle(cornerRadius: 5)
                 .fill(isHovered ? Theme.chromeHover : .clear)
         )
+        .onHover { isHovered = $0 }
+    }
+}
+
+/// Current-directory pill: shows the cwd abbreviated to its last three path
+/// components (e.g. `…/personal/projects/kooky`), or `~` when the cwd is
+/// $HOME. Click copies the full absolute path to the pasteboard — the
+/// shortened display is for fitting in the chrome row, but the user almost
+/// always wants the full path when they reach for it (paste into Finder,
+/// `cd` in another terminal, scripts, etc.).
+private struct CwdStatusSegment: View {
+    @Bindable var session: Session
+
+    @State private var isHovered = false
+    @State private var didCopy = false
+
+    private var fullPath: String {
+        session.currentDirectory.standardizedFileURL.path
+    }
+
+    private var displayPath: String {
+        let standardized = session.currentDirectory.standardizedFileURL
+        let path = standardized.path
+        if path == NSHomeDirectory() { return "~" }
+        // `pathComponents` includes a leading "/" for absolute URLs — drop it
+        // so the last-3 slice doesn't pull in the root separator as a
+        // component.
+        let parts = standardized.pathComponents.filter { $0 != "/" }
+        if parts.count <= 3 { return path }
+        return "…/" + parts.suffix(3).joined(separator: "/")
+    }
+
+    var body: some View {
+        Button {
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(fullPath, forType: .string)
+            withAnimation(.easeInOut(duration: 0.12)) { didCopy = true }
+            // Revert the checkmark after a beat so repeated copies still
+            // animate. Lives on the MainActor — Session + this view are both
+            // `@MainActor`-isolated.
+            Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 1_100_000_000)
+                withAnimation(.easeInOut(duration: 0.2)) { didCopy = false }
+            }
+        } label: {
+            StatusSegment(systemImage: didCopy ? "checkmark" : "folder") {
+                Text(didCopy ? "Copied" : displayPath)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .foregroundStyle(Theme.chromeForeground)
+            }
+            .background(
+                RoundedRectangle(cornerRadius: 4)
+                    .fill(isHovered ? Theme.chromeHover : .clear)
+            )
+        }
+        .buttonStyle(.plain)
+        .contentShape(RoundedRectangle(cornerRadius: 4))
+        .help("\(fullPath) — click to copy")
         .onHover { isHovered = $0 }
     }
 }
