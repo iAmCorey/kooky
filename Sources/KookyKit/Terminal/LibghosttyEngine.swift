@@ -747,25 +747,35 @@ final class GhosttySurfaceView: NSView {
         case 51:  return "\u{7F}"                          // Backspace (DEL)
         case 53:  return "\u{1B}"                          // Escape
 
-        // Arrows
-        case 123: return csiArrow("D", modDigit: modDigit)
-        case 124: return csiArrow("C", modDigit: modDigit)
-        case 125: return csiArrow("B", modDigit: modDigit)
-        case 126: return csiArrow("A", modDigit: modDigit)
+        // Arrows — SS3 form (`\eOA` …) unmodified, CSI form with modifier
+        // digit when modified. xterm-256color terminfo declares the cursor
+        // keys as `kcuu1=\EOA` etc., and ncurses TUIs (mc, dialog, …) read
+        // terminfo strictly — they only recognise the SS3 form once they've
+        // called `smkx` (application cursor mode). Shells/readline/zle/vim/
+        // nvim all bind both CSI and SS3 forms to the same action, so this
+        // is universally accepted. Technically we should switch on DECCKM
+        // state, but kooky doesn't track it; in practice no real app cares.
+        case 123: return ss3Sequence("D", modDigit: modDigit)
+        case 124: return ss3Sequence("C", modDigit: modDigit)
+        case 125: return ss3Sequence("B", modDigit: modDigit)
+        case 126: return ss3Sequence("A", modDigit: modDigit)
 
-        // Control pad
-        case 115: return csiArrow("H", modDigit: modDigit)  // Home
-        case 119: return csiArrow("F", modDigit: modDigit)  // End
-        case 116: return csiTilde("5", modDigit: modDigit)  // Page Up
-        case 121: return csiTilde("6", modDigit: modDigit)  // Page Down
-        case 117: return csiTilde("3", modDigit: modDigit)  // Forward Delete
-        case 114: return csiTilde("2", modDigit: modDigit)  // Help / Insert
+        // Control pad — Home/End also have SS3 form in xterm-256color
+        // terminfo (`khome=\EOH`, `kend=\EOF`); same reasoning as arrows.
+        // PgUp/PgDn/Insert/FwdDelete only exist in CSI-tilde form.
+        case 115: return ss3Sequence("H", modDigit: modDigit) // Home
+        case 119: return ss3Sequence("F", modDigit: modDigit) // End
+        case 116: return csiTilde("5", modDigit: modDigit)    // Page Up
+        case 121: return csiTilde("6", modDigit: modDigit)    // Page Down
+        case 117: return csiTilde("3", modDigit: modDigit)    // Forward Delete
+        case 114: return csiTilde("2", modDigit: modDigit)    // Help / Insert
 
-        // Function keys
-        case 122: return ssFnKey("P", modDigit: modDigit)   // F1
-        case 120: return ssFnKey("Q", modDigit: modDigit)   // F2
-        case 99:  return ssFnKey("R", modDigit: modDigit)   // F3
-        case 118: return ssFnKey("S", modDigit: modDigit)   // F4
+        // Function keys — F1–F4 in SS3 form (terminfo standard), F5+ have
+        // no SS3 equivalent and use CSI-tilde.
+        case 122: return ss3Sequence("P", modDigit: modDigit) // F1
+        case 120: return ss3Sequence("Q", modDigit: modDigit) // F2
+        case 99:  return ss3Sequence("R", modDigit: modDigit) // F3
+        case 118: return ss3Sequence("S", modDigit: modDigit) // F4
         case 96:  return csiTilde("15", modDigit: modDigit) // F5
         case 97:  return csiTilde("17", modDigit: modDigit) // F6
         case 98:  return csiTilde("18", modDigit: modDigit) // F7
@@ -786,17 +796,18 @@ final class GhosttySurfaceView: NSView {
         return mask == 0 ? nil : mask + 1
     }
 
-    private static func csiArrow(_ final: String, modDigit: Int?) -> String {
-        if let m = modDigit { return "\u{1B}[1;\(m)\(final)" }
-        return "\u{1B}[\(final)"
-    }
-
     private static func csiTilde(_ number: String, modDigit: Int?) -> String {
         if let m = modDigit { return "\u{1B}[\(number);\(m)~" }
         return "\u{1B}[\(number)~"
     }
 
-    private static func ssFnKey(_ final: String, modDigit: Int?) -> String {
+    /// SS3 form (`\eO<final>`) when unmodified; CSI form with modifier digit
+    /// (`\e[1;<m><final>`) when any of Shift/Alt/Ctrl are held. Used for
+    /// arrows, Home/End and F1–F4 — keys whose terminfo entry in
+    /// xterm-256color expects the SS3 form once `smkx` (application cursor
+    /// / keypad mode) is active. Modified versions have no SS3 equivalent
+    /// in any standard terminfo, so we fall back to CSI with mod digit.
+    private static func ss3Sequence(_ final: String, modDigit: Int?) -> String {
         if let m = modDigit { return "\u{1B}[1;\(m)\(final)" }
         return "\u{1B}O\(final)"
     }
