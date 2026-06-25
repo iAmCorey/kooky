@@ -347,15 +347,16 @@ final class KookySettingsModel {
         KookySettings.write(parsed)
         KookyShellIntegration.refreshClaudeCustomSettings(customAgents: customAgents)
         KookyShellIntegration.refreshSshRemoteAgentDetection(enabled: sshRemoteAgentDetection)
-        // Theme-only diff is the trigger for chrome / window-appearance
-        // refresh — font and cursor changes also flow through `reloadConfig`
-        // so libghostty picks up the new values, but they don't change
-        // chrome tokens, so skip the window-appearance pass for them.
+        // Theme or blur diff triggers chrome / window-appearance refresh.
+        // Font and cursor changes also flow through `reloadConfig` so
+        // libghostty picks up the new values, but they don't change chrome
+        // tokens, so skip the window-appearance pass for them.
         let themeChanged = (previousTerminal["theme"] as? String) != (terminal["theme"] as? String)
+        let blurChanged = (previousTerminal["background-blur"] as? String) != (terminal["background-blur"] as? String)
         let terminalChanged = !NSDictionary(dictionary: previousTerminal).isEqual(to: terminal)
         if terminalChanged {
             LibghosttyApp.shared.reloadConfig()
-            if themeChanged {
+            if themeChanged || blurChanged {
                 (NSApp.delegate as? AppDelegate)?.refreshThemeAppearances()
             }
         }

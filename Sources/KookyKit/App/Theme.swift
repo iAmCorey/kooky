@@ -7,9 +7,47 @@ import SwiftUI
 /// own readable foreground / muted / hairline tokens from the same preset.
 @MainActor
 enum Theme {
+    // MARK: Glass mode
+
+    /// Cached glass state — recomputed by `reloadGlass()` on config reload.
+    /// Reading disk on every SwiftUI body evaluation would be a hot-path I/O
+    /// bottleneck, so we compute once and invalidate explicitly.
+    private(set) static var glassEnabled: Bool = computeGlassEnabled()
+
+    /// Recompute the cached glass flag. Called from `refreshThemeAppearances`
+    /// so any config change (theme or blur) picks up the new state.
+    static func reloadGlass() {
+        glassEnabled = computeGlassEnabled()
+    }
+
+    private static func computeGlassEnabled() -> Bool {
+        if let parsed = KookySettings.loadParsed(),
+           let terminal = parsed["terminal"] as? [String: Any],
+           let blur = terminal["background-blur"] as? String {
+            return blur.hasPrefix("macos-glass")
+        }
+        return detectGhosttyGlass()
+    }
+
+    private static func detectGhosttyGlass() -> Bool {
+        let ghosttyConfig = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".config/ghostty/config")
+        guard let raw = try? String(contentsOf: ghosttyConfig, encoding: .utf8) else { return false }
+        return raw.split(whereSeparator: \.isNewline).contains { line in
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            guard !trimmed.hasPrefix("#") else { return false }
+            guard let eq = trimmed.firstIndex(of: "=") else { return false }
+            let key = String(trimmed[..<eq]).trimmingCharacters(in: .whitespaces)
+            let val = String(trimmed[trimmed.index(after: eq)...]).trimmingCharacters(in: .whitespaces)
+            return key == "background-blur" && val.hasPrefix("macos-glass")
+        }
+    }
+
     // MARK: Colors
 
-    static var chromeBackground: Color { Color(nsColor: resolved.chromeBackgroundColor) }
+    static var chromeBackground: Color {
+        glassEnabled ? Color(nsColor: resolved.chromeBackgroundColor).opacity(0.65) : Color(nsColor: resolved.chromeBackgroundColor)
+    }
     static var chromeForeground: Color { Color(nsColor: resolved.foregroundColor) }
     static var chromeMuted: Color { resolved.chromeMuted }
     static var chromeFaint: Color { resolved.chromeFaint }

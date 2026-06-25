@@ -423,9 +423,13 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate 
     /// because the latter touches system-spawned panels (alerts, color
     /// pickers) that aren't ours.
     func refreshThemeAppearances() {
+        Theme.reloadGlass()
         let appearance = Theme.windowAppearance
+        let glass = Theme.glassEnabled
         for controller in windowControllers {
             controller.window?.appearance = appearance
+            controller.window?.isOpaque = !glass
+            controller.window?.backgroundColor = glass ? .clear : nil
         }
         KookySettingsWindowController.shared.window?.appearance = appearance
         UpdatePromptWindowController.shared.window?.appearance = appearance

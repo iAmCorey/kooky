@@ -42,7 +42,9 @@ enum KookySettings {
       "terminal": {
         // "font-family": "JetBrains Mono",
         // "font-size": 13,
-        // "theme": "dracula"
+        // "theme": "dracula",
+        // "background-opacity": 0.85,
+        // "background-blur": "macos-glass-regular"
       }
     }
     """

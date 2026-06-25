@@ -55,6 +55,10 @@ final class KookyWindowController: NSWindowController, NSWindowDelegate {
         // "kooky × N" above our own workspace/tab list. Drop them — the Dock
         // menu's workspace list and ⌘P are the real navigation.
         window.isExcludedFromWindowsMenu = true
+        if Theme.glassEnabled {
+            window.isOpaque = false
+            window.backgroundColor = .clear
+        }
         return window
     }
 
