@@ -319,7 +319,7 @@ private struct ToolCallHistoryPopover: View {
             }
         }
         .frame(width: 520, height: 360)
-        .background(Theme.chromeBackground)
+        .glassChromeBackground()
     }
 
     private var header: some View {

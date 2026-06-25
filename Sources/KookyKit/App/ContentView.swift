@@ -21,13 +21,7 @@ struct ContentView: View {
                 }
             }
         }
-        .background {
-            if Theme.glassEnabled {
-                Rectangle().fill(.ultraThinMaterial).ignoresSafeArea()
-            } else {
-                chromeBackground.ignoresSafeArea()
-            }
-        }
+        .glassChromeBackground()
         .preferredColorScheme(Theme.chromeColorScheme)
         .ignoresSafeArea(.all)
     }

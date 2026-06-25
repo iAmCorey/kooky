@@ -197,6 +197,19 @@ extension View {
     func bracketBorder() -> some View {
         overlay(Rectangle().stroke(Theme.chromeHairline, lineWidth: 1))
     }
+
+    /// Glass-aware chrome background. When glass mode is active, fills with
+    /// `.ultraThinMaterial` so the system blur shows through; otherwise uses
+    /// the opaque `Theme.chromeBackground` color.
+    func glassChromeBackground() -> some View {
+        background {
+            if Theme.glassEnabled {
+                Rectangle().fill(.ultraThinMaterial)
+            } else {
+                Theme.chromeBackground
+            }
+        }
+    }
 }
 
 /// Plain-text `[bracketed]` button. Hairline border, mono, sharp corners.

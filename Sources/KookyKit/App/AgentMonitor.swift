@@ -118,7 +118,7 @@ struct AgentOverviewSidebar: View {
         Group {
             if mode == .compact { compactBody } else { fullBody }
         }
-        .background(Theme.chromeBackground)
+        .glassChromeBackground()
     }
 
     // Full: header + labelled rows.

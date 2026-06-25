@@ -129,7 +129,7 @@ private struct AddTabButton: View {
             }
             .padding(Theme.space1)
             .frame(minWidth: 220)
-            .background(Theme.chromeBackground)
+            .glassChromeBackground()
         }
         .dropDestination(for: String.self) { dropped, _ in
             defer { store.draggingTabId = nil }

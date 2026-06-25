@@ -51,7 +51,7 @@ struct SidebarView: View {
             Spacer(minLength: 0)
         }
         .frame(width: isCompact ? Self.compactWidth : Self.fullWidth)
-        .background(Theme.chromeBackground)
+        .glassChromeBackground()
         .overlay {
             // Drop affordance: tinted fill + hairline stroke, inset from the
             // sidebar edges so the splitter / titlebar don't clip it. Always

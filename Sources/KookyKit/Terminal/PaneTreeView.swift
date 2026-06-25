@@ -343,7 +343,7 @@ private struct PaneStatusBar: View {
         .font(Theme.mono(11))
         .padding(.horizontal, Theme.space2)
         .padding(.vertical, 5)
-        .background(Theme.chromeBackground)
+        .glassChromeBackground()
     }
 
     /// Items that render inside the right-aligned `FlowLayout`. Activity
@@ -852,7 +852,7 @@ private struct KookyMenuList<Content: View>: View {
         }
         .frame(width: width)
         .frame(maxHeight: maxHeight)
-        .background(Theme.chromeBackground)
+        .glassChromeBackground()
     }
 }
 
