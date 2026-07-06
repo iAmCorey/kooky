@@ -119,8 +119,8 @@ private struct AddTabButton: View {
         .popover(isPresented: $isMenuOpen, arrowEdge: .bottom) {
             VStack(alignment: .leading, spacing: 0) {
                 ForEach(AgentTemplate.visibleOrdered(model: KookySettingsModel.shared)) { template in
-                    KookyMenuRow(title: template.title) {
-                        AgentIconView(asset: template.iconAsset, fallbackSymbol: template.symbol, size: 16)
+                    KookyMenuRow(title: menuTitle(for: template)) {
+                        menuIcon(for: template)
                     } action: {
                         store.addTab(in: workspace, pane: pane, template: template)
                         isMenuOpen = false
@@ -138,6 +138,30 @@ private struct AddTabButton: View {
                 store.handleTabDrop(droppedId: id, to: pane, at: pane.tabs.count, in: workspace)
             }
         } isTargeted: { isTargeted = $0 }
+    }
+
+    private func menuTitle(for template: AgentTemplate) -> String {
+        workspace.sshRemoteHost == nil ? template.title : "\(template.title) on SSH"
+    }
+
+    @ViewBuilder
+    private func menuIcon(for template: AgentTemplate) -> some View {
+        if workspace.sshRemoteHost != nil {
+            ZStack(alignment: .bottomTrailing) {
+                AgentIconView(asset: template.iconAsset, fallbackSymbol: template.symbol, size: 16)
+                Image(systemName: "network")
+                    .font(.system(size: 6, weight: .bold))
+                    .foregroundStyle(Theme.chromeBackground)
+                    .frame(width: 10, height: 10)
+                    .background(Circle().fill(Theme.activityRunning.opacity(0.95)))
+                    .overlay(Circle().stroke(Theme.chromeBackground.opacity(0.9), lineWidth: 0.8))
+                    .offset(x: 4, y: 4)
+            }
+            .frame(width: 18, height: 18)
+        } else {
+            AgentIconView(asset: template.iconAsset, fallbackSymbol: template.symbol, size: 16)
+                .frame(width: 18, height: 18)
+        }
     }
 }
 

@@ -167,7 +167,17 @@ final class ShellIntegrationTests: XCTestCase {
         XCTAssertTrue(script.contains("! -t 0 || ! -t 1"), "must skip non-interactive ssh transport")
         XCTAssertTrue(script.contains("remote_command="), "must append exactly one remote shell command")
         XCTAssertTrue(script.contains("sh -lc"), "remote command should run through POSIX sh")
-        XCTAssertTrue(script.contains("exec \"$real\" -t \"$@\" \"$remote_command\""))
+        XCTAssertTrue(script.contains("remote_agent_args"), "remote agent tabs must pass their launch command into the bootstrap")
+        XCTAssertTrue(script.contains("exec \"$real\" -t \"${args[@]}\" \"$remote_command\""))
+    }
+
+    func testSshWrapperRunsRemoteAgentAsExplicitRemoteCommand() {
+        let script = KookyShellIntegration.sshWrapperScript
+
+        XCTAssertTrue(script.contains("_kooky_remote_agent_cmd"), "remote agent argv must be preserved")
+        XCTAssertTrue(script.contains("exec \"\\${SHELL:-/bin/sh}\" -lic $_kooky_remote_payload_q"), "agent tabs should execute through the remote interactive login shell so PATH managers like nvm are loaded")
+        XCTAssertTrue(script.contains("kooky-agent:%s:running"), "direct remote launches should still promote the tab icon")
+        XCTAssertTrue(script.contains("kooky-agent:%s:ended"), "direct remote launches should clear the tab icon when the agent exits")
     }
 
     func testSshWrapperPassesThroughRemoteCommandsAndTransportModes() {
@@ -202,6 +212,7 @@ final class ShellIntegrationTests: XCTestCase {
         XCTAssertTrue(script.contains(#"printf '\033]2;kooky-agent:%s:ended\a'"#))
         XCTAssertTrue(script.contains("export KOOKY_AGENT_MARKERS=1"))
         XCTAssertTrue(script.contains(#"export PATH="$_kooky_bin:$PATH""#))
+        XCTAssertTrue(script.contains("KOOKY_AGENT_LAUNCHED"), "remote bootstrap must run a requested agent before the first prompt")
         XCTAssertTrue(script.contains("> /dev/tty"), "remote markers must target the tty, not the agent's redirected stdout")
         XCTAssertTrue(script.contains("export HISTFILE="), "remote zsh must reset HISTFILE off the ephemeral ZDOTDIR (else remote history is rm -rf'd on logout)")
     }

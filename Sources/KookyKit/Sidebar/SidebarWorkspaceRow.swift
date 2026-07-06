@@ -247,11 +247,23 @@ struct SidebarWorkspaceRow: View {
                     .truncationMode(.middle)
             }
         } else {
-            Text((workspace.workingDirectory.path as NSString).abbreviatingWithTildeInPath)
-                .font(Theme.mono(10.5))
+            if let host = workspace.sshRemoteHost, !host.isEmpty {
+                HStack(spacing: 6) {
+                    Image(systemName: "network")
+                        .font(.system(size: 9, weight: .medium))
+                    Text("ssh \(host)")
+                        .font(Theme.mono(10.5))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
                 .foregroundStyle(Theme.chromeMuted)
-                .lineLimit(1)
-                .truncationMode(.head)
+            } else {
+                Text((workspace.workingDirectory.path as NSString).abbreviatingWithTildeInPath)
+                    .font(Theme.mono(10.5))
+                    .foregroundStyle(Theme.chromeMuted)
+                    .lineLimit(1)
+                    .truncationMode(.head)
+            }
         }
     }
 
@@ -268,6 +280,22 @@ struct SidebarWorkspaceRow: View {
 
     @ViewBuilder
     private func agentIcons(agents: [AgentTemplate]) -> some View {
+        if workspace.sshRemoteHost != nil {
+            ZStack(alignment: .bottomTrailing) {
+                Image(systemName: AgentTemplate.terminal.symbol)
+                    .font(.system(size: 16))
+                    .foregroundStyle(isActive ? Theme.chromeForeground : Theme.chromeMuted)
+                    .frame(width: 20, height: 20)
+                Image(systemName: "network")
+                    .font(.system(size: 7, weight: .bold))
+                    .foregroundStyle(Theme.chromeBackground)
+                    .frame(width: 13, height: 13)
+                    .background(Circle().fill(Theme.activityRunning.opacity(0.95)))
+                    .overlay(Circle().stroke(Theme.chromeBackground.opacity(0.9), lineWidth: 1))
+                    .offset(x: 5, y: 5)
+            }
+            .opacity(isActive ? 1 : 0.9)
+        } else
         // Single leading mark: first non-terminal agent's brand icon, or the
         // Terminal SF Symbol when the workspace only runs plain shells.
         // Multi-agent workspaces get a `+N` badge showing the additional

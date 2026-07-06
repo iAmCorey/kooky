@@ -58,6 +58,12 @@ final class Workspace: Identifiable {
     /// target the wrong path.
     var worktreePath: URL? = nil
 
+    /// SSH destination associated with this workspace. Once set, new plain
+    /// terminal tabs in the workspace auto-start `ssh <host>` so a remote
+    /// project keeps behaving like a cohesive workspace instead of dropping
+    /// each new tab back to the local machine.
+    var sshRemoteHost: String? = nil
+
     /// Single source of truth for "where the worktree actually lives on
     /// disk." For worktree workspaces `worktreePath` wins (pinned at
     /// create time); upgraded state.json files written before the field
@@ -71,6 +77,7 @@ final class Workspace: Identifiable {
         // Mirror the active tab's OSC title so an `ssh` session shows the
         // remote host in the sidebar, not the stale local directory.
         if let reported = activeSession?.terminalTitle, !reported.isEmpty { return reported }
+        if let host = sshRemoteHost, !host.isEmpty { return host }
         if workingDirectory.path == NSHomeDirectory() { return "Home" }
         let last = workingDirectory.lastPathComponent
         return last.isEmpty ? workingDirectory.path : last

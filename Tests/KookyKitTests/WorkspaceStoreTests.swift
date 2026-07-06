@@ -882,6 +882,90 @@ final class WorkspaceStoreTests: XCTestCase {
         XCTAssertEqual(engine(session).startedConfigs.last?.workingDirectory, "/tmp/projectA/sub")
     }
 
+    func testCreateSSHSessionStartsSSHAndMarksWorkspaceRemote() {
+        let store = makeStore()
+        let ws = store.addWorkspace(workingDirectory: projectA)
+
+        guard let session = store.createSSHSession(in: ws, remoteHost: "deploy@example.com") else {
+            return XCTFail("expected ssh session")
+        }
+
+        XCTAssertEqual(ws.sshRemoteHost, "deploy@example.com")
+        XCTAssertEqual(engine(session).startedConfigs.last?.environment["KOOKY_AGENT"], "kooky-ssh 'deploy@example.com'")
+    }
+
+    func testAddWorkspaceWithSSHRemoteHostStartsFirstTabOverSSH() {
+        let store = makeStore()
+
+        let ws = store.addWorkspace(workingDirectory: projectA, sshRemoteHost: "deploy@example.com")
+
+        guard let session = ws.activeSession else { return XCTFail("expected initial session") }
+        XCTAssertEqual(ws.sshRemoteHost, "deploy@example.com")
+        XCTAssertEqual(engine(session).startedConfigs.last?.environment["KOOKY_AGENT"], "kooky-ssh 'deploy@example.com'")
+    }
+
+    func testRemoteLoginMarkerDoesNotPromoteWorkspaceToSSH() {
+        let store = makeStore()
+        let ws = store.addWorkspace(workingDirectory: projectA)
+        let first = firstPane(ws).tabs[0]
+
+        engine(first).emitTitle("\(RemoteLoginMarker.titlePrefix)deploy@example.com")
+        let second = store.addTab(in: ws, template: .terminal)
+
+        XCTAssertNil(first.remoteHost)
+        XCTAssertNil(ws.sshRemoteHost)
+        XCTAssertNil(engine(second).startedConfigs.last?.environment["KOOKY_AGENT"])
+    }
+
+    func testRemoteWorkspaceLaunchesAgentsThroughSSHBootstrap() {
+        let store = makeStore()
+        let ws = store.addWorkspace(workingDirectory: projectA)
+        ws.sshRemoteHost = "deploy@example.com"
+
+        let session = store.addTab(in: ws, template: .claudeCode)
+
+        XCTAssertEqual(engine(session).startedConfigs.last?.environment["KOOKY_AGENT"], "kooky-ssh 'deploy@example.com' -- claude")
+        XCTAssertNil(engine(session).startedConfigs.last?.environment["KOOKY_SSH_REMOTE_AGENT"])
+    }
+
+    func testRemoteWorkspaceSplitStartsSSHForShellTabs() {
+        let store = makeStore()
+        let ws = store.addWorkspace(workingDirectory: projectA)
+        ws.sshRemoteHost = "deploy@example.com"
+        let pane = firstPane(ws)
+
+        guard let newPane = store.splitPane(pane, orientation: .horizontal, in: ws),
+              let session = newPane.activeTab
+        else { return XCTFail("expected split pane") }
+
+        XCTAssertEqual(engine(session).startedConfigs.last?.environment["KOOKY_AGENT"], "kooky-ssh 'deploy@example.com'")
+    }
+
+    func testRestoreRemoteWorkspaceStartsShellTabsOverSSH() {
+        let tab = PersistedTab(
+            id: UUID(),
+            agentId: AgentTemplate.terminal.id,
+            currentDirectoryPath: projectA.path
+        )
+        let pane = PersistedPane(id: UUID(), tabs: [tab], activeTabId: tab.id)
+        let root = PersistedPaneNode(id: pane.id, kind: .pane(pane))
+        let workspace = PersistedWorkspace(
+            id: UUID(),
+            workingDirectoryPath: projectA.path,
+            root: root,
+            activePaneId: pane.id,
+            sshRemoteHost: "deploy@example.com"
+        )
+        let store = makeStore(initial: PersistedState(workspaces: [workspace], activeWorkspaceId: workspace.id))
+
+        guard let session = store.workspaces.first?.activeSession else {
+            return XCTFail("expected restored session")
+        }
+
+        XCTAssertEqual(store.workspaces.first?.sshRemoteHost, "deploy@example.com")
+        XCTAssertEqual(engine(session).startedConfigs.last?.environment["KOOKY_AGENT"], "kooky-ssh 'deploy@example.com'")
+    }
+
     func testAddTabRespectsTemplate() {
         let store = makeStore()
         let ws = store.workspaces[0]

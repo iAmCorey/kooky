@@ -4,6 +4,7 @@ import SwiftUI
 /// `.sheet(item:)` modifier. `.sheet(isPresented:)` per state would race
 /// when switching directly between modes (create → confirm-remove).
 private enum SidebarSheet: Identifiable {
+    case createSSHWorkspace
     case createWorktree(Workspace)
     case confirmRemoveWorktree(Workspace)
     case confirmCloseOthers(WorkspaceStore.BulkRemovalRequest)
@@ -11,6 +12,7 @@ private enum SidebarSheet: Identifiable {
 
     var id: String {
         switch self {
+        case .createSSHWorkspace: return "create-ssh-workspace"
         case .createWorktree(let ws): return "create-\(ws.id.uuidString)"
         case .confirmRemoveWorktree(let ws): return "remove-\(ws.id.uuidString)"
         case .confirmCloseOthers(let req): return "close-others-\(req.keeping.id.uuidString)"
@@ -40,6 +42,7 @@ struct SidebarView: View {
     /// Nil = no sheet. Set by row callbacks and an onChange observer that
     /// watches `store.pendingRemovalRequest` for ⌘⇧W routed via AppDelegate.
     @State private var sheet: SidebarSheet?
+    @State private var isCreateWorkspaceMenuOpen = false
 
     var body: some View {
         let isCompact = store.sidebarMode == .compact
@@ -81,6 +84,14 @@ struct SidebarView: View {
         } isTargeted: { isFolderDropTargeted = $0 }
         .sheet(item: $sheet) { current in
             switch current {
+            case .createSSHWorkspace:
+                CreateSSHWorkspaceSheet(
+                    create: { host in
+                        store.addWorkspace(sshRemoteHost: host)
+                        sheet = nil
+                    },
+                    dismiss: { sheet = nil }
+                )
             case .createWorktree(let source):
                 CreateWorktreeSheet(
                     source: source,
@@ -234,7 +245,10 @@ struct SidebarView: View {
                 size: 28,
                 help: "New workspace"
             ) {
-                store.addWorkspace()
+                isCreateWorkspaceMenuOpen.toggle()
+            }
+            .popover(isPresented: $isCreateWorkspaceMenuOpen, arrowEdge: .trailing) {
+                createWorkspaceMenu
             }
             .padding(.top, Theme.space3)
             .padding(.bottom, Theme.space2)
@@ -250,13 +264,34 @@ struct SidebarView: View {
                     size: 28,
                     help: "New workspace"
                 ) {
-                    store.addWorkspace()
+                    isCreateWorkspaceMenuOpen.toggle()
+                }
+                .popover(isPresented: $isCreateWorkspaceMenuOpen, arrowEdge: .bottom) {
+                    createWorkspaceMenu
                 }
             }
             .padding(.horizontal, Theme.space4)
             .padding(.top, Theme.space3)
             .padding(.bottom, Theme.space2)
         }
+    }
+
+    private var createWorkspaceMenu: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            KookyMenuRow(title: "Local Workspace") {
+                isCreateWorkspaceMenuOpen = false
+                store.addWorkspace()
+            }
+            KookyMenuRow(title: "SSH Workspace…") {
+                isCreateWorkspaceMenuOpen = false
+                DispatchQueue.main.async {
+                    sheet = .createSSHWorkspace
+                }
+            }
+        }
+        .padding(Theme.space1)
+        .frame(minWidth: 220)
+        .background(Theme.chromeBackground)
     }
 
     private func list(isCompact: Bool, proxy: ScrollViewProxy) -> some View {

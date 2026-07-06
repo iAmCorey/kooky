@@ -354,6 +354,10 @@ enum KookyShellIntegration {
         writeWrapper(name: "pi", script: bracketWrapperScript(slug: "pi"))
         writeWrapper(name: "kiro-cli", script: bracketWrapperScript(slug: "kiro-cli"))
         writeWrapper(name: "droid", script: bracketWrapperScript(slug: "droid"))
+        // Always-available private SSH wrapper for SSH workspaces. The public
+        // `ssh` shim below remains user-setting gated because it changes manual
+        // shell behaviour; `kooky-ssh` is only invoked by Kooky-owned tabs.
+        writeWrapper(name: "kooky-ssh", script: sshWrapperScript)
         refreshSshRemoteAgentDetection(enabled: sshRemoteAgentDetection)
 
         let hookCmd = kookyHookBinaryPath
@@ -863,6 +867,7 @@ enum KookyShellIntegration {
         fi
 
         args=("$@")
+        remote_agent_args=()
         skip_next=0
         destination_seen=0
         remote_command_seen=0
@@ -916,6 +921,11 @@ enum KookyShellIntegration {
                 destination_seen=1
                 continue
             fi
+            if [[ "$arg" == "--" && $((i + 1)) -lt ${#args[@]} ]]; then
+                remote_agent_args=("${args[@]:$((i + 1))}")
+                args=("${args[@]:0:$i}")
+                break
+            fi
             remote_command_seen=1
             break
         done
@@ -927,7 +937,24 @@ enum KookyShellIntegration {
         printf '\\033]2;\(RemoteLoginMarker.titlePrefix)%s\\a' "$dest" > /dev/tty 2>/dev/null
 
         remote_command=\(quote(remoteCommand))
-        exec "$real" -t "$@" "$remote_command"
+        if (( ${#remote_agent_args[@]} )); then
+            _kooky_remote_agent_bin="${remote_agent_args[0]}"
+            printf -v _kooky_remote_agent_cmd '%q ' "${remote_agent_args[@]}"
+            _kooky_remote_agent_cmd="${_kooky_remote_agent_cmd% }"
+            printf -v _kooky_remote_agent_bin_q '%q' "$_kooky_remote_agent_bin"
+            _kooky_remote_payload='export KOOKY_AGENT_MARKERS=1
+            printf '"'"'\\033]2;kooky-agent:%s:running\\a'"'"' '"$_kooky_remote_agent_bin_q"' > /dev/tty 2>/dev/null
+            '"$_kooky_remote_agent_cmd"'
+            _kooky_status=$?
+            printf '"'"'\\033]2;kooky-agent:%s:ended\\a'"'"' '"$_kooky_remote_agent_bin_q"' > /dev/tty 2>/dev/null
+            exec "${SHELL:-/bin/sh}" -l'
+            printf -v _kooky_remote_payload_q '%q' "$_kooky_remote_payload"
+            remote_command="exec \"\\${SHELL:-/bin/sh}\" -lic $_kooky_remote_payload_q"
+        elif [[ -n "${KOOKY_SSH_REMOTE_AGENT:-}" ]]; then
+            printf -v _kooky_remote_agent_env '%q' "$KOOKY_SSH_REMOTE_AGENT"
+            remote_command="KOOKY_AGENT=${_kooky_remote_agent_env} $remote_command"
+        fi
+        exec "$real" -t "${args[@]}" "$remote_command"
         """
     }()
 
@@ -935,6 +962,21 @@ enum KookyShellIntegration {
     /// binaries into a temp dir on the remote, then starts the user's shell
     /// with that dir prepended after normal rc replay. The temp dir is removed
     /// when the remote shell exits, so this does not persist files on servers.
+    private static let remoteAgentLaunchBlock = #"""
+        if [ -n "${KOOKY_AGENT:-}" ] && [ -z "${KOOKY_AGENT_LAUNCHED:-}" ]; then
+            export KOOKY_AGENT_LAUNCHED=1
+            _kooky_cmd="$KOOKY_AGENT"
+            _kooky_agent_bin="${_kooky_cmd%% *}"
+            unset KOOKY_AGENT
+            eval "$_kooky_cmd"
+            _kooky_status=$?
+            if [ -n "${KOOKY_AGENT_MARKERS:-}" ]; then
+                printf '\033]2;kooky-agent:%s:ended\a' "$_kooky_agent_bin" > /dev/tty 2>/dev/null
+            fi
+            ( exit $_kooky_status )
+        fi
+        """#
+
     static let remoteAgentBootstrapScript: String = {
         let slugs = remoteAgentMarkerSlugs.map(quote).joined(separator: " ")
         return #"""
@@ -1004,6 +1046,7 @@ enum KookyShellIntegration {
         [[ -r "\${ZDOTDIR:-\$HOME}/.zshrc" ]] && source "\${ZDOTDIR:-\$HOME}/.zshrc"
         export KOOKY_AGENT_MARKERS=1
         export PATH="$_kooky_bin:\$PATH"
+        \#(remoteAgentLaunchBlock)
         KOOKY_ZSHRC
                 KOOKY_ORIGINAL_ZDOTDIR="${ZDOTDIR:-}" ZDOTDIR="$_kooky_root/zsh" zsh -l
                 ;;
@@ -1024,12 +1067,14 @@ enum KookyShellIntegration {
         unset _kooky_login_rc_loaded
         export KOOKY_AGENT_MARKERS=1
         export PATH="$_kooky_bin:\$PATH"
+        \#(remoteAgentLaunchBlock)
         KOOKY_BASHRC
                 bash --rcfile "$_kooky_root/bashrc" -i
                 ;;
             *)
                 export KOOKY_AGENT_MARKERS=1
                 export PATH="$_kooky_bin:$PATH"
+                \#(remoteAgentLaunchBlock)
                 "${SHELL:-/bin/sh}" -l
                 ;;
         esac

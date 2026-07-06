@@ -204,16 +204,19 @@ final class WorkspaceStore {
         workingDirectory: URL? = nil,
         worktreeParent: Workspace? = nil,
         worktreeBranch: String? = nil,
-        template: AgentTemplate = .terminal
+        template: AgentTemplate = .terminal,
+        sshRemoteHost: String? = nil
     ) -> Workspace {
         let dir = workingDirectory
             ?? active?.workingDirectory
             ?? URL(fileURLWithPath: NSHomeDirectory())
+        let remoteHost = normalizedSSHRemoteHost(sshRemoteHost)
         let pane = Pane()
         let root = PaneNode(pane: pane)
         let workspace = Workspace(workingDirectory: dir, root: root)
         workspace.worktreeParentId = worktreeParent?.id
         workspace.worktreeBranch = worktreeBranch
+        workspace.sshRemoteHost = remoteHost
         // Pin worktreePath at create time so `git worktree remove` always
         // targets the disk root, no matter where the user cd's later.
         // `.standardizedFileURL` resolves `/tmp` → `/private/tmp` etc. so
@@ -222,7 +225,11 @@ final class WorkspaceStore {
         if worktreeParent != nil {
             workspace.worktreePath = dir.standardizedFileURL
         }
-        let session = spawnSession(template: template, initialCwd: dir)
+        let session = spawnSession(
+            template: template,
+            initialCwd: dir,
+            sshRemoteHost: sshRemoteHostForNewSession(remoteHost, template: template)
+        )
         wireSessionCallbacks(engine: session.engine, session: session, workspace: workspace)
         pane.tabs.append(session)
         pane.activeTabId = session.id
@@ -665,7 +672,13 @@ final class WorkspaceStore {
         let cwd = initialCwd
             ?? template.extraCwd.map { resolvedSpawnCwd(($0 as NSString).expandingTildeInPath) }
             ?? workspace.workingDirectory
-        let session = spawnSession(template: template, initialCwd: cwd, conversationId: conversationId, initialPrompt: initialPrompt)
+        let session = spawnSession(
+            template: template,
+            initialCwd: cwd,
+            conversationId: conversationId,
+            initialPrompt: initialPrompt,
+            sshRemoteHost: sshRemoteHostForNewSession(in: workspace, template: template)
+        )
         wireSessionCallbacks(engine: session.engine, session: session, workspace: workspace)
         target.tabs.append(session)
         target.activeTabId = session.id
@@ -674,6 +687,20 @@ final class WorkspaceStore {
         }
         scheduleSave()
         return session
+    }
+
+    /// Creates a terminal tab that immediately connects to `remoteHost`, and
+    /// marks the workspace as remote so subsequent plain terminal tabs follow.
+    @discardableResult
+    func createSSHSession(
+        in workspace: Workspace,
+        pane: Pane? = nil,
+        remoteHost: String,
+        initialCwd: URL? = nil
+    ) -> Session? {
+        guard let host = normalizedSSHRemoteHost(remoteHost) else { return nil }
+        workspace.sshRemoteHost = host
+        return addTab(in: workspace, pane: pane, template: .terminal, initialCwd: initialCwd)
     }
 
     @discardableResult
@@ -996,7 +1023,11 @@ final class WorkspaceStore {
         guard case .pane(let existing) = leafNode.content else { return nil }
         let template = existing.activeTab?.agent ?? .terminal
         let cwd = existing.activeTab?.currentDirectory ?? workspace.workingDirectory
-        let newSession = spawnSession(template: template, initialCwd: cwd)
+        let newSession = spawnSession(
+            template: template,
+            initialCwd: cwd,
+            sshRemoteHost: sshRemoteHostForNewSession(in: workspace, template: template)
+        )
         wireSessionCallbacks(engine: newSession.engine, session: newSession, workspace: workspace)
         let newPane = Pane(tabs: [newSession], activeTabId: newSession.id)
         let firstChild = PaneNode(pane: existing)
@@ -1232,7 +1263,7 @@ final class WorkspaceStore {
     private func restore(from state: PersistedState) {
         let fm = FileManager.default
         for ws in state.workspaces {
-            guard let root = restorePane(ws.root, fm: fm) else { continue }
+            guard let root = restorePane(ws.root, fm: fm, sshRemoteHost: ws.sshRemoteHost) else { continue }
             let workspace = Workspace(
                 id: ws.id,
                 workingDirectory: URL(fileURLWithPath: ws.workingDirectoryPath),
@@ -1242,6 +1273,7 @@ final class WorkspaceStore {
             workspace.worktreeParentId = ws.worktreeParentId
             workspace.worktreeBranch = ws.worktreeBranch
             workspace.worktreePath = ws.worktreePath.map { URL(fileURLWithPath: $0) }
+            workspace.sshRemoteHost = ws.sshRemoteHost
             // Wire engines now that workspace is constructed (engines need
             // the workspace ref for cwd-sync callbacks).
             for pane in workspace.root.allPanes {
@@ -1263,7 +1295,7 @@ final class WorkspaceStore {
         rightSidebarMode = state.rightSidebarMode ?? .hidden
     }
 
-    private func restorePane(_ persisted: PersistedPaneNode, fm: FileManager) -> PaneNode? {
+    private func restorePane(_ persisted: PersistedPaneNode, fm: FileManager, sshRemoteHost: String? = nil) -> PaneNode? {
         switch persisted.kind {
         case .pane(let p):
             let pane = Pane(id: p.id)
@@ -1273,7 +1305,8 @@ final class WorkspaceStore {
                     template: agent,
                     initialCwd: resolvedSpawnCwd(tab.currentDirectoryPath),
                     sessionId: tab.id,
-                    conversationId: tab.conversationId
+                    conversationId: tab.conversationId,
+                    sshRemoteHost: sshRemoteHostForNewSession(sshRemoteHost, template: agent)
                 )
                 session.customTitle = tab.customTitle
                 pane.tabs.append(session)
@@ -1283,8 +1316,8 @@ final class WorkspaceStore {
                 : pane.tabs.first?.id
             return PaneNode(pane: pane)
         case .split(let orientation, let first, let second, let fraction):
-            guard let firstChild = restorePane(first, fm: fm),
-                  let secondChild = restorePane(second, fm: fm) else { return nil }
+            guard let firstChild = restorePane(first, fm: fm, sshRemoteHost: sshRemoteHost),
+                  let secondChild = restorePane(second, fm: fm, sshRemoteHost: sshRemoteHost) else { return nil }
             return PaneNode(
                 id: persisted.id,
                 content: .split(
@@ -1300,7 +1333,20 @@ final class WorkspaceStore {
     /// Spawns the engine + Session. Caller wires `onPwdChange` / `onFocus`
     /// after a workspace ref is available — `restore` builds sessions before
     /// the workspace exists, so callbacks can't capture it here.
-    private func spawnSession(template: AgentTemplate, initialCwd: URL, sessionId: UUID = UUID(), conversationId: String? = nil, initialPrompt: String? = nil) -> Session {
+    private func sshRemoteHostForNewSession(in workspace: Workspace, template: AgentTemplate) -> String? {
+        sshRemoteHostForNewSession(workspace.sshRemoteHost, template: template)
+    }
+
+    private func sshRemoteHostForNewSession(_ host: String?, template: AgentTemplate) -> String? {
+        normalizedSSHRemoteHost(host)
+    }
+
+    private func normalizedSSHRemoteHost(_ raw: String?) -> String? {
+        let trimmed = raw?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    private func spawnSession(template: AgentTemplate, initialCwd: URL, sessionId: UUID = UUID(), conversationId: String? = nil, initialPrompt: String? = nil, sshRemoteHost: String? = nil) -> Session {
         let engine = engineFactory()
         // Resume gated by user setting — `resumeConversations` flips this off
         // when the user wants every Claude tab to start fresh without
@@ -1314,6 +1360,12 @@ final class WorkspaceStore {
             resumeId: resumeId,
             initialPrompt: initialPrompt
         )
+        let remoteAgentCommand = template.isShell ? nil : config.environment["KOOKY_AGENT"]
+        if let host = normalizedSSHRemoteHost(sshRemoteHost) {
+            config = AgentTemplate.terminal.makeSessionConfig()
+            let remoteAgentFragment = remoteAgentCommand.map { " -- \($0)" } ?? ""
+            config.environment["KOOKY_AGENT"] = "kooky-ssh \(KookyShellIntegration.quote(host))\(remoteAgentFragment)"
+        }
         config.workingDirectory = initialCwd.path
         // A Claude-Code-based custom agent with an env block hands `claude`
         // its endpoint / key via a per-agent Claude settings file (written by
@@ -1385,11 +1437,11 @@ final class WorkspaceStore {
         }
         engine.onTitleChange = { [weak self, weak session] title in
             guard let session else { return }
-            // A `kooky-remote-login:*` title is an ssh-destination marker, not
-            // a visible title — record the host and stop before it reaches
-            // `terminalTitle`. Cleared on command-finished (ssh exit).
-            if let host = RemoteLoginMarker.parseTitle(title) {
-                session.remoteHost = host
+            // A `kooky-remote-login:*` title is an internal ssh marker, not a
+            // visible title. SSH state belongs to explicitly created SSH
+            // workspaces only; a manually typed ssh command must not promote a
+            // local workspace or tab into remote mode.
+            if RemoteLoginMarker.parseTitle(title) != nil {
                 return
             }
             // Any `kooky-agent:*` title is a status marker, never a visible
