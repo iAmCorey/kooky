@@ -17,6 +17,7 @@ final class TestEngine: TerminalEngine {
     var onSearchEnd: (() -> Void)?
     var onSearchTotal: ((Int) -> Void)?
     var onSearchSelected: ((Int) -> Void)?
+    var remoteHostProvider: (() -> String?)?
     var foregroundPid: pid_t? { nil }
 
     private(set) var startedConfigs: [TerminalSessionConfig] = []

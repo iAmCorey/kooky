@@ -9,6 +9,8 @@ import Foundation
 /// Libghostty's `GHOSTTY_ACTION_PWD` then fires whenever the shell `cd`s, which
 /// is what `WorkspaceStore` listens to for cwd-tracking.
 enum KookyShellIntegration {
+    nonisolated(unsafe) static var remotePasteProcessRunnerOverride: ((String, [String], TimeInterval) -> Bool)?
+
     /// POSIX single-quote wrap (escape internal `'` by `'\''`). Safe for
     /// arbitrary file paths and argv-style values; reused by anyone that
     /// builds a shell-command string for `engine.sendInput` or PTY spawn.
@@ -68,6 +70,10 @@ enum KookyShellIntegration {
     ///    `pb.string(forType: .string)` for a fileURL returns just the
     ///    last path component (the filename), which agents can't open.
     ///    Warp / iTerm2 both do this; matches user expectation.
+    /// When `remoteHost` is present, file URLs and raw image cache files are
+    /// uploaded via `ssh`/`scp` into `/tmp/kooky-pastes-*` first, and the
+    /// returned payload is the remote path. Plain strings stay local text.
+    ///
     /// 2. **Raw image data** (`Cmd+Ctrl+Shift+4` screenshot to
     ///    clipboard, Preview "Edit → Copy" on an open image) →
     ///    spilled to `~/Library/Caches/kooky/pastes/screenshot-<ts>.png`,
@@ -76,22 +82,156 @@ enum KookyShellIntegration {
     ///    would dump base64 garbage into the prompt.
     /// 3. **Plain string** → raw, no escaping (we'd corrupt `ls -la`).
     ///    `bracketed-paste` mode already isolates it from shell parsing.
-    static func readTerminalPasteText(from pb: NSPasteboard) -> String? {
+    static func readTerminalPasteText(from pb: NSPasteboard, remoteHost: String? = nil) -> String? {
+        let remoteHost = normalizedRemotePasteHost(remoteHost)
         if pb.availableType(from: [.fileURL]) != nil,
            let urls = pb.readObjects(forClasses: [NSURL.self]) as? [URL],
            let joined = backslashEscapedFileURLs(urls)
         {
+            if let remoteHost {
+                return remotePasteText(for: urls, remoteHost: remoteHost)
+            }
             return joined
         }
         if pb.availableType(from: [.png, .tiff]) != nil,
            let cached = writePasteboardImageToCache(pb)
         {
+            if let remoteHost {
+                return remotePasteText(for: [cached], remoteHost: remoteHost)
+            }
             return backslashEscape(cached.path)
         }
         if let text = pb.string(forType: .string), !text.isEmpty {
             return text
         }
         return nil
+    }
+
+    private static func normalizedRemotePasteHost(_ raw: String?) -> String? {
+        let trimmed = raw?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    private struct RemotePasteFile {
+        let localURL: URL
+        let remotePath: String
+    }
+
+    private static func remotePasteText(for urls: [URL], remoteHost: String) -> String? {
+        let localURLs = urls.filter(\.isFileURL)
+        guard !localURLs.isEmpty else { return nil }
+
+        let remoteDir = "/tmp/kooky-pastes-\(remotePasteDirectoryTimestamp())-\(UUID().uuidString.prefix(8))"
+        let files = remotePasteFiles(for: localURLs, remoteDir: remoteDir)
+        guard !files.isEmpty else { return nil }
+
+        guard runRemotePasteProcess(
+            "/usr/bin/ssh",
+            remotePasteSSHOptions + [remoteHost, "mkdir -p -- \(quote(remoteDir))"],
+            timeout: 20
+        ) else {
+            return nil
+        }
+
+        for file in files {
+            var isDirectory: ObjCBool = false
+            FileManager.default.fileExists(atPath: file.localURL.path, isDirectory: &isDirectory)
+            var args = remotePasteSSHOptions
+            if isDirectory.boolValue { args.append("-r") }
+            args.append(contentsOf: [file.localURL.path, "\(remoteHost):\(file.remotePath)"])
+            guard runRemotePasteProcess("/usr/bin/scp", args, timeout: 60) else {
+                return nil
+            }
+        }
+
+        return files.map { backslashEscape($0.remotePath) }.joined(separator: " ")
+    }
+
+    private static let remotePasteSSHOptions = [
+        "-o", "BatchMode=yes",
+        "-o", "ConnectTimeout=10",
+    ]
+
+    private static func remotePasteFiles(for urls: [URL], remoteDir: String) -> [RemotePasteFile] {
+        var counts: [String: Int] = [:]
+        return urls.map { url in
+            let base = sanitizedRemotePasteFilename(url.lastPathComponent)
+            let seen = counts[base, default: 0] + 1
+            counts[base] = seen
+            let remoteName: String
+            if seen == 1 {
+                remoteName = base
+            } else {
+                let ns = base as NSString
+                let ext = ns.pathExtension
+                let stem = ext.isEmpty ? base : ns.deletingPathExtension
+                remoteName = ext.isEmpty ? "\(stem)-\(seen)" : "\(stem)-\(seen).\(ext)"
+            }
+            return RemotePasteFile(localURL: url, remotePath: "\(remoteDir)/\(remoteName)")
+        }
+    }
+
+    private static func sanitizedRemotePasteFilename(_ raw: String) -> String {
+        let fallback = "paste"
+        let name = raw.isEmpty ? fallback : raw
+        var result = ""
+        result.reserveCapacity(name.count)
+        for scalar in name.unicodeScalars {
+            switch scalar.value {
+            case 48...57, 65...90, 97...122: result.unicodeScalars.append(scalar)
+            case 45, 46, 95: result.unicodeScalars.append(scalar)
+            default: result.append("_")
+            }
+        }
+        let trimmed = result.trimmingCharacters(in: CharacterSet(charactersIn: "._-"))
+        return trimmed.isEmpty ? fallback : trimmed
+    }
+
+    private static func remotePasteDirectoryTimestamp() -> String {
+        let fmt = DateFormatter()
+        fmt.dateFormat = "yyyyMMdd-HHmmss"
+        fmt.locale = Locale(identifier: "en_US_POSIX")
+        fmt.timeZone = .current
+        return fmt.string(from: Date())
+    }
+
+    private static func runRemotePasteProcess(_ executable: String, _ arguments: [String], timeout: TimeInterval) -> Bool {
+        if let runner = remotePasteProcessRunnerOverride {
+            return runner(executable, arguments, timeout)
+        }
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: executable)
+        process.arguments = arguments
+        let stdout = Pipe()
+        let stderr = Pipe()
+        process.standardOutput = stdout
+        process.standardError = stderr
+        do {
+            try process.run()
+        } catch {
+            NSLog("kooky: remote paste failed to launch \(executable): \(error.localizedDescription)")
+            return false
+        }
+
+        let deadline = Date().addingTimeInterval(timeout)
+        while process.isRunning && Date() < deadline {
+            Thread.sleep(forTimeInterval: 0.05)
+        }
+        if process.isRunning {
+            process.terminate()
+            NSLog("kooky: remote paste timed out running \(executable)")
+            return false
+        }
+        guard process.terminationStatus == 0 else {
+            let data = stderr.fileHandleForReading.readDataToEndOfFile()
+            let message = String(data: data, encoding: .utf8)?
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            NSLog("kooky: remote paste \(executable) failed (\(process.terminationStatus)): \(message)")
+            return false
+        }
+        _ = stdout.fileHandleForReading.readDataToEndOfFile()
+        return true
     }
 
     /// Cheap probe used by the right-click "Paste" menu's enabled gate.

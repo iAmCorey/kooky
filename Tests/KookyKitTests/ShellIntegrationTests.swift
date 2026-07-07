@@ -604,6 +604,48 @@ final class ShellIntegrationTests: XCTestCase {
         )
     }
 
+    func testReadTerminalPasteTextUploadsFileURLForRemoteHost() throws {
+        var commands: [(String, [String], TimeInterval)] = []
+        KookyShellIntegration.remotePasteProcessRunnerOverride = { executable, arguments, timeout in
+            commands.append((executable, arguments, timeout))
+            return true
+        }
+        defer { KookyShellIntegration.remotePasteProcessRunnerOverride = nil }
+
+        let pb = makeIsolatedPasteboard()
+        let url = URL(fileURLWithPath: "/tmp/some folder/image one.png")
+        pb.clearContents()
+        pb.writeObjects([url as NSURL])
+
+        let pasted = try XCTUnwrap(
+            KookyShellIntegration.readTerminalPasteText(from: pb, remoteHost: "deploy@example.com")
+        )
+
+        XCTAssertTrue(pasted.hasPrefix("/tmp/kooky-pastes-"))
+        XCTAssertTrue(pasted.hasSuffix("/image_one.png"))
+        XCTAssertFalse(pasted.contains("/tmp/some\\ folder"))
+        XCTAssertEqual(commands.count, 2)
+        XCTAssertEqual(commands[0].0, "/usr/bin/ssh")
+        XCTAssertEqual(commands[0].1[4], "deploy@example.com")
+        XCTAssertTrue(commands[0].1[5].contains("mkdir -p -- '/tmp/kooky-pastes-"))
+        XCTAssertEqual(commands[1].0, "/usr/bin/scp")
+        XCTAssertEqual(commands[1].1[4], "/tmp/some folder/image one.png")
+        XCTAssertTrue(commands[1].1[5].hasPrefix("deploy@example.com:/tmp/kooky-pastes-"))
+        XCTAssertTrue(commands[1].1[5].hasSuffix("/image_one.png"))
+    }
+
+    func testReadTerminalPasteTextDoesNotReturnLocalPathWhenRemoteUploadFails() {
+        KookyShellIntegration.remotePasteProcessRunnerOverride = { _, _, _ in false }
+        defer { KookyShellIntegration.remotePasteProcessRunnerOverride = nil }
+
+        let pb = makeIsolatedPasteboard()
+        let url = URL(fileURLWithPath: "/tmp/real-image.png")
+        pb.clearContents()
+        pb.writeObjects([url as NSURL])
+
+        XCTAssertNil(KookyShellIntegration.readTerminalPasteText(from: pb, remoteHost: "deploy@example.com"))
+    }
+
     func testReadTerminalPasteTextReturnsNilForEmptyPasteboard() {
         let pb = makeIsolatedPasteboard()
         pb.clearContents()

@@ -926,6 +926,19 @@ final class WorkspaceStoreTests: XCTestCase {
 
         XCTAssertEqual(engine(session).startedConfigs.last?.environment["KOOKY_AGENT"], "kooky-ssh 'deploy@example.com' -- claude")
         XCTAssertNil(engine(session).startedConfigs.last?.environment["KOOKY_SSH_REMOTE_AGENT"])
+        XCTAssertEqual(session.activityState, .running)
+    }
+
+    func testRemoteWorkspaceLaunchesCodexAsRunningBeforeMarkerArrives() {
+        let store = makeStore()
+        let ws = store.addWorkspace(workingDirectory: projectA)
+        ws.sshRemoteHost = "deploy@example.com"
+
+        let session = store.addTab(in: ws, template: .codex)
+
+        XCTAssertEqual(engine(session).startedConfigs.last?.environment["KOOKY_AGENT"], "kooky-ssh 'deploy@example.com' -- codex")
+        XCTAssertEqual(session.displayAgent.id, AgentTemplate.codex.id)
+        XCTAssertEqual(session.activityState, .running)
     }
 
     func testRemoteWorkspaceSplitStartsSSHForShellTabs() {
@@ -939,6 +952,7 @@ final class WorkspaceStoreTests: XCTestCase {
         else { return XCTFail("expected split pane") }
 
         XCTAssertEqual(engine(session).startedConfigs.last?.environment["KOOKY_AGENT"], "kooky-ssh 'deploy@example.com'")
+        XCTAssertEqual(session.activityState, .idle)
     }
 
     func testRestoreRemoteWorkspaceStartsShellTabsOverSSH() {

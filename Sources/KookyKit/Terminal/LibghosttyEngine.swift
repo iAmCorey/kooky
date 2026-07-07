@@ -269,6 +269,10 @@ final class LibghosttyEngine: TerminalEngine {
         get { surfaceView.onSearchSelected }
         set { surfaceView.onSearchSelected = newValue }
     }
+    var remoteHostProvider: (() -> String?)? {
+        get { surfaceView.remoteHostProvider }
+        set { surfaceView.remoteHostProvider = newValue }
+    }
     var foregroundPid: pid_t? {
         guard let surface = surfaceView.surface else { return nil }
         let pid = pid_t(ghostty_surface_foreground_pid(surface))
@@ -405,6 +409,7 @@ final class GhosttySurfaceView: NSView {
     var onSearchEnd: (() -> Void)?
     var onSearchTotal: ((Int) -> Void)?
     var onSearchSelected: ((Int) -> Void)?
+    var remoteHostProvider: (() -> String?)?
     /// Read in `viewDidMoveToWindow` to gate the mount-time first-responder
     /// grab; set by `TerminalView` from the pane's active state. See
     /// `TerminalEngine.grabsFocusOnMount` for the why (issue #24).
@@ -817,7 +822,10 @@ final class GhosttySurfaceView: NSView {
         // spilled to a cache PNG so agents can open it as a path).
         if cmdOnly,
            event.charactersIgnoringModifiers?.lowercased() == "v",
-           let pasted = KookyShellIntegration.readTerminalPasteText(from: .general),
+           let pasted = KookyShellIntegration.readTerminalPasteText(
+               from: .general,
+               remoteHost: remoteHostProvider?()
+           ),
            !pasted.isEmpty
         {
             paste(pasted)

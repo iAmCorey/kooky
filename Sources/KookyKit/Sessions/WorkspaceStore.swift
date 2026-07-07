@@ -1361,10 +1361,12 @@ final class WorkspaceStore {
             initialPrompt: initialPrompt
         )
         let remoteAgentCommand = template.isShell ? nil : config.environment["KOOKY_AGENT"]
+        var launchedRemoteAgent = false
         if let host = normalizedSSHRemoteHost(sshRemoteHost) {
             config = AgentTemplate.terminal.makeSessionConfig()
             let remoteAgentFragment = remoteAgentCommand.map { " -- \($0)" } ?? ""
             config.environment["KOOKY_AGENT"] = "kooky-ssh \(KookyShellIntegration.quote(host))\(remoteAgentFragment)"
+            launchedRemoteAgent = remoteAgentCommand != nil
         }
         config.workingDirectory = initialCwd.path
         // A Claude-Code-based custom agent with an env block hands `claude`
@@ -1377,13 +1379,20 @@ final class WorkspaceStore {
             KookyShellIntegration.kookyEnvironment(for: sessionId, claudeCustomSettingsAgentId: claudeCustomId)
         ) { _, new in new }
         engine.start(config: config)
-        return Session(
+        let session = Session(
             id: sessionId,
             engine: engine,
             currentDirectory: initialCwd,
             agent: template,
             conversationId: conversationId
         )
+        if let host = normalizedSSHRemoteHost(sshRemoteHost) {
+            session.remoteHost = host
+        }
+        if launchedRemoteAgent {
+            session.activityState = .running
+        }
+        return session
     }
 
     private func wireSessionCallbacks(engine: any TerminalEngine, session: Session, workspace: Workspace) {
@@ -1394,6 +1403,9 @@ final class WorkspaceStore {
         refreshEnvironment(for: session)
         installGitWatcher(for: session)
         startCodexUsageIfNeeded(for: session)
+        engine.remoteHostProvider = { [weak session, weak workspace] in
+            session?.remoteHost ?? workspace?.sshRemoteHost
+        }
         engine.onPwdChange = { [weak self, weak session, weak workspace] pwd in
             guard let session else { return }
             let url = URL(fileURLWithPath: pwd)

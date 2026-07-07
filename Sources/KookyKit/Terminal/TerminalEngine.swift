@@ -80,6 +80,9 @@ protocol TerminalEngine: AnyObject {
     var onSearchEnd: (() -> Void)? { get set }
     var onSearchTotal: ((Int) -> Void)? { get set }
     var onSearchSelected: ((Int) -> Void)? { get set }
+    /// Returns the active SSH destination for paste-time local-file transfer.
+    /// Nil means paste behaves as a local terminal paste.
+    var remoteHostProvider: (() -> String?)? { get set }
     /// PID of the foreground process inside the surface. Used only as an
     /// initial/fallback env snapshot before the prompt hook reports live
     /// `VIRTUAL_ENV` / `NVM_BIN`.

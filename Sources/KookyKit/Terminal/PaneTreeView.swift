@@ -810,7 +810,10 @@ private struct PaneContextMenu: View {
             }
             KookyMenuRow(title: "Paste", shortcut: "⌘V", isDisabled: !pasteAvailable) {
                 isPresented = false
-                if let text = KookyShellIntegration.readTerminalPasteText(from: .general),
+                if let text = KookyShellIntegration.readTerminalPasteText(
+                    from: .general,
+                    remoteHost: session.remoteHost ?? workspace.sshRemoteHost
+                ),
                    !text.isEmpty
                 {
                     session.engine.paste(text)
@@ -1013,6 +1016,7 @@ private struct PaneComposerBar: View {
         VStack(alignment: .leading, spacing: 6) {
             ComposerTextView(
                 text: $session.composerDraft,
+                remoteHostProvider: { session.remoteHost },
                 onSend: send,
                 onCancel: close
             )
@@ -1097,10 +1101,15 @@ private struct PaneComposerBar: View {
 /// them. Plain text falls through to NSTextView's native paste, keeping undo
 /// coalescing + smart behaviors.
 private final class ComposerNSTextView: NSTextView {
+    var remoteHostProvider: (() -> String?)?
+
     override func paste(_ sender: Any?) {
         let pb = NSPasteboard.general
         if pb.availableType(from: [.fileURL, .png, .tiff]) != nil,
-           let text = KookyShellIntegration.readTerminalPasteText(from: pb),
+           let text = KookyShellIntegration.readTerminalPasteText(
+               from: pb,
+               remoteHost: remoteHostProvider?()
+           ),
            !text.isEmpty {
             insertText(text, replacementRange: selectedRange())
             return
@@ -1115,11 +1124,13 @@ private final class ComposerNSTextView: NSTextView {
 /// intercepts the Return command itself, before any newline is inserted.
 private struct ComposerTextView: NSViewRepresentable {
     @Binding var text: String
+    var remoteHostProvider: (() -> String?)?
     var onSend: () -> Void
     var onCancel: () -> Void
 
     func makeNSView(context: Context) -> NSScrollView {
         let tv = ComposerNSTextView(frame: .zero)
+        tv.remoteHostProvider = remoteHostProvider
         tv.minSize = .zero
         tv.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
         tv.isVerticallyResizable = true
@@ -1157,7 +1168,8 @@ private struct ComposerTextView: NSViewRepresentable {
     }
 
     func updateNSView(_ scroll: NSScrollView, context: Context) {
-        guard let tv = scroll.documentView as? NSTextView else { return }
+        guard let tv = scroll.documentView as? ComposerNSTextView else { return }
+        tv.remoteHostProvider = remoteHostProvider
         if tv.string != text { tv.string = text }
     }
 
