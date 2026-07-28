@@ -442,6 +442,17 @@ final class GhosttySurfaceView: NSView {
     /// between 发's). Cleared by keyDown's `defer`. Mirrors ghostty's
     /// `keyTextAccumulator` pattern verbatim.
     private var keyTextAccumulator: [String]?
+    /// Physical Option keys currently held down. `NSEvent.ModifierFlags.option`
+    /// alone intentionally has no left/right information, so we retain the
+    /// per-key state from `flagsChanged` before regular text reaches Cocoa.
+    private var pressedOptionSides: OptionSides = []
+
+    struct OptionSides: OptionSet, Equatable {
+        let rawValue: UInt8
+
+        static let left = Self(rawValue: 1 << 0)
+        static let right = Self(rawValue: 1 << 1)
+    }
 
     override init(frame: NSRect) {
         super.init(frame: frame)
@@ -901,6 +912,24 @@ final class GhosttySurfaceView: NSView {
             return
         }
 
+        // Cocoa converts Option-modified keys to composed characters before
+        // NSTextInputClient sees them (Option+Z → Ω). When the configured
+        // physical side is Alt, bypass that conversion and emit the terminal's
+        // conventional Meta sequence from the original keyboard character.
+        // Keep this after all existing special-key paths and out of an active
+        // composition, preserving Option+Delete/arrows, Cmd/Ctrl, Shift, and
+        // CJK candidate-window behavior.
+        if !hasMarkedText(),
+           let metaText = Self.metaTextForOptionAsAlt(
+               mode: KookySettings.activeMacOSOptionAsAlt,
+               pressedOptionSides: pressedOptionSides,
+               modifierFlags: mods,
+               charactersIgnoringModifiers: event.charactersIgnoringModifiers
+           ) {
+            sendInputBytes(metaText, to: surface)
+            return
+        }
+
         // Regular text + IME composition. inputContext routes through
         // NSTextInputClient: insertText for committed input, setMarkedText
         // for in-progress composition. We batch all IME effects via
@@ -1103,7 +1132,63 @@ final class GhosttySurfaceView: NSView {
             super.flagsChanged(with: event)
             return
         }
+        pressedOptionSides = Self.updatedOptionSides(
+            pressedOptionSides,
+            eventKeyCode: event.keyCode,
+            rawModifierFlags: event.modifierFlags.rawValue
+        )
         sendKey(event: event, action: GHOSTTY_ACTION_PRESS, surface: surface)
+    }
+
+    /// Side-specific device bits are present on macOS modifier events. The
+    /// toggle fallback keeps tracking correct if AppKit omits those bits while
+    /// a second Option key remains held (the aggregate `.option` bit alone
+    /// cannot tell which side just changed).
+    nonisolated static func updatedOptionSides(
+        _ current: OptionSides,
+        eventKeyCode: UInt16,
+        rawModifierFlags: UInt
+    ) -> OptionSides {
+        let leftMask: UInt = 0x0000_0020   // NX_DEVICELALTKEYMASK
+        let rightMask: UInt = 0x0000_0040  // NX_DEVICERALTKEYMASK
+        let deviceSides = OptionSides(
+            rawValue: (rawModifierFlags & leftMask == 0 ? 0 : OptionSides.left.rawValue)
+                | (rawModifierFlags & rightMask == 0 ? 0 : OptionSides.right.rawValue)
+        )
+        if !deviceSides.isEmpty || rawModifierFlags & UInt(NSEvent.ModifierFlags.option.rawValue) == 0 {
+            return deviceSides
+        }
+
+        switch eventKeyCode {
+        case 58: return current.symmetricDifference(.left)
+        case 61: return current.symmetricDifference(.right)
+        default: return current
+        }
+    }
+
+    /// Returns the bytes for a regular printable Option-as-Alt key, or nil
+    /// when Cocoa must retain ownership of the input event.
+    nonisolated static func metaTextForOptionAsAlt(
+        mode: KookyMacOSOptionAsAlt,
+        pressedOptionSides: OptionSides,
+        modifierFlags: NSEvent.ModifierFlags,
+        charactersIgnoringModifiers: String?
+    ) -> String? {
+        guard modifierFlags.contains(.option),
+              !modifierFlags.contains(.command),
+              !modifierFlags.contains(.control),
+              mode.treatsAsAlt(
+                  leftOptionPressed: pressedOptionSides.contains(.left),
+                  rightOptionPressed: pressedOptionSides.contains(.right)
+              ),
+              let charactersIgnoringModifiers,
+              !charactersIgnoringModifiers.isEmpty,
+              let firstScalar = charactersIgnoringModifiers.unicodeScalars.first,
+              firstScalar.value >= 0x20,
+              !(0xE000...0xF8FF).contains(firstScalar.value)
+        else { return nil }
+
+        return "\u{1B}" + charactersIgnoringModifiers
     }
 
     private var scrollAccum: NSPoint = .zero

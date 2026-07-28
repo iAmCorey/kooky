@@ -5,6 +5,106 @@ import XCTest
 
 @MainActor
 final class TerminalKeyRoutingTests: XCTestCase {
+    func testMacOSOptionAsAltParsesSupportedSettingsValues() {
+        func parsed(_ value: Any?) -> [String: Any] {
+            ["terminal": ["macos-option-as-alt": value as Any]]
+        }
+
+        XCTAssertEqual(KookySettings.macOSOptionAsAlt(parsed: parsed(true)), .both)
+        XCTAssertEqual(KookySettings.macOSOptionAsAlt(parsed: parsed(false)), .disabled)
+        XCTAssertEqual(KookySettings.macOSOptionAsAlt(parsed: parsed("left")), .left)
+        XCTAssertEqual(KookySettings.macOSOptionAsAlt(parsed: parsed("right")), .right)
+        XCTAssertEqual(KookySettings.macOSOptionAsAlt(parsed: parsed("invalid")), .disabled)
+        XCTAssertEqual(KookySettings.macOSOptionAsAlt(parsed: nil), .disabled)
+    }
+
+    func testLeftOptionModeSendsMetaOnlyForLeftOption() {
+        XCTAssertEqual(
+            GhosttySurfaceView.metaTextForOptionAsAlt(
+                mode: .left,
+                pressedOptionSides: [.left],
+                modifierFlags: [.option],
+                charactersIgnoringModifiers: "z"
+            ),
+            "\u{1B}z"
+        )
+
+        // Returning nil leaves the event on the existing Cocoa text-input
+        // path, which commits the right-Option keyboard-layout character Ω.
+        XCTAssertNil(
+            GhosttySurfaceView.metaTextForOptionAsAlt(
+                mode: .left,
+                pressedOptionSides: [.right],
+                modifierFlags: [.option],
+                charactersIgnoringModifiers: "z"
+            )
+        )
+    }
+
+    func testBothAndDisabledOptionModesRouteExpectedSides() {
+        for side: GhosttySurfaceView.OptionSides in [.left, .right] {
+            XCTAssertEqual(
+                GhosttySurfaceView.metaTextForOptionAsAlt(
+                    mode: .both,
+                    pressedOptionSides: side,
+                    modifierFlags: [.option],
+                    charactersIgnoringModifiers: "z"
+                ),
+                "\u{1B}z"
+            )
+            XCTAssertNil(
+                GhosttySurfaceView.metaTextForOptionAsAlt(
+                    mode: .disabled,
+                    pressedOptionSides: side,
+                    modifierFlags: [.option],
+                    charactersIgnoringModifiers: "z"
+                )
+            )
+        }
+    }
+
+    func testOptionAsAltDoesNotInterceptNormalChineseInput() {
+        XCTAssertNil(
+            GhosttySurfaceView.metaTextForOptionAsAlt(
+                mode: .both,
+                pressedOptionSides: [.left],
+                modifierFlags: [],
+                charactersIgnoringModifiers: "中"
+            )
+        )
+    }
+
+    func testOptionSideTrackingDistinguishesBothSides() {
+        var sides: GhosttySurfaceView.OptionSides = []
+        sides = GhosttySurfaceView.updatedOptionSides(
+            sides,
+            eventKeyCode: 58,
+            rawModifierFlags: 0x0000_0020
+        )
+        XCTAssertEqual(sides, [.left])
+
+        sides = GhosttySurfaceView.updatedOptionSides(
+            sides,
+            eventKeyCode: 61,
+            rawModifierFlags: 0x0000_0060
+        )
+        XCTAssertEqual(sides, [.left, .right])
+
+        sides = GhosttySurfaceView.updatedOptionSides(
+            sides,
+            eventKeyCode: 58,
+            rawModifierFlags: 0x0000_0040
+        )
+        XCTAssertEqual(sides, [.right])
+
+        sides = GhosttySurfaceView.updatedOptionSides(
+            sides,
+            eventKeyCode: 61,
+            rawModifierFlags: 0
+        )
+        XCTAssertEqual(sides, [])
+    }
+
     func testArrowKeysRouteThroughLibghosttyForApplicationCursorMode() {
         let arrowKeyCodes: [UInt16] = [123, 124, 125, 126] // left, right, down, up
 

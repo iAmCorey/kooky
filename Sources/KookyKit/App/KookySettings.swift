@@ -2,6 +2,41 @@ import AppKit
 import Foundation
 import GhosttyKit
 
+/// Kooky's input-routing interpretation of Ghostty's `macos-option-as-alt`
+/// setting. libghostty still receives the original terminal setting, but text
+/// that Cocoa has already translated (for example Option+Z → Ω) no longer
+/// carries its physical Option modifier. The terminal view needs this small
+/// mirror to decide whether to bypass Cocoa before that translation happens.
+enum KookyMacOSOptionAsAlt: Equatable {
+    case disabled
+    case both
+    case left
+    case right
+
+    init(settingsValue: Any?) {
+        if let number = settingsValue as? NSNumber,
+           CFGetTypeID(number) == CFBooleanGetTypeID() {
+            self = number.boolValue ? .both : .disabled
+            return
+        }
+
+        switch settingsValue as? String {
+        case "left": self = .left
+        case "right": self = .right
+        default: self = .disabled
+        }
+    }
+
+    func treatsAsAlt(leftOptionPressed: Bool, rightOptionPressed: Bool) -> Bool {
+        switch self {
+        case .disabled: return false
+        case .both: return leftOptionPressed || rightOptionPressed
+        case .left: return leftOptionPressed
+        case .right: return rightOptionPressed
+        }
+    }
+}
+
 /// Reads `~/.kooky/settings.json` and forwards its `terminal.*` section to
 /// libghostty. JSONC-tolerant (line + block comments stripped before parse).
 ///
@@ -13,6 +48,11 @@ import GhosttyKit
 ///     own `~/.config/ghostty/config` defaults (last write wins).
 enum KookySettings {
     static let pairedThemeSchemaVersion = 2
+
+    /// Refreshed whenever Kooky builds the configuration passed to libghostty.
+    /// `GhosttySurfaceView` reads this on the main thread before handing a
+    /// regular key to Cocoa's text-input system.
+    @MainActor private(set) static var activeMacOSOptionAsAlt: KookyMacOSOptionAsAlt = .disabled
 
     static let directory: URL = FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent(".kooky", isDirectory: true)
@@ -69,6 +109,13 @@ enum KookySettings {
             return nil
         }
         return obj as? [String: Any]
+    }
+
+    /// Extract the Kooky-side input-routing value from `terminal`. Invalid,
+    /// missing, and unsupported values preserve native macOS character input.
+    static func macOSOptionAsAlt(parsed: [String: Any]?) -> KookyMacOSOptionAsAlt {
+        let terminal = parsed?["terminal"] as? [String: Any]
+        return KookyMacOSOptionAsAlt(settingsValue: terminal?["macos-option-as-alt"])
     }
 
     /// Translates the `terminal.*` subdict to ghostty's flat key=value format
@@ -183,11 +230,13 @@ enum KookySettings {
     /// `LibghosttyApp.currentConfig` for why freeing sooner is unsafe.
     @MainActor
     static func makeGhosttyConfig() -> ghostty_config_t? {
+        let parsed = loadParsed()
+        activeMacOSOptionAsAlt = macOSOptionAsAlt(parsed: parsed)
         let config = ghostty_config_new()
         guard config != nil else { return nil }
         ghostty_config_load_default_files(config)
         applyBaseline(to: config)
-        apply(parsed: loadParsed(), to: config)
+        apply(parsed: parsed, to: config)
         ghostty_config_finalize(config)
         return config
     }
