@@ -508,7 +508,7 @@ private struct PaneStatusBar: View {
     private var remoteLoginSegment: some View {
         if let host = session.workspaceTransport.remoteDestination {
             StatusSegment(systemImage: remoteStatusSymbol) {
-                Text("\(session.workspaceTransport.label.lowercased()) \(host)\(remoteStatusSuffix)")
+                Text(verbatim: "\(session.workspaceTransport.label.lowercased()) \(host)\(remoteStatusSuffix)")
                     .lineLimit(1)
                     .truncationMode(.middle)
                     .foregroundStyle(remoteStatusForeground)
@@ -542,14 +542,16 @@ private struct PaneStatusBar: View {
     }
 
     private var remoteStatusSuffix: String {
-        if session.remoteTransferError != nil { return " · upload failed" }
+        if session.remoteTransferError != nil {
+            return String(localized: " · upload failed", bundle: .kookyResources)
+        }
         switch session.remoteConnectionState {
-        case .launching: return " · connecting"
+        case .launching: return String(localized: " · connecting", bundle: .kookyResources)
         case .connected: return ""
-        case .degraded: return " · status stale"
-        case .authenticationRequired: return " · authenticate"
-        case .disconnected: return " · ended"
-        case .failed: return " · failed"
+        case .degraded: return String(localized: " · status stale", bundle: .kookyResources)
+        case .authenticationRequired: return String(localized: " · authenticate", bundle: .kookyResources)
+        case .disconnected: return String(localized: " · ended", bundle: .kookyResources)
+        case .failed: return String(localized: " · failed", bundle: .kookyResources)
         case nil: return ""
         }
     }
@@ -582,26 +584,28 @@ private struct PaneStatusBar: View {
 
     private var remoteStatusHelp: String {
         if let transferError = session.remoteTransferError {
-            return "\(transferError) Click to dismiss."
+            return String(localized: "\(transferError) Click to dismiss.", bundle: .kookyResources)
         }
         switch session.remoteConnectionState {
         case .authenticationRequired:
-            return "SSH authentication is required. Click to authenticate."
+            return String(localized: "SSH authentication is required. Click to authenticate.", bundle: .kookyResources)
         case .degraded:
-            return "The Mosh terminal is still running, but status is stale. Click to reconnect status."
+            return String(localized: "The Mosh terminal is still running, but status is stale. Click to reconnect status.", bundle: .kookyResources)
         case .failed(let failure):
             switch failure {
             case .executableMissing(let executable):
-                return "\(executable) is not installed on this Mac. Install it or click to open as an SSH workspace."
+                return String(localized: "\(executable) is not installed on this Mac. Install it or click to open as an SSH workspace.", bundle: .kookyResources)
             case .udpBlocked:
-                return "Mosh could not establish its UDP connection. Review the terminal diagnostics, retry, or click to open as SSH."
+                return String(localized: "Mosh could not establish its UDP connection. Review the terminal diagnostics, retry, or click to open as SSH.", bundle: .kookyResources)
             case .authenticationFailed:
-                return "Mosh SSH authentication failed. Review the terminal diagnostics or click to open as SSH."
+                return String(localized: "Mosh SSH authentication failed. Review the terminal diagnostics or click to open as SSH.", bundle: .kookyResources)
             case .invalidConfiguration(let message), .bootstrapRejected(let message):
-                return "\(message). Click to open as an SSH workspace."
+                return String(localized: "\(message). Click to open as an SSH workspace.", bundle: .kookyResources)
             case .processExited(let code, let message):
-                let detail = message ?? code.map { "exit \($0)" } ?? "unknown error"
-                return "Mosh failed (\(detail)). Review the terminal diagnostics or click to open as SSH."
+                let detail = message
+                    ?? code.map { "exit \($0)" }
+                    ?? String(localized: "unknown error", bundle: .kookyResources)
+                return String(localized: "Mosh failed (\(detail)). Review the terminal diagnostics or click to open as SSH.", bundle: .kookyResources)
             }
         default:
             return "\(session.workspaceTransport.label) \(session.workspaceTransport.remoteDestination ?? "")"

@@ -90,13 +90,13 @@ struct CreateRemoteWorkspaceSheet: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            Text("REMOTE-WORKSPACE")
+            Text(String(localized: "REMOTE-WORKSPACE", bundle: .kookyResources))
                 .font(Theme.mono(10.5, weight: .semibold))
                 .foregroundStyle(Theme.chromeMuted)
                 .tracking(1.2)
                 .padding(.bottom, 18)
 
-            Text("Connect to a remote host")
+            Text(String(localized: "Connect to a remote host", bundle: .kookyResources))
                 .font(Theme.display(20, weight: .semibold))
                 .foregroundStyle(Theme.chromeForeground)
 
@@ -115,7 +115,7 @@ struct CreateRemoteWorkspaceSheet: View {
                 labeled("transport") {
                     Picker("transport", selection: $transportChoice) {
                         ForEach(availableTransports, id: \.self) {
-                            Text($0.rawValue).tag($0)
+                            Text(LocalizedStringKey($0.rawValue), bundle: .kookyResources).tag($0)
                         }
                     }
                     .labelsHidden()
@@ -139,12 +139,12 @@ struct CreateRemoteWorkspaceSheet: View {
                         HStack(alignment: .firstTextBaseline, spacing: 8) {
                             Image(systemName: "exclamationmark.triangle.fill")
                                 .foregroundStyle(Theme.activityAttention)
-                            Text("mosh was not found in the app PATH or common install locations. Kooky will check the login-shell PATH again at launch.")
+                            Text(String(localized: "mosh was not found in the app PATH or common install locations. Kooky will check the login-shell PATH again at launch.", bundle: .kookyResources))
                                 .font(Theme.display(11.5))
                                 .foregroundStyle(Theme.chromeMuted)
                                 .fixedSize(horizontal: false, vertical: true)
                             Link(
-                                "installation help",
+                                String(localized: "installation help", bundle: .kookyResources),
                                 destination: URL(string: "https://mosh.org/#getting")!
                             )
                             .font(Theme.mono(10.5, weight: .semibold))
@@ -177,9 +177,9 @@ struct CreateRemoteWorkspaceSheet: View {
     private var description: String {
         switch transportChoice {
         case .ssh:
-            "Every tab opens an SSH session to this destination."
+            String(localized: "Every tab opens an SSH session to this destination.", bundle: .kookyResources)
         case .mosh:
-            "Mosh keeps the terminal responsive across latency, sleep, roaming, and short network outages. SSH remains the control and upload channel."
+            String(localized: "Mosh keeps the terminal responsive across latency, sleep, roaming, and short network outages. SSH remains the control and upload channel.", bundle: .kookyResources)
         }
     }
 
@@ -188,7 +188,7 @@ struct CreateRemoteWorkspaceSheet: View {
         labeled("udp") {
             Picker("udp", selection: $udpChoice) {
                 ForEach(UDPChoice.allCases, id: \.self) {
-                    Text($0.rawValue).tag($0)
+                    Text(LocalizedStringKey($0.rawValue), bundle: .kookyResources).tag($0)
                 }
             }
             .labelsHidden()
@@ -199,7 +199,7 @@ struct CreateRemoteWorkspaceSheet: View {
                 EmptyView()
             case .port:
                 compactField("60000", text: $udpPort)
-                Text("One fixed UDP port can host only one live tab. Use automatic or a range if you plan to open tabs or splits.")
+                Text(String(localized: "One fixed UDP port can host only one live tab. Use automatic or a range if you plan to open tabs or splits.", bundle: .kookyResources))
                     .font(Theme.display(10.5))
                     .foregroundStyle(Theme.activityAttention)
                     .fixedSize(horizontal: false, vertical: true)
@@ -215,7 +215,7 @@ struct CreateRemoteWorkspaceSheet: View {
         labeled("prediction") {
             Picker("prediction", selection: $prediction) {
                 ForEach(MoshPredictionMode.allCases, id: \.self) {
-                    Text($0.rawValue).tag($0)
+                    Text(LocalizedStringKey($0.rawValue), bundle: .kookyResources).tag($0)
                 }
             }
             .labelsHidden()
@@ -225,7 +225,9 @@ struct CreateRemoteWorkspaceSheet: View {
         Button {
             showsAdvanced.toggle()
         } label: {
-            Text(showsAdvanced ? "[-] advanced" : "[+] advanced")
+            Text(showsAdvanced
+                ? String(localized: "[-] advanced", bundle: .kookyResources)
+                : String(localized: "[+] advanced", bundle: .kookyResources))
                 .font(Theme.mono(10.5, weight: .semibold))
                 .foregroundStyle(Theme.chromeMuted)
         }
@@ -243,10 +245,10 @@ struct CreateRemoteWorkspaceSheet: View {
             }
             labeled("orphan timeout") {
                 Picker("orphan timeout", selection: $networkTimeoutSeconds) {
-                    Text("24 hours").tag(86_400)
-                    Text("48 hours").tag(172_800)
-                    Text("7 days").tag(604_800)
-                    Text("30 days").tag(2_592_000)
+                    Text(String(localized: "24 hours", bundle: .kookyResources)).tag(86_400)
+                    Text(String(localized: "48 hours", bundle: .kookyResources)).tag(172_800)
+                    Text(String(localized: "7 days", bundle: .kookyResources)).tag(604_800)
+                    Text(String(localized: "30 days", bundle: .kookyResources)).tag(2_592_000)
                 }
                 .labelsHidden()
                 .pickerStyle(.menu)
@@ -265,7 +267,7 @@ struct CreateRemoteWorkspaceSheet: View {
         @ViewBuilder content: () -> Content
     ) -> some View {
         VStack(alignment: .leading, spacing: 7) {
-            Text(title)
+            Text(LocalizedStringKey(title), bundle: .kookyResources)
                 .font(Theme.mono(10.5, weight: .semibold))
                 .foregroundStyle(Theme.chromeMuted)
             content()
@@ -273,7 +275,10 @@ struct CreateRemoteWorkspaceSheet: View {
     }
 
     private func compactField(_ placeholder: String, text: Binding<String>) -> some View {
-        TextField(placeholder, text: text)
+        TextField(
+            String(localized: String.LocalizationValue(placeholder), bundle: .kookyResources),
+            text: text
+        )
             .textFieldStyle(.plain)
             .font(Theme.mono(11.5))
             .padding(.horizontal, 8)

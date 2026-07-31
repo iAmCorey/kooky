@@ -32,7 +32,9 @@ enum RemoteLaunchFailureMarker {
         switch payload {
         case "udp-blocked": return .udpBlocked
         case "authentication": return .authenticationFailed
-        case "configuration": return .invalidConfiguration("remote launch rejected")
+        case "configuration": return .invalidConfiguration(
+            String(localized: "remote launch rejected", bundle: .kookyResources)
+        )
         default: return nil
         }
     }

@@ -603,8 +603,10 @@ final class WorkspaceStore {
     }
 
     func remoteTransferFailed(for session: Session) {
-        session.remoteTransferError =
-            "SSH upload failed; no local path was pasted. Check authentication or connectivity, then retry the paste."
+        session.remoteTransferError = String(
+            localized: "SSH upload failed; no local path was pasted. Check authentication or connectivity, then retry the paste.",
+            bundle: .kookyResources
+        )
         remoteControls[session.id]?.retryNow()
     }
 

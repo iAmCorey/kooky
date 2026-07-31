@@ -13,17 +13,20 @@ struct RemoteAuthenticationSheet: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            Text("SSH-AUTHENTICATION")
+            Text(String(localized: "SSH-AUTHENTICATION", bundle: .kookyResources))
                 .font(Theme.mono(10.5, weight: .semibold))
                 .foregroundStyle(Theme.chromeMuted)
                 .tracking(1.2)
 
-            Text("Authenticate to \(session.remoteRuntime?.destination ?? "remote host")")
+            Text(String(
+                localized: "Authenticate to \(session.remoteRuntime?.destination ?? String(localized: "remote host", bundle: .kookyResources))",
+                bundle: .kookyResources
+            ))
                 .font(Theme.display(18, weight: .semibold))
                 .foregroundStyle(Theme.chromeForeground)
                 .padding(.top, 12)
 
-            Text("Prompts below come directly from OpenSSH. Kooky does not read or store your credentials.")
+            Text(String(localized: "Prompts below come directly from OpenSSH. Kooky does not read or store your credentials.", bundle: .kookyResources))
                 .font(Theme.display(12.5))
                 .foregroundStyle(Theme.chromeMuted)
                 .padding(.top, 5)

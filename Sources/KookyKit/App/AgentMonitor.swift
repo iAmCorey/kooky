@@ -200,19 +200,19 @@ final class AgentMonitor {
         guard case .mosh = session.workspaceTransport else { return nil }
         switch session.remoteConnectionState {
         case .launching:
-            return "mosh · connecting"
+            return String(localized: "mosh · connecting", bundle: .kookyResources)
         case .connected:
-            return "mosh · status connected"
+            return String(localized: "mosh · status connected", bundle: .kookyResources)
         case .degraded(let since, _):
-            let seconds = max(0, Int(Date().timeIntervalSince(since)))
-            return "mosh · status stale for \(seconds)s"
+            let seconds = "\(max(0, Int(Date().timeIntervalSince(since))))"
+            return String(localized: "mosh · status stale for \(seconds)s", bundle: .kookyResources)
         case .authenticationRequired(let since):
-            let seconds = max(0, Int(Date().timeIntervalSince(since)))
-            return "mosh · ssh authentication required for \(seconds)s"
+            let seconds = "\(max(0, Int(Date().timeIntervalSince(since))))"
+            return String(localized: "mosh · ssh authentication required for \(seconds)s", bundle: .kookyResources)
         case .disconnected:
-            return "mosh · ended"
+            return String(localized: "mosh · ended", bundle: .kookyResources)
         case .failed:
-            return "mosh · failed"
+            return String(localized: "mosh · failed", bundle: .kookyResources)
         case nil:
             return nil
         }

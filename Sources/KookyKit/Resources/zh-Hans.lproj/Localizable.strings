@@ -389,3 +389,76 @@
 "closing %@" = "关闭 %@";
 "now" = "刚刚";
 "%@ ago" = "%@前";
+
+/* Remote workspace creation (Mosh) */
+"New Remote Workspace…" = "新建远程工作区…";
+"REMOTE-WORKSPACE" = "远程工作区";
+"transport" = "传输方式";
+"Mosh (Beta)" = "Mosh（测试版）";
+"Every tab opens an SSH session to this destination." = "此工作区的每个标签页都会向该目标建立一个 SSH 会话。";
+"Mosh keeps the terminal responsive across latency, sleep, roaming, and short network outages. SSH remains the control and upload channel." = "Mosh 在高延迟、休眠、漫游和短暂断网下都能保持终端响应流畅；SSH 仍作为控制与上传通道。";
+"udp" = "UDP";
+"automatic" = "自动";
+"fixed port" = "固定端口";
+"port range" = "端口范围";
+"One fixed UDP port can host only one live tab. Use automatic or a range if you plan to open tabs or splits." = "一个固定 UDP 端口只能承载一个活动标签页。若打算打开多个标签页或分屏，请使用自动或端口范围。";
+"prediction" = "本地预测";
+"adaptive" = "自适应";
+"always" = "总是";
+"never" = "从不";
+"[+] advanced" = "[+] 高级选项";
+"[-] advanced" = "[-] 高级选项";
+"ssh port" = "SSH 端口";
+"identity file" = "身份密钥文件";
+"mosh-server" = "mosh-server";
+"from ~/.ssh/config" = "取自 ~/.ssh/config";
+"auto" = "自动";
+"orphan timeout" = "孤儿超时";
+"24 hours" = "24 小时";
+"48 hours" = "48 小时";
+"7 days" = "7 天";
+"30 days" = "30 天";
+"mosh was not found in the app PATH or common install locations. Kooky will check the login-shell PATH again at launch." = "未在应用 PATH 或常见安装位置中找到 mosh。Kooky 会在启动时再次检查登录 Shell 的 PATH。";
+"installation help" = "安装帮助";
+
+/* Remote authentication sheet */
+"SSH-AUTHENTICATION" = "SSH 认证";
+"Authenticate to %@" = "认证到 %@";
+"remote host" = "远程主机";
+"Prompts below come directly from OpenSSH. Kooky does not read or store your credentials." = "下方提示直接来自 OpenSSH。Kooky 不会读取或存储你的凭据。";
+
+/* Remote workspace settings */
+"Remote Workspaces" = "远程工作区";
+"show-mosh-beta" = "显示 Mosh（测试版）";
+"Hides Mosh from the creation sheet; existing Mosh workspaces are unchanged." = "在创建面板中隐藏 Mosh；已有的 Mosh 工作区不受影响。";
+
+/* Mosh status pill */
+"mosh · connecting" = "mosh · 连接中";
+"mosh · status connected" = "mosh · 状态已连接";
+"mosh · status stale for %@s" = "mosh · 状态已过期 %@ 秒";
+"mosh · ssh authentication required for %@s" = "mosh · 需要 SSH 认证已 %@ 秒";
+"mosh · ended" = "mosh · 已结束";
+"mosh · failed" = "mosh · 失败";
+
+/* Mosh status tooltip */
+"%@ Click to dismiss." = "%@ 点击以忽略。";
+"SSH authentication is required. Click to authenticate." = "需要 SSH 认证。点击进行认证。";
+"The Mosh terminal is still running, but status is stale. Click to reconnect status." = "Mosh 终端仍在运行，但状态已过期。点击以重新连接状态通道。";
+"%@ is not installed on this Mac. Install it or click to open as an SSH workspace." = "此 Mac 未安装 %@。请安装它，或点击以 SSH 工作区方式打开。";
+"Mosh could not establish its UDP connection. Review the terminal diagnostics, retry, or click to open as SSH." = "Mosh 无法建立 UDP 连接。请查看终端诊断信息、重试，或点击以 SSH 方式打开。";
+"Mosh SSH authentication failed. Review the terminal diagnostics or click to open as SSH." = "Mosh 的 SSH 认证失败。请查看终端诊断信息，或点击以 SSH 方式打开。";
+"%@. Click to open as an SSH workspace." = "%@。点击以 SSH 工作区方式打开。";
+"unknown error" = "未知错误";
+"Mosh failed (%@). Review the terminal diagnostics or click to open as SSH." = "Mosh 失败（%@）。请查看终端诊断信息，或点击以 SSH 方式打开。";
+
+/* Mosh status pill suffix */
+" · upload failed" = " · 上传失败";
+" · connecting" = " · 连接中";
+" · status stale" = " · 状态已过期";
+" · authenticate" = " · 待认证";
+" · ended" = " · 已结束";
+" · failed" = " · 失败";
+
+/* Mosh failure messages */
+"SSH upload failed; no local path was pasted. Check authentication or connectivity, then retry the paste." = "SSH 上传失败；未粘贴任何本地路径。请检查认证或网络连接，然后重试粘贴。";
+"remote launch rejected" = "远程启动被拒绝";
