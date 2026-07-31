@@ -54,7 +54,9 @@
 
 **Git worktree。** 右键任意 git workspace → "Create Worktree…",在新 branch 上(或 checkout 已有 branch)起一个 worktree。Worktree 在 sidebar 里缩进显示在源 repo 下面,有自己的 tab + agent —— 让 Claude 在 feature branch 上跑活,不打扰 main 上正在跑的进程。命令行 `git worktree add` 建的 worktree,下次启动 kooky 也会自动出现在 sidebar。
 
-**SSH workspace。** File → New SSH Workspace…(或 ⌘P)创建一个"住"在远程机器上的 workspace:之后每个新 tab、分屏、重启恢复的 tab 都自动重连同一台主机。开 agent tab 时 agent 直接在远端启动 —— 远端自己的 shell 配置加载完才启动,nvm 装的工具都找得到。往里粘贴本地文件或截图时,kooky 先上传再粘贴远端路径,对面的 agent 才真的打得开。同一主机的连接是共享的:后续 tab 秒连,密码登录的主机也全程可用,包括粘贴上传。
+**SSH 与 Mosh workspace。** File → New Remote Workspace…（或 ⌘P）创建一个“住”在远程机器上的 workspace。SSH 提供传统连接；Mosh 在延迟波动、合盖、网络切换和短时断网后仍保持终端响应。每个新 tab 和分屏拥有独立远端会话，重启恢复时建立新会话。Agent 会在远端 shell 配置加载后启动。Mosh 另用一条不阻塞终端的 SSH 控制通道同步 Agent 状态、远端 cwd、清理和上传；控制通道断开时终端继续工作，状态栏明确显示 stale，密码、OTP 与硬件密钥认证由内嵌 OpenSSH 终端处理。粘贴本地文件或截图时，kooky 先上传再插入远端路径。使用 Mosh 前需在 Mac 安装 `mosh`，并在服务器提供 `mosh-server`。
+
+服务器还必须放通 Mosh 使用的 UDP 端口范围（建议选择 Automatic，或让防火墙与设置中的范围一致）。应用重启会建立新会话，不会 reattach 旧会话；明确关闭 tab/workspace 会终止 Kooky 拥有的远端 runtime，crash 恢复也只有在 token 与进程身份都能被证明时才回收。旧版 Kooky 会把保存的 Mosh workspace 安全降级为 SSH。Kooky 明确不探测、也不接管 tmux/zellij/ET 中的 session。
 
 **防睡眠(keep-awake)。** agent 干活时 Mac 不会睡过去。顶部一颗会呼吸的指示灯,点击在三档间循环:Off;Auto —— agent 干活或 SSH 连接期间保持清醒,合盖也不睡(首次需一次管理员授权),活一干完就恢复正常作息;Always —— 看得见的 caffeinate,机器一直醒着直到你调回来。在 kooky 之外改了系统禁睡(`sudo pmset`、别的工具)也没关系,几秒内档位自动跟上,双向同步。
 

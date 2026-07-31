@@ -244,8 +244,13 @@ struct AgentTemplate: Identifiable, Hashable {
         resumeId: String? = nil,
         newSessionId: String? = nil,
         initialPrompt: String? = nil,
-        sshHost: String? = nil
+        sshHost: String? = nil,
+        workspaceTransport: WorkspaceTransport? = nil,
+        remoteRuntimeToken: UUID? = nil
     ) -> TerminalSessionConfig {
+        let effectiveTransport = workspaceTransport?.normalized()
+            ?? sshHost.map { WorkspaceTransport.ssh(destination: $0) }
+            ?? .local
         // Pick a shell that has a kooky integration wrapper. Plain terminal
         // sessions respect $SHELL where we have a wrapper (zsh/bash/fish); other
         // shells (nu/...) get $SHELL too, just without cwd tracking.
@@ -253,7 +258,7 @@ struct AgentTemplate: Identifiable, Hashable {
         // template, or ANY template connecting to an `sshHost` — forces a
         // wrapped shell so the auto-launch eval actually runs; `.other`
         // users get zsh as a working fallback.
-        let needsLaunch = initialCommand != nil || sshHost != nil
+        let needsLaunch = initialCommand != nil || effectiveTransport.isRemote
         var config: TerminalSessionConfig
         switch (KookyShellIntegration.detectedUserShell, needsLaunch) {
         case (.bash, _):
@@ -273,7 +278,8 @@ struct AgentTemplate: Identifiable, Hashable {
         case (.other, true):
             config = .zshShell()
         }
-        if let sshHost {
+        switch effectiveTransport {
+        case .ssh(let sshConfiguration):
             // SSH workspace tab: the local shell's one-shot launch is the
             // kooky-ssh connection; the template's own launch command rides
             // behind `--` and starts on the REMOTE via the ssh wrapper +
@@ -287,14 +293,46 @@ struct AgentTemplate: Identifiable, Hashable {
                 initialPrompt: initialPrompt
             )
                 .map { " -- \($0)" } ?? ""
-            config.environment["KOOKY_AGENT"] = "kooky-ssh \(KookyShellIntegration.quote(sshHost))\(agentSuffix)"
-        } else if let launch = launchCommand(
-            extraOptions: extraOptions,
-            resumeId: resumeId,
-            newSessionId: newSessionId,
-            initialPrompt: initialPrompt
-        ) {
-            config.environment["KOOKY_AGENT"] = launch
+            config.environment["KOOKY_AGENT"] = "kooky-ssh \(KookyShellIntegration.quote(sshConfiguration.destination))\(agentSuffix)"
+        case .mosh(let moshConfiguration):
+            // Kooky uses the standard ASCII RS + "." escape during explicit
+            // close. Pin the private workspace invocation even if the user's
+            // ambient shell customized MOSH_ESCAPE_KEY.
+            config.environment["MOSH_ESCAPE_KEY"] = "\u{001E}"
+            let agentCommand = launchCommand(
+                extraOptions: extraOptions,
+                resumeId: nil,
+                newSessionId: nil,
+                initialPrompt: initialPrompt
+            )
+            let token = remoteRuntimeToken ?? UUID()
+            if let invocation = try? MoshCommandBuilder.build(
+                configuration: moshConfiguration,
+                runtimeToken: token,
+                remoteAgentCommand: agentCommand
+            ) {
+                config.environment["KOOKY_AGENT"] = invocation.shellCommand
+            } else {
+                let marker = RemoteLaunchFailureMarker.title(
+                    for: .invalidConfiguration("Mosh bootstrap is too large or invalid")
+                )
+                config.environment["KOOKY_AGENT"] = """
+                printf '%s\\n' 'kooky: invalid or oversized Mosh workspace configuration' >&2; \
+                printf '\\033]2;\(marker)\\a' > /dev/tty 2>/dev/null || :; false
+                """
+            }
+        case .unsupported(let kind, _):
+            config.environment["KOOKY_AGENT"] =
+                "printf '%s\\n' \(KookyShellIntegration.quote("kooky: unsupported remote transport \(kind)")) >&2; false"
+        case .local:
+            if let launch = launchCommand(
+                extraOptions: extraOptions,
+                resumeId: resumeId,
+                newSessionId: newSessionId,
+                initialPrompt: initialPrompt
+            ) {
+                config.environment["KOOKY_AGENT"] = launch
+            }
         }
         return config
     }

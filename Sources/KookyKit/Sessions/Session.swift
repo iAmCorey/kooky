@@ -58,13 +58,36 @@ final class Session: Identifiable {
     /// the ssh wrapper via an OSC title marker, shown in the pane status bar.
     /// Not persisted (like `transientAgent`); cleared on command-finished.
     var remoteHost: String?
-    /// SSH destination this tab was *spawned against* — set only when kooky
-    /// itself opened the connection (SSH workspace tabs), never by a manually
-    /// typed `ssh`. Stable for the tab's lifetime, which makes it the paste
-    /// routing signal: "upload pasted files to this host" must not flicker
-    /// with `remoteHost`'s marker/command-finished lifecycle. Not persisted —
-    /// restore re-derives it from `Workspace.sshRemoteHost` at spawn.
-    var sshWorkspaceHost: String?
+    /// Stable transport inherited from the owning workspace at spawn.
+    /// Manual `ssh` commands remain represented only by transient
+    /// `remoteHost` markers and never mutate this value.
+    var workspaceTransport: WorkspaceTransport = .local
+    var remoteRuntime: RemoteRuntimeIdentity?
+    var remoteConnectionState: RemoteConnectionState?
+    var remoteStatusSequence: UInt64 = 0
+    var remoteStatusUpdatedAt: Date?
+    /// Sequence of the last snapshot that fired an attention/completed alert.
+    /// Notifications dedupe on this — NOT on the visible activity transition —
+    /// so a `running → attention` that happens entirely during a control
+    /// outage still alerts once when the reconnect snapshot lands, even though
+    /// the pre-outage activity was already `.attention`.
+    var remoteNotifiedActivitySequence: UInt64?
+    /// Independent Keep Awake lease timestamp. It may expire while the
+    /// authoritative remote Agent state remains stale/running.
+    var remotePowerLeaseUpdatedAt: Date?
+    /// Visible, fail-closed feedback for the most recent file/image upload.
+    /// The terminal receives no path when this is non-nil.
+    var remoteTransferError: String?
+    var isClosing = false
+
+    /// Source compatibility for callers not yet migrated to
+    /// `workspaceTransport.remoteDestination`.
+    var sshWorkspaceHost: String? {
+        get { workspaceTransport.remoteDestination }
+        set {
+            workspaceTransport = newValue.map { .ssh(destination: $0) } ?? .local
+        }
+    }
     /// Latest Codex account rate-limit usage (5-hour + weekly windows), parsed
     /// from the active session's rollout file by `CodexUsageMonitor` and shown
     /// as a status-bar gauge. Only populated for Codex sessions; `nil` until
@@ -75,6 +98,9 @@ final class Session: Identifiable {
     /// sync via OSC 7 (`engine.onPwdChange`). Drives the tab title so users see
     /// where they are, not which agent template the tab was launched from.
     var currentDirectory: URL
+    /// Display-only cwd reported by a remote shell/runtime. It must never be
+    /// converted into a local filesystem URL or passed to local watchers.
+    var remoteWorkingDirectory: String?
     /// Runtime state; not persisted. Resets to `.idle` after relaunch.
     var activityState: SessionActivityState = .idle
     /// Empty / whitespace input via `renameTab` clears this back to `nil` so
@@ -302,6 +328,11 @@ final class Session: Identifiable {
     var title: String {
         if let custom = customTitle, !custom.isEmpty { return custom }
         if let reported = terminalTitle, !reported.isEmpty { return reported }
+        if let remote = remoteWorkingDirectory, !remote.isEmpty {
+            if remote == "~" { return "~" }
+            let component = remote.split(separator: "/", omittingEmptySubsequences: true).last
+            return component.map(String.init) ?? remote
+        }
         if currentDirectory.standardizedFileURL.path == homeDirectoryPath { return "~" }
         let last = currentDirectory.lastPathComponent
         return last.isEmpty ? displayAgent.title : last

@@ -87,6 +87,46 @@ final class PersistenceTests: XCTestCase {
         XCTAssertEqual(reloaded.state(for: id), state)
     }
 
+    func testPendingRemoteReapPersistsAlongsideWindowsAndCanBeCleared() {
+        let url = tempURL()
+        let app = AppPersistence(fileURL: url)
+        let token = UUID()
+        let reap = PersistedRemoteReap(
+            runtimeToken: token,
+            destination: "deploy@example.com",
+            sshPort: 2222,
+            identityFile: "/tmp/id key",
+            createdAt: Date(timeIntervalSince1970: 123)
+        )
+
+        app.recordPendingRemoteReap(reap)
+        XCTAssertEqual(
+            AppPersistence.loadAppFromDisk(from: url).pendingRemoteReaps,
+            [reap]
+        )
+
+        app.clearPendingRemoteReap(runtimeToken: token)
+        XCTAssertTrue(
+            AppPersistence.loadAppFromDisk(from: url).pendingRemoteReaps.isEmpty
+        )
+    }
+
+    func testPreReapAppSchemaDecodesWithEmptyLeaseList() throws {
+        let window = PersistedWindow(id: UUID(), state: makeState())
+        let data = try JSONSerialization.data(withJSONObject: [
+            "windows": [
+                try XCTUnwrap(
+                    JSONSerialization.jsonObject(
+                        with: JSONEncoder().encode(window)
+                    ) as? [String: Any]
+                ),
+            ],
+        ])
+        let decoded = try JSONDecoder().decode(PersistedApp.self, from: data)
+        XCTAssertEqual(decoded.windows, [window])
+        XCTAssertTrue(decoded.pendingRemoteReaps.isEmpty)
+    }
+
     // MARK: - WindowPersistence
 
     func testWindowPersistenceIsolatesTwoWindows() {
@@ -188,5 +228,85 @@ final class PersistenceTests: XCTestCase {
         XCTAssertNil(decoded.worktreeParentId)
         XCTAssertNil(decoded.worktreeBranch)
         XCTAssertNil(decoded.worktreePath)
+    }
+
+    func testLegacySSHWorkspaceMigratesToTransport() throws {
+        let data = try JSONEncoder().encode(makeState())
+        var json = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: data) as? [String: Any]
+        )
+        var workspaces = try XCTUnwrap(json["workspaces"] as? [[String: Any]])
+        workspaces[0].removeValue(forKey: "transport")
+        workspaces[0]["sshRemoteHost"] = " deploy@example.com "
+        json["workspaces"] = workspaces
+        let legacyData = try JSONSerialization.data(withJSONObject: json)
+
+        let decoded = try JSONDecoder().decode(PersistedState.self, from: legacyData)
+        XCTAssertEqual(
+            decoded.workspaces[0].resolvedTransport,
+            .ssh(try XCTUnwrap(SSHWorkspaceConfiguration(destination: "deploy@example.com")))
+        )
+    }
+
+    func testMoshPersistenceDualWritesRealDestinationForOldKooky() throws {
+        var state = makeState()
+        let configuration = try XCTUnwrap(
+            MoshWorkspaceConfiguration(destination: "devbox")
+        )
+        state.workspaces[0].transport = .mosh(configuration)
+        let data = try JSONEncoder().encode(state)
+        let json = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: data) as? [String: Any]
+        )
+        let workspace = try XCTUnwrap(
+            (json["workspaces"] as? [[String: Any]])?.first
+        )
+        let transport = try XCTUnwrap(workspace["transport"] as? [String: Any])
+
+        XCTAssertEqual(workspace["sshRemoteHost"] as? String, "devbox")
+        XCTAssertEqual(transport["kind"] as? String, "mosh")
+        XCTAssertEqual(transport["destination"] as? String, "devbox")
+
+        // Simulate an old decoder that knows only the legacy field.
+        XCTAssertEqual(workspace["sshRemoteHost"] as? String, "devbox")
+        let decoded = try JSONDecoder().decode(PersistedState.self, from: data)
+        XCTAssertEqual(
+            decoded.workspaces[0].resolvedTransport,
+            .mosh(configuration)
+        )
+    }
+
+    func testMalformedMoshTransportBecomesPlaceholderWithoutDroppingSiblingWorkspace() throws {
+        var state = makeState()
+        var sibling = state.workspaces[0]
+        sibling.id = UUID()
+        sibling.transport = .local
+        sibling.sshRemoteHost = nil
+        state.workspaces.append(sibling)
+        let data = try JSONEncoder().encode(state)
+        var json = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: data) as? [String: Any]
+        )
+        var workspaces = try XCTUnwrap(json["workspaces"] as? [[String: Any]])
+        workspaces[0]["transport"] = [
+            "kind": "mosh",
+            "destination": "devbox",
+            "udpPort": ["kind": "range", "lower": 61_000, "upper": 60_000],
+            "prediction": "adaptive",
+        ]
+        workspaces[0]["sshRemoteHost"] = "devbox"
+        json["workspaces"] = workspaces
+
+        let decoded = try JSONDecoder().decode(
+            PersistedState.self,
+            from: JSONSerialization.data(withJSONObject: json)
+        )
+
+        XCTAssertEqual(decoded.workspaces.count, 2)
+        XCTAssertEqual(
+            decoded.workspaces[0].resolvedTransport,
+            .unsupported(kind: "mosh", destination: "devbox")
+        )
+        XCTAssertEqual(decoded.workspaces[1].resolvedTransport, .local)
     }
 }

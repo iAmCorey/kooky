@@ -54,7 +54,9 @@ AI コーディングのために作られた、ミニマルでモダンな macO
 
 **Git worktree。** 任意の git workspace を右クリック → "Create Worktree…" で新しい branch (または既存 branch の checkout) に対する worktree を作成します。worktree はサイドバーで元のリポジトリの下にネストして表示され、独自の tab + agent を持ちます —— main で何かが走っている最中でも、Claude を feature branch で並行して動かせます。コマンドラインで `git worktree add` した worktree も、次回 kooky 起動時に自動でサイドバーに現れます。
 
-**SSH workspace。** File → New SSH Workspace… (または ⌘P) で、リモートマシン上に「住む」workspace を作成します。以降の新しい tab・分割ペイン・再起動時に復元される tab は、すべて同じホストへ自動で再接続します。agent tab を開くと agent はリモート側で起動 —— リモート自身のシェル設定を読み込んでから始まるので、nvm などで入れたツールもきちんと見つかります。ローカルのファイルやスクリーンショットを貼り付けると、kooky が先にアップロードしてからリモートパスを貼り付けるため、向こうの agent が実際に開けます。同一ホストへの接続は共有され、追加の tab は即座に接続。パスワード認証のホストでも貼り付けを含めて全部使えます。
+**SSH / Mosh workspace。** File → New Remote Workspace… (または ⌘P) で、リモートマシン上に「住む」workspace を作成します。通常接続には SSH、遅延の揺れ・スリープ・ネットワーク移動・短い切断に強い端末には Mosh を選べます。新しい tab と分割はそれぞれ独立したリモート session を持ち、再起動時は新しい session を確立します。Mosh では別の SSH control channel が agent 状態、remote cwd、cleanup、upload を同期します。この channel が切れても端末は継続し、status pill が stale と表示します。パスワード・OTP・hardware key の再認証はアプリ内の OpenSSH terminal が処理します。ローカルファイルや screenshot は先に upload され、remote path だけが貼り付けられます。Mac 側の `mosh` と remote 側の `mosh-server` が必要です。
+
+サーバー側では Mosh が使う UDP port range も到達可能にする必要があります (Automatic 推奨、または firewall と同じ range を設定)。アプリ再起動時は古い session に reattach せず新規作成し、tab/workspace を明示的に閉じると Kooky 所有の remote runtime を終了します。crash 後の回収も token と process identity を証明できる場合だけです。旧バージョンの Kooky は保存済み Mosh workspace を安全に SSH として開きます。tmux/zellij/ET 内の session は意図的に検出・所有しません。
 
 **Keep-awake(スリープ防止)。** agent が作業中に Mac が寝てしまうことはありません。トップバーの呼吸するインジケーターライトをクリックすると 3 段階を循環します:Off;Auto —— agent の作業中や SSH 接続中はスリープせず(蓋を閉じても継続、初回のみ管理者認証が必要)、作業が終わった瞬間に通常のスリープへ戻ります;Always —— 目に見える caffeinate として、切り替えるまでずっと起きたままです。kooky の外でスリープ設定を変えても(`sudo pmset` や他のツール)、数秒でダイヤルが双方向に追従します。
 

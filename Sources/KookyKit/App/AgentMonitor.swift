@@ -83,17 +83,54 @@ final class AgentMonitor {
         /// so a remote shell's cwd never reaches us and naming it would point
         /// at the wrong machine entirely.
         let remoteHost: String?
+        /// Control-plane freshness for Mosh. Kept separate from Agent state:
+        /// stale never means idle or ended.
+        let remoteConnectionLabel: String?
+        /// Stable transport/cwd metadata for remote rows. Unlike `directory`,
+        /// these values describe the remote machine and are safe to display.
+        let remoteTransportLabel: String?
+        let remoteDirectory: String?
         /// The tag of the WORKSPACE this session lives in — sessions aren't
         /// tagged individually, so every agent in a tagged project carries that
         /// project's colour. That's what turns the stripe into project grouping
         /// for a list whose order is purely by state.
         let tag: WorkspaceTag?
 
+        init(
+            id: UUID,
+            agent: AgentTemplate,
+            state: State,
+            tabTitle: String,
+            directory: URL,
+            remoteHost: String?,
+            remoteConnectionLabel: String? = nil,
+            remoteTransportLabel: String? = nil,
+            remoteDirectory: String? = nil,
+            tag: WorkspaceTag?
+        ) {
+            self.id = id
+            self.agent = agent
+            self.state = state
+            self.tabTitle = tabTitle
+            self.directory = directory
+            self.remoteHost = remoteHost
+            self.remoteConnectionLabel = remoteConnectionLabel
+            self.remoteTransportLabel = remoteTransportLabel
+            self.remoteDirectory = remoteDirectory
+            self.tag = tag
+        }
+
         /// Stable location text used when a compact surface needs the actual
         /// project path. Remote sessions name the host because their local
         /// workspace path would be misleading.
         var locationPathLabel: String {
-            if let remoteHost { return "ssh \(remoteHost)" }
+            if let remoteHost {
+                let prefix = remoteTransportLabel ?? "ssh"
+                if let remoteDirectory, !remoteDirectory.isEmpty {
+                    return "\(prefix) \(remoteHost):\(remoteDirectory)"
+                }
+                return "\(prefix) \(remoteHost)"
+            }
             return (directory.path as NSString).abbreviatingWithTildeInPath
         }
 
@@ -119,8 +156,11 @@ final class AgentMonitor {
         @MainActor
         func hoverText(tag: WorkspaceTag?) -> String {
             let head = "\(singleLine(agent.title)) · \(singleLine(tabTitle)) · \(state.help)"
-            guard let label = tag?.hashLabel else { return "\(head)\n\(locationLabel)" }
-            return "\(head)\n\(label)\n\(locationLabel)"
+            var lines = [head]
+            if let label = tag?.hashLabel { lines.append(label) }
+            lines.append(locationLabel)
+            if let remoteConnectionLabel { lines.append(remoteConnectionLabel) }
+            return lines.joined(separator: "\n")
         }
     }
 
@@ -137,7 +177,12 @@ final class AgentMonitor {
                 state: Self.state(of: item.session),
                 tabTitle: item.session.title,
                 directory: item.workspace.diskPath,
-                remoteHost: item.session.sshWorkspaceHost ?? item.session.remoteHost,
+                remoteHost: item.session.workspaceTransport.remoteDestination ?? item.session.remoteHost,
+                remoteConnectionLabel: Self.remoteConnectionLabel(for: item.session),
+                remoteTransportLabel: item.session.workspaceTransport.isRemote
+                    ? item.session.workspaceTransport.label.lowercased()
+                    : nil,
+                remoteDirectory: item.session.remoteWorkingDirectory,
                 tag: item.workspace.tag
             )
         }
@@ -149,6 +194,28 @@ final class AgentMonitor {
         if let exit = session.lastCommandExit, exit != 0 { return .failed }
         if session.activityState == .running { return .running }
         return .idle
+    }
+
+    private static func remoteConnectionLabel(for session: Session) -> String? {
+        guard case .mosh = session.workspaceTransport else { return nil }
+        switch session.remoteConnectionState {
+        case .launching:
+            return "mosh · connecting"
+        case .connected:
+            return "mosh · status connected"
+        case .degraded(let since, _):
+            let seconds = max(0, Int(Date().timeIntervalSince(since)))
+            return "mosh · status stale for \(seconds)s"
+        case .authenticationRequired(let since):
+            let seconds = max(0, Int(Date().timeIntervalSince(since)))
+            return "mosh · ssh authentication required for \(seconds)s"
+        case .disconnected:
+            return "mosh · ended"
+        case .failed:
+            return "mosh · failed"
+        case nil:
+            return nil
+        }
     }
 
     /// True when any session is actively working — an agent running, or a
@@ -191,8 +258,27 @@ final class AgentMonitor {
     /// observers on every cd / OSC title update.
     var hasActiveWork: Bool {
         return sessionsWithWorkspace.contains { item in
-            item.session.remoteHost != nil
-                || (!item.session.displayAgent.isShell && item.session.activityState == .running)
+            let session = item.session
+            if session.remoteHost != nil { return true }
+            if case .mosh = session.workspaceTransport {
+                switch session.remoteConnectionState {
+                case .launching:
+                    return true
+                case .connected:
+                    if !session.displayAgent.isShell && session.activityState == .running {
+                        return true
+                    }
+                case .degraded, .authenticationRequired:
+                    break
+                case .disconnected, .failed, nil:
+                    return false
+                }
+                if let renewed = session.remotePowerLeaseUpdatedAt,
+                   Date().timeIntervalSince(renewed) < 15 * 60 {
+                    return true
+                }
+            }
+            return !session.displayAgent.isShell && session.activityState == .running
         }
     }
 }

@@ -246,6 +246,10 @@ final class KookySettingsModel {
     /// non-default. The old `appearance.showAgentMenuBarItem` key is read once
     /// for migration.
     var showInMenuBar: Bool = true
+    /// Beta release valve for creating new Mosh workspaces. Existing/restored
+    /// Mosh workspaces remain usable when this is off; only the transport
+    /// choice in the creation sheet is hidden.
+    var showMoshTransport: Bool = true
 
     /// Whether the agent panel repeats each session's workspace tag as a stripe
     /// (and a `#name` hover line). Persisted under
@@ -390,6 +394,7 @@ final class KookySettingsModel {
             general: general,
             legacyAppearance: appearance
         )
+        showMoshTransport = (general["showMoshTransport"] as? Bool) ?? true
         showAgentPanelTag = (appearance["showAgentPanelTag"] as? Bool) ?? true
         showSearchPill = Self.resolvedShowSearchPill(
             appearance: appearance,
@@ -610,6 +615,7 @@ final class KookySettingsModel {
         general.removeValue(forKey: "showSearchPill")
         general.removeValue(forKey: "language")
         general["showInMenuBar"] = showInMenuBar ? nil : false
+        general["showMoshTransport"] = showMoshTransport ? nil : false
         general["awakeMode"] = awakeMode == .auto ? nil : awakeMode.rawValue
         if general.isEmpty {
             parsed.removeValue(forKey: "general")
@@ -1097,14 +1103,17 @@ struct KookySettingsView: View {
         .onChange(of: model.fileLinkAppId) { _, _ in model.scheduleSave() }
         .onChange(of: model.webLinkAppId) { _, _ in model.scheduleSave() }
 
-        return core
+        let preferences = core
             .onChange(of: model.customAgents) { _, _ in model.scheduleSave() }
             .onChange(of: model.resumeConversations) { _, _ in model.scheduleSave() }
             .onChange(of: model.sshRemoteAgentDetection) { _, _ in model.scheduleSave() }
             .onChange(of: model.showSearchPill) { _, _ in model.scheduleSave() }
             .onChange(of: model.copyOnSelect) { _, _ in model.scheduleSave() }
             .onChange(of: model.showInMenuBar) { _, _ in model.scheduleSave() }
+            .onChange(of: model.showMoshTransport) { _, _ in model.scheduleSave() }
             .onChange(of: model.showAgentPanelTag) { _, _ in model.scheduleSave() }
+
+        return preferences
             .onChange(of: model.terminalPresets) { _, _ in model.scheduleSave() }
             .onChange(of: model.hiddenPresets) { _, _ in model.scheduleSave() }
             .onChange(of: model.statusBarItems) { _, _ in model.scheduleSave() }
@@ -1397,6 +1406,16 @@ struct KookySettingsView: View {
                         .labelsHidden()
                         .toggleStyle(.switch)
                 }
+            }
+            .padding(.top, 22)
+
+            SettingsSection(title: "Remote Workspaces") {
+                SettingsRow(label: "show-mosh-beta") {
+                    Toggle("", isOn: $model.showMoshTransport)
+                        .labelsHidden()
+                        .toggleStyle(.switch)
+                }
+                SettingsCaption("Hides Mosh from the creation sheet; existing Mosh workspaces are unchanged.")
             }
             .padding(.top, 22)
 

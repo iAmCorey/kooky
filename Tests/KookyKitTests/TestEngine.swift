@@ -21,6 +21,9 @@ final class TestEngine: TerminalEngine {
     var onSearchTotal: ((Int) -> Void)?
     var onSearchSelected: ((Int) -> Void)?
     var pasteUploadHostProvider: (() -> String?)?
+    var pasteUploadTargetProvider: (() -> RemoteUploadTarget?)?
+    var pasteUploadFailureHandler: (() -> Void)?
+    var pasteDeliveryAllowedProvider: (() -> Bool)?
     var isRemoteSessionProvider: (() -> Bool)?
     var foregroundPid: pid_t? { nil }
 
