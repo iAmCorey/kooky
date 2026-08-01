@@ -2,6 +2,13 @@
 
 Notable changes per release. Tagged commits use `vX.Y.Z` shortform.
 
+## Unreleased
+
+- New: Remote Workspaces now support Mosh as a first-class transport alongside SSH, including per-tab sessions, UDP port/prediction controls, a seven-day orphan timeout, remote Agent launch, remote cwd, and explicit SSH fallback.
+- New: Mosh terminals use an independent SSH control plane for replayable Agent state and uploads. TCP/auth failures show connected/stale/auth-required status without stopping or relaunching the Mosh terminal; interactive credentials stay inside an OpenSSH PTY.
+- Safety: remote runtimes use private token-scoped directories, bounded protocols, atomic snapshots, explicit identity-verified cleanup, and crash-persisted best-effort reap leases. Network silence never triggers a kill.
+- Changed: File → New SSH Workspace… is now New Remote Workspace…, with SSH and Mosh choices. New state remains backward-compatible by dual-writing Mosh destinations for older Kooky releases, which safely downgrade them to SSH.
+
 ## v0.47.0 — 2026-07-31
 
 - New: native Simplified Chinese localization across kooky's settings, menus, sheets, popovers, notifications, status bar, command palette, and other app chrome; English remains the development language.

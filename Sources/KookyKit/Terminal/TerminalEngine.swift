@@ -82,11 +82,16 @@ protocol TerminalEngine: AnyObject {
     var onSearchSelected: ((Int) -> Void)? { get set }
     /// SSH destination pasted files should be uploaded to before their path
     /// is injected, or nil for plain local paste. Wired by `WorkspaceStore`
-    /// to the session's spawn-pinned `sshWorkspaceHost` — NOT the marker-
+    /// to the session's spawn-pinned workspace transport — NOT the marker-
     /// driven `remoteHost` status-bar signal, which the name deliberately
     /// avoids. The engine asks at paste time instead of caching so tab moves
     /// across panes/windows can't strand a stale host.
     var pasteUploadHostProvider: (() -> String?)? { get set }
+    /// Structured endpoint for transports whose SSH control/upload path uses
+    /// a non-default port or identity. Takes precedence over host-only.
+    var pasteUploadTargetProvider: (() -> RemoteUploadTarget?)? { get set }
+    var pasteUploadFailureHandler: (() -> Void)? { get set }
+    var pasteDeliveryAllowedProvider: (() -> Bool)? { get set }
     /// Whether filesystem paths emitted by this surface belong to a remote
     /// machine. Plain URLs remain openable; only scheme-less/file URL targets
     /// are suppressed so an SSH path can never accidentally open a same-named

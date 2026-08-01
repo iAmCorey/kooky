@@ -224,10 +224,24 @@ final class ShellIntegrationTests: XCTestCase {
         // (password / passphrase auth workspaces can't paste otherwise).
         let muxLine = "_kooky_mux_opts=(\(KookyShellIntegration.sshMultiplexOptions.joined(separator: " ")))"
         XCTAssertTrue(script.contains(muxLine))
-        XCTAssertTrue(KookyShellIntegration.sshMultiplexOptions.contains("ControlPath=/tmp/kooky-ssh-%C"))
+        XCTAssertTrue(
+            KookyShellIntegration.sshMultiplexOptions.contains(
+                "ControlPath=\(KookyShellIntegration.sshControlDirectory)/control-%C"
+            )
+        )
         // Gated on the kooky-ssh filename — the public `ssh` shim must not
         // silently switch manual ssh onto shared connections.
         XCTAssertTrue(script.contains("if [[ \"${0##*/}\" == \"kooky-ssh\" ]]; then"))
+    }
+
+    func testMoshWrapperReportsMissingAndNonzeroLaunchFailures() {
+        let script = KookyShellIntegration.moshWrapperScript
+        XCTAssertTrue(script.contains("mosh is not installed on this Mac"))
+        XCTAssertTrue(script.contains("kooky-remote-failure:missing:mosh"))
+        XCTAssertTrue(script.contains("kooky-remote-failure:exit:"))
+        XCTAssertTrue(script.contains("kooky-remote-exit:"))
+        XCTAssertTrue(script.contains("SECONDS < 15"))
+        XCTAssertTrue(script.contains("exit \"$status\""))
     }
 
     func testSshWrapperPassesThroughRemoteCommandsAndTransportModes() {
@@ -961,12 +975,14 @@ final class ShellIntegrationTests: XCTestCase {
         XCTAssertEqual(recorder.commands.count, 2)
         XCTAssertEqual(recorder.commands[0].0, "/usr/bin/ssh")
         XCTAssertTrue(recorder.commands[0].1.contains("deploy@example.com"))
+        XCTAssertTrue(recorder.commands[0].1.contains("--"))
         XCTAssertTrue(recorder.commands[0].1.last?.contains("mkdir -p -- '/tmp/kooky-pastes-") == true)
         // The mkdir ride-along sweep: expired paste dirs from earlier
         // sessions get removed without an extra connection.
         XCTAssertTrue(recorder.commands[0].1.last?.contains("-name 'kooky-pastes-*'") == true)
         XCTAssertTrue(recorder.commands[0].1.last?.contains("-mmin +60") == true)
         XCTAssertEqual(recorder.commands[1].0, "/usr/bin/scp")
+        XCTAssertTrue(recorder.commands[1].1.contains("--"))
         XCTAssertTrue(recorder.commands[1].1.contains("/tmp/some folder/图 one.png"))
         XCTAssertTrue(recorder.commands[1].1.last?.hasPrefix("deploy@example.com:/tmp/kooky-pastes-") == true)
         // BatchMode so a passwordless-auth miss fails fast instead of
@@ -975,7 +991,9 @@ final class ShellIntegrationTests: XCTestCase {
         // interactive-auth setups past this).
         XCTAssertTrue(recorder.commands[0].1.contains("BatchMode=yes"))
         XCTAssertTrue(recorder.commands[0].1.contains("ControlMaster=auto"))
-        XCTAssertTrue(recorder.commands[1].1.contains("ControlPath=/tmp/kooky-ssh-%C"))
+        XCTAssertTrue(recorder.commands[1].1.contains(
+            "ControlPath=\(KookyShellIntegration.sshControlDirectory)/control-%C"
+        ))
     }
 
     func testRemotePasteUploadFailsClosedWhenTransferFails() async throws {
@@ -992,6 +1010,69 @@ final class ShellIntegrationTests: XCTestCase {
         let pasted = await upload()
 
         XCTAssertNil(pasted, "a failed upload must paste nothing — never the local path")
+    }
+
+    @MainActor
+    func testRemotePasteFailureIsReportedWithoutDeliveringLocalPath() async {
+        KookyShellIntegration.remotePasteProcessRunnerOverride = { _, _, _ in false }
+        defer { KookyShellIntegration.remotePasteProcessRunnerOverride = nil }
+        let pasteboard = makeIsolatedPasteboard()
+        pasteboard.clearContents()
+        pasteboard.writeObjects([
+            URL(fileURLWithPath: "/tmp/private-local-path.png") as NSURL,
+        ])
+        let failure = expectation(description: "visible failure callback")
+        var delivered: [String] = []
+
+        XCTAssertTrue(KookyShellIntegration.paste(
+            from: pasteboard,
+            target: RemoteUploadTarget(destination: "deploy@example.com"),
+            onRemoteFailure: { failure.fulfill() },
+            deliver: { delivered.append($0) }
+        ))
+        await fulfillment(of: [failure], timeout: 2)
+
+        XCTAssertTrue(delivered.isEmpty)
+    }
+
+    func testMoshRemotePasteUsesSameSSHPortIdentityAndMultiplexPathAsControl() async throws {
+        final class Recorder: @unchecked Sendable {
+            let lock = NSLock()
+            var commands: [(String, [String])] = []
+            func record(_ executable: String, _ arguments: [String]) {
+                lock.lock()
+                commands.append((executable, arguments))
+                lock.unlock()
+            }
+        }
+        let recorder = Recorder()
+        KookyShellIntegration.remotePasteProcessRunnerOverride = { executable, arguments, _ in
+            recorder.record(executable, arguments)
+            return true
+        }
+        defer { KookyShellIntegration.remotePasteProcessRunnerOverride = nil }
+
+        let pasteboard = makeIsolatedPasteboard()
+        pasteboard.clearContents()
+        pasteboard.writeObjects([URL(fileURLWithPath: "/tmp/real-image.png") as NSURL])
+        let target = RemoteUploadTarget(
+            destination: "deploy@example.com",
+            sshPort: 2222,
+            identityFile: "/tmp/key with spaces"
+        )
+        let upload = try XCTUnwrap(
+            KookyShellIntegration.remotePasteUpload(from: pasteboard, target: target)
+        )
+        let result = await upload()
+        XCTAssertNotNil(result)
+        XCTAssertEqual(recorder.commands.count, 2)
+        for (_, arguments) in recorder.commands {
+            XCTAssertTrue(arguments.contains("2222"))
+            XCTAssertTrue(arguments.contains("/tmp/key with spaces"))
+            XCTAssertTrue(arguments.contains(
+                "ControlPath=\(KookyShellIntegration.sshControlDirectory)/control-%C"
+            ))
+        }
     }
 
     func testRemotePasteUploadReturnsNilForPlainText() {

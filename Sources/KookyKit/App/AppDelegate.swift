@@ -35,6 +35,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate 
     /// every window during ⌘Q) can tell "app quitting" from "user closed
     /// one window" — the former keeps each window's persisted slot.
     private var isTerminating = false
+    private var terminationReplyTask: Task<Void, Never>?
     /// Walks the macOS window cascade so a `⌘⇧N` window doesn't land
     /// exactly on top of the previous one.
     private var cascadePoint = NSPoint.zero
@@ -48,6 +49,10 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate 
     /// Native `NSStatusItem` showing the same cross-window live agent set as
     /// the right sidebar. It starts only after `AgentMonitor` is wired below.
     private var agentMenuBarController: AgentMenuBarController?
+    /// Mosh itself handles roaming; these observers concern only the side-band
+    /// SSH status channel. A recovery should bypass a pending 60s backoff.
+    private var workspaceWakeObserver: NSObjectProtocol?
+    private var remoteNetworkRecoveryMonitor: RemoteNetworkRecoveryMonitor?
     /// Agent hook events carry a global surface-UUID. Broadcast to every
     /// window's store — `applyHookEvent` & friends no-op when the session
     /// isn't theirs, so exactly the owning window reacts.
@@ -125,6 +130,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate 
         AgentIconStore.prune(keeping: settings.customAgents)
 
         restoreWindows()
+        installRemoteControlRecoveryObservers()
 
         NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
@@ -235,17 +241,28 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate 
     /// discarded once the adoption lands — `discardTab` (vs `closeTab`)
     /// keeps it off the `⌘⇧T` reopen stack since the user never asked for it.
     private func moveTabToNewWindow(sessionId: UUID) {
+        guard let transport = windowControllers.lazy.compactMap({
+            $0.store.transportForSession(id: sessionId)
+        }).first else { return }
         let controller = addWindow()
         guard let workspace = controller.store.active,
               let pane = workspace.activePane else { return }
+        workspace.transport = transport
         let defaultTab = pane.tabs.first
-        controller.store.handleTabDrop(droppedId: sessionId, to: pane, at: pane.tabs.count, in: workspace)
+        let adopted = controller.store.handleTabDrop(
+            droppedId: sessionId,
+            to: pane,
+            at: pane.tabs.count,
+            in: workspace
+        )
         // `count > 1` is a soft-fail guard for the rare case where
         // cross-window adoption returned false (e.g. the source store
         // vanished between right-click and here) — without it we'd discard
         // the placeholder, leaving the new window with zero tabs.
         if let defaultTab, pane.tabs.count > 1 {
             controller.store.discardTab(defaultTab, in: workspace)
+        } else if !adopted {
+            workspace.transport = .local
         }
     }
 
@@ -557,11 +574,40 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate 
         // Runs before AppKit closes the windows, so every `windowWillClose`
         // that follows sees the flag and keeps its persisted slot.
         isTerminating = true
-        return .terminateNow
+        guard windowControllers.contains(where: \.store.hasLiveMoshSessions)
+        else { return .terminateNow }
+        for controller in windowControllers {
+            controller.store.prepareForApplicationTermination()
+        }
+        terminationReplyTask?.cancel()
+        terminationReplyTask = Task { @MainActor in
+            let stores = windowControllers.map(\.store)
+            // Unified-deadline barrier: reply as soon as every window's remote
+            // cleanup has flushed, or when the deadline expires -- whichever
+            // comes first -- so ⌘Q neither hangs on a slow SSH nor quits before
+            // the reaper SHUTDOWN is on the wire.
+            let deadline = Date().addingTimeInterval(6)
+            while Date() < deadline {
+                if stores.allSatisfy({ !$0.hasPendingRemoteCleanup }) { break }
+                try? await Task.sleep(for: .milliseconds(100))
+                if Task.isCancelled { return }
+            }
+            guard !Task.isCancelled else { return }
+            NSApp.reply(toApplicationShouldTerminate: true)
+        }
+        return .terminateLater
     }
 
     public func applicationWillTerminate(_ notification: Notification) {
+        terminationReplyTask?.cancel()
+        terminationReplyTask = nil
         systemAppearanceObservation = nil
+        if let workspaceWakeObserver {
+            NSWorkspace.shared.notificationCenter.removeObserver(workspaceWakeObserver)
+            self.workspaceWakeObserver = nil
+        }
+        remoteNetworkRecoveryMonitor?.cancel()
+        remoteNetworkRecoveryMonitor = nil
         // `windowWillClose` is not reliably delivered to every window during
         // app termination, so flush each live window's store here — the 1s
         // `scheduleSave` debounce would otherwise drop changes made in the
@@ -583,6 +629,33 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate 
     /// wouldn't fire).
     public func applicationDidBecomeActive(_ notification: Notification) {
         markVisibleSessionRead()
+        retryAllRemoteControls()
+    }
+
+    private func installRemoteControlRecoveryObservers() {
+        workspaceWakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didWakeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.retryAllRemoteControls()
+            }
+        }
+
+        let monitor = RemoteNetworkRecoveryMonitor { [weak self] in
+            Task { @MainActor [weak self] in
+                self?.retryAllRemoteControls()
+            }
+        }
+        remoteNetworkRecoveryMonitor = monitor
+        monitor.start()
+    }
+
+    private func retryAllRemoteControls() {
+        for controller in windowControllers {
+            controller.store.retryAllRemoteControls()
+        }
     }
 
     // MARK: - Menu
@@ -616,7 +689,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate 
         mainMenu.addItem(submenu(buildMenu(title: "File", entries: [
             selfRow("New Tab", #selector(handleNewTab), "t"),
             selfRow("New Workspace", #selector(handleNewWorkspace), "n"),
-            selfRow("New SSH Workspace…", #selector(handleNewSSHWorkspace)),
+            selfRow("New Remote Workspace…", #selector(handleNewSSHWorkspace)),
             selfRow("New Window", #selector(handleNewWindow), "n", modifiers: [.command, .shift]),
             .separator,
             selfRow("Quick Open…", #selector(handleQuickOpen), "p"),

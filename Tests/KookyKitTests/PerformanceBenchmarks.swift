@@ -138,4 +138,134 @@ final class PerformanceBenchmarks: XCTestCase {
         let median = medianSeconds { count = AgentSessionScanner.scanDefaultRoots().count }
         print("BENCH session-scan-real: \(Int(median * 1000)) ms (\(count) records, machine-dependent)")
     }
+
+    /// Control-plane parser throughput under a deterministic 100k-frame load.
+    /// The control reader parses off-main; this still catches accidental
+    /// super-linear validation or allocation growth.
+    func testRemoteProtocolParses100kFrames() {
+        let lines = (1...100_000).map {
+            "KRP/1\tEVENT\t\($0)\tcodex\trunning\t/srv/app\t0\t-\t-"
+        }
+        var parsed = 0
+        let median = medianSeconds {
+            parsed = lines.reduce(into: 0) { count, line in
+                if case .success = RemoteRuntimeProtocol.parse(line: line) {
+                    count += 1
+                }
+            }
+        }
+        XCTAssertEqual(parsed, 100_000)
+        print("BENCH remote-protocol-parse-100k: \(Int(median * 1000)) ms")
+        XCTAssertLessThan(median, 5.0)
+    }
+
+    /// Pure argv generation, including the final quoted-byte size gate.
+    func testMoshCommandBuilderThroughput() throws {
+        let configuration = try XCTUnwrap(MoshWorkspaceConfiguration(
+            destination: "bench@example.test",
+            udpPort: .range(60_000...60_100),
+            prediction: .adaptive,
+            serverPath: "/opt/mosh/bin/mosh-server",
+            sshPort: 2_222,
+            identityFile: "/tmp/bench key",
+            networkTimeoutSeconds: 604_800
+        ))
+        let token = UUID(uuidString: "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE")!
+        var built = 0
+        let median = medianSeconds {
+            built = 0
+            for _ in 0..<10_000 {
+                if (try? MoshCommandBuilder.build(
+                    configuration: configuration,
+                    runtimeToken: token,
+                    remoteAgentCommand: "codex --model benchmark"
+                )) != nil {
+                    built += 1
+                }
+            }
+        }
+        XCTAssertEqual(built, 10_000)
+        print("BENCH mosh-command-builder-10k: \(Int(median * 1000)) ms")
+        XCTAssertLessThan(median, 5.0)
+    }
+
+    /// Sequence dedupe is the hot path before UI state mutation.
+    func testRemoteSequenceDedupeThroughput() {
+        var accepted = 0
+        let median = medianSeconds {
+            var tracker = RemoteSequenceTracker()
+            accepted = 0
+            for sequence in 1...100_000 {
+                if tracker.observe(UInt64(sequence)) == .next
+                    || sequence == 1 {
+                    accepted += 1
+                }
+                _ = tracker.observe(UInt64(sequence))
+            }
+        }
+        XCTAssertEqual(accepted, 100_000)
+        print("BENCH remote-sequence-dedupe-200k: \(Int(median * 1000)) ms")
+        XCTAssertLessThan(median, 2.0)
+    }
+
+    /// Pipe reads can split frames at any byte. Feed a fixed stream in tiny,
+    /// uneven chunks and assert that decoder memory/throughput remains linear.
+    func testRemoteChunkedPipeDecodeThroughput() {
+        let frameCount = 100_000
+        let stream = Data((1...frameCount).map {
+            "KRP/1\tEVENT\t\($0)\tcodex\trunning\t/srv/app\t0\t-\t-\n"
+        }.joined().utf8)
+        var decoded = 0
+        let median = medianSeconds {
+            var decoder = RemoteRuntimeStreamDecoder()
+            decoded = 0
+            var offset = 0
+            var chunkIndex = 0
+            let chunkSizes = [1, 7, 31, 257, 4_096]
+            while offset < stream.count {
+                let size = min(chunkSizes[chunkIndex % chunkSizes.count], stream.count - offset)
+                let end = offset + size
+                decoded += decoder.append(stream.subdata(in: offset..<end)).reduce(into: 0) {
+                    if case .frame = $1 { $0 += 1 }
+                }
+                offset = end
+                chunkIndex += 1
+            }
+            decoded += decoder.finish().reduce(into: 0) {
+                if case .frame = $1 { $0 += 1 }
+            }
+        }
+        XCTAssertEqual(decoded, frameCount)
+        print("BENCH remote-chunked-decode-100k: \(Int(median * 1000)) ms")
+        XCTAssertLessThan(median, 8.0)
+    }
+
+    /// A full agent-panel aggregation over 100 live sessions. This is the
+    /// cross-window observable walk exercised by every panel refresh.
+    @MainActor
+    func testAgentMonitorWalks100Sessions() {
+        let store = WorkspaceStore(
+            persistence: InMemoryPersistence(),
+            engineFactory: { TestEngine() },
+            optionsProvider: { _ in nil },
+            resumeProvider: { false }
+        )
+        guard let workspace = store.active else {
+            return XCTFail("expected seed workspace")
+        }
+        workspace.activeSession?.agent = .codex
+        for index in 1..<100 {
+            let template: AgentTemplate = index.isMultiple(of: 2) ? .claudeCode : .codex
+            _ = store.addTab(in: workspace, template: template)
+        }
+        let monitor = AgentMonitor()
+        monitor.storesProvider = { [store] }
+
+        var count = 0
+        let median = medianSeconds { count = monitor.entries.count }
+        XCTAssertEqual(count, 100)
+        print("BENCH agent-monitor-walk-100: \(Int(median * 1_000_000)) us")
+        XCTAssertLessThan(median, 1.0)
+        store.terminate()
+    }
 }

@@ -5,6 +5,7 @@ import SwiftUI
 /// when switching directly between modes (create → confirm-remove).
 private enum SidebarSheet: Identifiable {
     case createSSHWorkspace
+    case authenticateRemote(Session)
     case createWorktree(Workspace)
     case confirmRemoveWorktree(Workspace)
     case confirmCloseOthers(WorkspaceStore.BulkRemovalRequest)
@@ -13,6 +14,7 @@ private enum SidebarSheet: Identifiable {
     var id: String {
         switch self {
         case .createSSHWorkspace: return "create-ssh-workspace"
+        case .authenticateRemote(let session): return "authenticate-\(session.id.uuidString)"
         case .createWorktree(let ws): return "create-\(ws.id.uuidString)"
         case .confirmRemoveWorktree(let ws): return "remove-\(ws.id.uuidString)"
         case .confirmCloseOthers(let req): return "close-others-\(req.keeping.id.uuidString)"
@@ -188,9 +190,19 @@ struct SidebarView: View {
         .sheet(item: $sheet) { current in
             switch current {
             case .createSSHWorkspace:
-                CreateSSHWorkspaceSheet(
-                    create: { host in
-                        store.addWorkspace(sshRemoteHost: host)
+                CreateRemoteWorkspaceSheet(
+                    create: { transport in
+                        store.addWorkspace(transport: transport)
+                        dismissCurrentSheet()
+                    },
+                    dismiss: dismissCurrentSheet,
+                    moshEnabled: KookySettingsModel.shared.showMoshTransport
+                )
+            case .authenticateRemote(let session):
+                RemoteAuthenticationSheet(
+                    session: session,
+                    authenticated: {
+                        store.remoteAuthenticationSucceeded(for: session)
                         dismissCurrentSheet()
                     },
                     dismiss: dismissCurrentSheet
@@ -295,6 +307,11 @@ struct SidebarView: View {
         .onChange(of: store.pendingCreateSSHWorkspaceRequest) { _, pending in
             if pending { sheet = .createSSHWorkspace }
         }
+        .onChange(of: store.pendingRemoteAuthenticationSession?.id) { _, _ in
+            if let session = store.pendingRemoteAuthenticationSession {
+                sheet = .authenticateRemote(session)
+            }
+        }
         // ⌘W while a sheet is key (AppDelegate can't reach the sheet's
         // `@State` directly) — cancel it exactly like its cancel button.
         .onChange(of: store.sheetDismissRequest) { _, _ in
@@ -306,6 +323,9 @@ struct SidebarView: View {
             }
             if store.pendingCreateSSHWorkspaceRequest {
                 sheet = .createSSHWorkspace
+            }
+            if let session = store.pendingRemoteAuthenticationSession {
+                sheet = .authenticateRemote(session)
             }
         }
         // Bulk close-others request — keyed off keeping.id since the
@@ -333,6 +353,8 @@ struct SidebarView: View {
         switch sheet {
         case .createSSHWorkspace:
             store.pendingCreateSSHWorkspaceRequest = false
+        case .authenticateRemote:
+            store.pendingRemoteAuthenticationSession = nil
         case .createWorktree:
             store.pendingCreateWorktreeRequest = nil
         case .confirmRemoveWorktree:

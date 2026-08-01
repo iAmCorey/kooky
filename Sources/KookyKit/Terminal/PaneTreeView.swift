@@ -101,6 +101,10 @@ private struct PaneView: View {
                         if active.composerActive {
                             PaneComposerBar(
                                 session: active,
+                                onRemotePasteFailure: {
+                                    guard !active.isClosing else { return }
+                                    store.remoteTransferFailed(for: active)
+                                },
                                 onFocusGained: { store.activateTab(active, in: workspace) }
                             )
                             .padding(.horizontal, Theme.space3)
@@ -279,7 +283,10 @@ func paneStatusBarHasData(session: Session) -> Bool {
         case .pythonVenv: if session.environment.pythonVenv != nil { return true }
         case .nodeVersion: if session.environment.nodeVersion != nil { return true }
         case .proxy: if session.environment.proxy != nil { return true }
-        case .remoteLogin: if session.remoteHost != nil { return true }
+        case .remoteLogin:
+            if session.workspaceTransport.remoteDestination != nil || session.remoteHost != nil {
+                return true
+            }
         case .gitRepo: if session.gitStatus.repoRoot != nil { return true }
         case .gitBranch: if session.gitStatus.branch != nil { return true }
         case .gitDiff: if session.gitStatus.branch != nil && session.gitStatus.filesChanged > 0 { return true }
@@ -499,13 +506,109 @@ private struct PaneStatusBar: View {
 
     @ViewBuilder
     private var remoteLoginSegment: some View {
-        if let host = session.remoteHost {
+        if let host = session.workspaceTransport.remoteDestination {
+            StatusSegment(systemImage: remoteStatusSymbol) {
+                Text(verbatim: "\(session.workspaceTransport.label.lowercased()) \(host)\(remoteStatusSuffix)")
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .foregroundStyle(remoteStatusForeground)
+            }
+            .contentShape(Rectangle())
+            .onTapGesture {
+                if session.remoteTransferError != nil {
+                    store.dismissRemoteTransferError(for: session)
+                    return
+                }
+                switch session.remoteConnectionState {
+                case .authenticationRequired:
+                    store.requestRemoteAuthentication(for: session)
+                case .degraded:
+                    store.retryRemoteControl(for: session)
+                case .failed:
+                    store.openSSHWorkspaceFallback(from: workspace, session: session)
+                default:
+                    break
+                }
+            }
+            .help(remoteStatusHelp)
+        } else if let host = session.remoteHost {
             StatusSegment(systemImage: "person.fill") {
                 Text(host)
                     .lineLimit(1)
                     .truncationMode(.middle)
                     .foregroundStyle(Theme.chromeForeground)
             }
+        }
+    }
+
+    private var remoteStatusSuffix: String {
+        if session.remoteTransferError != nil {
+            return String(localized: " · upload failed", bundle: .kookyResources)
+        }
+        switch session.remoteConnectionState {
+        case .launching: return String(localized: " · connecting", bundle: .kookyResources)
+        case .connected: return ""
+        case .degraded: return String(localized: " · status stale", bundle: .kookyResources)
+        case .authenticationRequired: return String(localized: " · authenticate", bundle: .kookyResources)
+        case .disconnected: return String(localized: " · ended", bundle: .kookyResources)
+        case .failed: return String(localized: " · failed", bundle: .kookyResources)
+        case nil: return ""
+        }
+    }
+
+    private var remoteStatusSymbol: String {
+        if session.remoteTransferError != nil {
+            return "exclamationmark.triangle.fill"
+        }
+        switch session.remoteConnectionState {
+        case .degraded, .authenticationRequired, .failed:
+            return "exclamationmark.triangle.fill"
+        default:
+            return "network"
+        }
+    }
+
+    private var remoteStatusForeground: Color {
+        if session.remoteTransferError != nil {
+            return Theme.activityFailure
+        }
+        switch session.remoteConnectionState {
+        case .degraded, .authenticationRequired:
+            return Theme.activityAttention
+        case .failed:
+            return Theme.activityFailure
+        default:
+            return Theme.chromeForeground
+        }
+    }
+
+    private var remoteStatusHelp: String {
+        if let transferError = session.remoteTransferError {
+            return String(localized: "\(transferError) Click to dismiss.", bundle: .kookyResources)
+        }
+        switch session.remoteConnectionState {
+        case .authenticationRequired:
+            return String(localized: "SSH authentication is required. Click to authenticate.", bundle: .kookyResources)
+        case .degraded:
+            return String(localized: "The Mosh terminal is still running, but status is stale. Click to reconnect status.", bundle: .kookyResources)
+        case .failed(let failure):
+            switch failure {
+            case .executableMissing(let executable):
+                return String(localized: "\(executable) is not installed on this Mac. Install it or click to open as an SSH workspace.", bundle: .kookyResources)
+            case .udpBlocked:
+                return String(localized: "Mosh could not establish its UDP connection. Review the terminal diagnostics, retry, or click to open as SSH.", bundle: .kookyResources)
+            case .authenticationFailed:
+                return String(localized: "Mosh SSH authentication failed. Review the terminal diagnostics or click to open as SSH.", bundle: .kookyResources)
+            case .invalidConfiguration(let message), .bootstrapRejected(let message):
+                return String(localized: "\(message). Click to open as an SSH workspace.", bundle: .kookyResources)
+            case .processExited(let code, let message):
+                let detail = message
+                    ?? code.map { "exit \($0)" }
+                    ?? String(localized: "unknown error", bundle: .kookyResources)
+                return String(localized: "Mosh failed (\(detail)). Review the terminal diagnostics or click to open as SSH.", bundle: .kookyResources)
+            }
+        default:
+            return "\(session.workspaceTransport.label) \(session.workspaceTransport.remoteDestination ?? "")"
         }
     }
 
@@ -1131,12 +1234,27 @@ private struct PaneContextMenu: View {
                 // Same tier ladder as ⌘V in the surface — one shared entry,
                 // incl. the protected plain-text path.
                 let engine = session.engine
-                _ = KookyShellIntegration.paste(
-                    from: .general,
-                    host: session.sshWorkspaceHost,
-                    plainText: .viaCore({ engine.pasteFromClipboardViaCore() }),
-                    deliver: { engine.paste($0) }
-                )
+                if let target = RemoteUploadTarget(transport: session.workspaceTransport) {
+                    _ = KookyShellIntegration.paste(
+                        from: .general,
+                        target: target,
+                        onRemoteFailure: {
+                            guard !session.isClosing else { return }
+                            store.remoteTransferFailed(for: session)
+                        },
+                        deliver: {
+                            guard !session.isClosing else { return }
+                            engine.paste($0)
+                        }
+                    )
+                } else {
+                    _ = KookyShellIntegration.paste(
+                        from: .general,
+                        host: session.sshWorkspaceHost,
+                        plainText: .viaCore({ engine.pasteFromClipboardViaCore() }),
+                        deliver: { engine.paste($0) }
+                    )
+                }
             }
             Divider()
             KookyMenuRow(title: "Select All", shortcut: "⌘A") {
@@ -1352,13 +1470,15 @@ private struct PaneSearchBar: View {
 /// send, Shift+Return = newline — same as ChatGPT / Claude.ai / Slack).
 private struct PaneComposerBar: View {
     @Bindable var session: Session
+    let onRemotePasteFailure: () -> Void
     let onFocusGained: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             ComposerTextView(
                 text: $session.composerDraft,
-                remotePasteHost: session.sshWorkspaceHost,
+                remotePasteTarget: RemoteUploadTarget(transport: session.workspaceTransport),
+                onRemotePasteFailure: onRemotePasteFailure,
                 onSend: send,
                 onCancel: close
             )
@@ -1447,7 +1567,8 @@ private final class ComposerNSTextView: NSTextView {
     /// surface's ⌘V uses (see `TerminalEngine.pasteUploadHostProvider`).
     /// A plain value, set once at construction: it never changes for a
     /// session's lifetime and the composer is `.id(session.id)`-scoped.
-    var remotePasteHost: String?
+    var remotePasteTarget: RemoteUploadTarget?
+    var onRemotePasteFailure: (() -> Void)?
 
     override func paste(_ sender: Any?) {
         let pb = NSPasteboard.general
@@ -1459,8 +1580,11 @@ private final class ComposerNSTextView: NSTextView {
         // wherever the caret is when they land.
         if KookyShellIntegration.paste(
             from: pb,
-            host: remotePasteHost,
-            plainText: .callerHandles,
+            target: remotePasteTarget,
+            includePlainText: false,
+            onRemoteFailure: { [weak self] in
+                self?.onRemotePasteFailure?()
+            },
             deliver: { [weak self] text in
                 self?.insertText(text, replacementRange: self?.selectedRange() ?? NSRange())
             }
@@ -1477,13 +1601,15 @@ private final class ComposerNSTextView: NSTextView {
 /// intercepts the Return command itself, before any newline is inserted.
 private struct ComposerTextView: NSViewRepresentable {
     @Binding var text: String
-    var remotePasteHost: String?
+    var remotePasteTarget: RemoteUploadTarget?
+    var onRemotePasteFailure: () -> Void
     var onSend: () -> Void
     var onCancel: () -> Void
 
     func makeNSView(context: Context) -> NSScrollView {
         let tv = ComposerNSTextView(frame: .zero)
-        tv.remotePasteHost = remotePasteHost
+        tv.remotePasteTarget = remotePasteTarget
+        tv.onRemotePasteFailure = onRemotePasteFailure
         tv.minSize = .zero
         tv.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
         tv.isVerticallyResizable = true
@@ -1521,7 +1647,9 @@ private struct ComposerTextView: NSViewRepresentable {
     }
 
     func updateNSView(_ scroll: NSScrollView, context: Context) {
-        guard let tv = scroll.documentView as? NSTextView else { return }
+        guard let tv = scroll.documentView as? ComposerNSTextView else { return }
+        tv.remotePasteTarget = remotePasteTarget
+        tv.onRemotePasteFailure = onRemotePasteFailure
         if tv.string != text { tv.string = text }
     }
 

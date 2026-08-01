@@ -1,6 +1,40 @@
 import AppKit
 import Foundation
 
+struct RemoteUploadTarget: Equatable, Sendable {
+    let destination: String
+    let sshPort: UInt16?
+    let identityFile: String?
+
+    init(destination: String, sshPort: UInt16? = nil, identityFile: String? = nil) {
+        self.destination = destination
+        self.sshPort = sshPort
+        self.identityFile = WorkspaceTransport.normalizedNonEmpty(identityFile)
+    }
+
+    init?(transport: WorkspaceTransport) {
+        switch transport.normalized() {
+        case .ssh(let configuration):
+            self.init(destination: configuration.destination)
+        case .mosh(let configuration):
+            self.init(
+                destination: configuration.destination,
+                sshPort: configuration.sshPort.flatMap(UInt16.init(exactly:)),
+                identityFile: configuration.identityFile
+            )
+        case .local, .unsupported:
+            return nil
+        }
+    }
+
+    var sshOptions: [String] {
+        var options: [String] = []
+        if let sshPort { options.append(contentsOf: ["-p", String(sshPort)]) }
+        if let identityFile { options.append(contentsOf: ["-i", identityFile]) }
+        return options
+    }
+}
+
 /// We don't bundle ghostty's shell-integration assets, so we ship a small zsh
 /// wrapper that:
 ///   1. sources the user's real `~/.zshrc` so their config still applies, then
@@ -128,12 +162,30 @@ enum KookyShellIntegration {
     /// the caller falls through to its local paste path.
     @discardableResult
     static func pasteViaRemoteUpload(from pb: NSPasteboard, host: String?, deliver: @escaping @MainActor (String) -> Void) -> Bool {
-        guard let host, let upload = remotePasteUpload(from: pb, host: host) else { return false }
+        guard let host else { return false }
+        return pasteViaRemoteUpload(
+            from: pb,
+            target: RemoteUploadTarget(destination: host),
+            deliver: deliver
+        )
+    }
+
+    @discardableResult
+    static func pasteViaRemoteUpload(
+        from pb: NSPasteboard,
+        target: RemoteUploadTarget?,
+        onFailure: @escaping @MainActor () -> Void = {},
+        deliver: @escaping @MainActor (String) -> Void
+    ) -> Bool {
+        guard let target, let upload = remotePasteUpload(from: pb, target: target) else {
+            return false
+        }
         Task { @MainActor in
             if let text = await upload(), !text.isEmpty {
                 deliver(text)
             } else {
                 NSSound.beep()
+                onFailure()
             }
         }
         return true
@@ -201,6 +253,28 @@ enum KookyShellIntegration {
         return true
     }
 
+    @MainActor
+    static func paste(
+        from pb: NSPasteboard,
+        target: RemoteUploadTarget?,
+        includePlainText: Bool = true,
+        onRemoteFailure: @escaping @MainActor () -> Void = {},
+        deliver: @escaping @MainActor (String) -> Void
+    ) -> Bool {
+        if pasteViaRemoteUpload(
+            from: pb,
+            target: target,
+            onFailure: onRemoteFailure,
+            deliver: deliver
+        ) { return true }
+        let fileURLs = pasteboardFileURLs(pb)
+        if pasteImageAsync(from: pb, fileURLs: fileURLs, deliver: deliver) { return true }
+        guard let text = readTerminalPasteText(from: pb, fileURLs: fileURLs), !text.isEmpty else { return false }
+        if !includePlainText, fileURLs == nil { return false }
+        deliver(text)
+        return true
+    }
+
     /// Image tier of `paste(from:host:deliver:)`: a clipboard IMAGE needs a
     /// TIFF decode + PNG encode + disk write that froze the main thread for
     /// its whole duration — hundreds of ms for a Retina screenshot. The raw
@@ -246,34 +320,71 @@ enum KookyShellIntegration {
     /// into a fresh `/tmp/kooky-pastes-*` dir, resolving to the space-joined
     /// escaped remote paths (nil on any failure).
     static func remotePasteUpload(from pb: NSPasteboard, host: String) -> (@Sendable () async -> String?)? {
+        remotePasteUpload(from: pb, target: RemoteUploadTarget(destination: host))
+    }
+
+    static func remotePasteUpload(
+        from pb: NSPasteboard,
+        target: RemoteUploadTarget
+    ) -> (@Sendable () async -> String?)? {
         let remoteDir = "/tmp/kooky-pastes-\(pasteFilenameTimestamp.string(from: Date()))-\(UUID().uuidString.prefix(8))"
-        let work: @Sendable () -> String?
+        let service = OpenSSHRemoteTransferService { executable, arguments, timeout in
+            runRemotePasteProcess(executable, arguments, timeout: timeout)
+        }
+        let makePayload: @Sendable () async -> RemoteTransferPayload?
         if let urls = pasteboardFileURLs(pb) {
             let files = remotePasteDestinations(for: urls, remoteDir: remoteDir)
-            work = { performRemotePasteUpload(files, to: host, remoteDir: remoteDir) }
+            makePayload = { transferPayload(files, remoteDir: remoteDir) }
         } else if let raw = pasteboardRawImage(pb) {
-            work = {
-                // Transcode rides the same serial lane as local pastes —
-                // without it a burst of SSH screenshot pastes decodes
-                // concurrently while local ones queue. The scp stays on the
-                // caller's GCD thread (it blocks on waitUntilExit).
-                guard let cached = pasteTranscodeQueue.sync(execute: { writePasteImageToCache(raw) })
-                else { return nil }
-                let files = remotePasteDestinations(for: [cached], remoteDir: remoteDir)
-                return performRemotePasteUpload(files, to: host, remoteDir: remoteDir)
+            makePayload = {
+                await withCheckedContinuation { continuation in
+                    pasteTranscodeQueue.async {
+                        guard let cached = writePasteImageToCache(raw) else {
+                            continuation.resume(returning: nil)
+                            return
+                        }
+                        let files = remotePasteDestinations(
+                            for: [cached],
+                            remoteDir: remoteDir
+                        )
+                        continuation.resume(returning: transferPayload(
+                            files,
+                            remoteDir: remoteDir
+                        ))
+                    }
+                }
             }
         } else {
             return nil
         }
         return {
-            await withCheckedContinuation { continuation in
-                // GCD, not the cooperative pool — `waitUntilExit` blocks its
-                // thread for up to the scp timeout.
-                DispatchQueue.global(qos: .userInitiated).async {
-                    continuation.resume(returning: work())
-                }
+            guard let payload = await makePayload() else { return nil }
+            switch await service.upload(payload: payload, to: target) {
+            case .success(let paths):
+                return paths.map(backslashEscape).joined(separator: " ")
+            case .failure:
+                return nil
             }
         }
+    }
+
+    private static func transferPayload(
+        _ files: [(local: URL, remotePath: String)],
+        remoteDir: String
+    ) -> RemoteTransferPayload {
+        let items = files.map { file in
+            var isDirectory: ObjCBool = false
+            FileManager.default.fileExists(
+                atPath: file.local.path,
+                isDirectory: &isDirectory
+            )
+            return RemoteTransferItem(
+                localURL: file.local,
+                remotePath: file.remotePath,
+                isDirectory: isDirectory.boolValue
+            )
+        }
+        return RemoteTransferPayload(remoteDirectory: remoteDir, items: items)
     }
 
     /// Connection-multiplex options shared by the kooky-ssh MAIN connection
@@ -286,41 +397,25 @@ enum KookyShellIntegration {
     /// the master (one TCP+auth handshake per paste burst, not per file).
     /// /tmp keeps the socket path well under the 104-byte sun_path limit;
     /// %C hashes host+port+user.
+    static let sshControlDirectory: String = {
+        let path = "/tmp/kooky-ssh-\(getuid())"
+        try? FileManager.default.createDirectory(
+            atPath: path,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
+        try? FileManager.default.setAttributes(
+            [.posixPermissions: 0o700],
+            ofItemAtPath: path
+        )
+        return path
+    }()
+
     static let sshMultiplexOptions = [
         "-o", "ControlMaster=auto",
-        "-o", "ControlPath=/tmp/kooky-ssh-%C",
+        "-o", "ControlPath=\(sshControlDirectory)/control-%C",
         "-o", "ControlPersist=30",
     ]
-
-    private static let remotePasteSSHOptions = [
-        "-o", "BatchMode=yes",
-        "-o", "ConnectTimeout=10",
-    ] + sshMultiplexOptions
-
-    /// mkdir for this paste plus a piggybacked expiry sweep: kooky-pastes
-    /// dirs older than an hour are removed on the way (ample time for any
-    /// agent to consume the pasted path). `;` — not `&&` — so a sweep
-    /// failure (another user's dir, say) can't fail the mkdir; errors muted.
-    private static func remotePasteMkdirCommand(_ remoteDir: String) -> String {
-        "find /tmp -maxdepth 1 -name 'kooky-pastes-*' -type d -mmin +60 -exec rm -rf {} + 2>/dev/null; mkdir -p -- \(quote(remoteDir))"
-    }
-
-    private static func performRemotePasteUpload(_ files: [(local: URL, remotePath: String)], to host: String, remoteDir: String) -> String? {
-        guard runRemotePasteProcess(
-            "/usr/bin/ssh",
-            remotePasteSSHOptions + [host, remotePasteMkdirCommand(remoteDir)],
-            timeout: 20
-        ) else { return nil }
-        for file in files {
-            var isDirectory: ObjCBool = false
-            FileManager.default.fileExists(atPath: file.local.path, isDirectory: &isDirectory)
-            var args = remotePasteSSHOptions
-            if isDirectory.boolValue { args.append("-r") }
-            args.append(contentsOf: [file.local.path, "\(host):\(file.remotePath)"])
-            guard runRemotePasteProcess("/usr/bin/scp", args, timeout: 60) else { return nil }
-        }
-        return files.map { backslashEscape($0.remotePath) }.joined(separator: " ")
-    }
 
     /// Runs ssh/scp to completion on the calling (GCD) thread with a
     /// watchdog kill at `timeout`. All stdio goes to /dev/null — BatchMode
@@ -748,6 +843,7 @@ enum KookyShellIntegration {
         // changes manually typed ssh). Same script; the filename is what
         // unlocks the `--` remote-agent protocol.
         writeWrapper(name: "kooky-ssh", script: sshWrapperScript)
+        writeWrapper(name: "kooky-mosh", script: moshWrapperScript)
         refreshSshRemoteAgentDetection(enabled: sshRemoteAgentDetection)
 
         let hookCmd = kookyHookBinaryPath
@@ -1743,6 +1839,48 @@ enum KookyShellIntegration {
         """
     }()
 
+    /// Private Mosh entry point. Swift owns the complete argv construction;
+    /// this script only resolves the user's real `mosh` after their shell rc
+    /// has populated PATH, then preserves argv and the process exit status.
+    static let moshWrapperScript = """
+    #!/usr/bin/env bash
+    self_dir="$(cd "$(dirname "$0")" && pwd)"
+    real=""
+    IFS=:
+    for dir in $PATH; do
+        [[ "$dir" == "$self_dir" ]] && continue
+        if [[ -x "$dir/mosh" ]]; then
+            real="$dir/mosh"
+            break
+        fi
+    done
+    unset IFS
+    if [[ -z "$real" ]]; then
+        printf '\\n  \\033[33mmosh is not installed on this Mac.\\033[0m\\n\\n' >&2
+        printf '\\033]2;%s\\a' '\(RemoteLaunchFailureMarker.title(for: .executableMissing("mosh")))' \
+            > /dev/tty 2>/dev/null || :
+        exit 127
+    fi
+    "$real" "$@"
+    status=$?
+    if (( status != 0 )); then
+        if (( SECONDS < 15 )); then
+            # Fast non-zero exit: mosh never established (missing server,
+            # blocked UDP, refused auth). Actionable launch failure + SSH
+            # fallback.
+            printf '\\033]2;kooky-remote-failure:exit:%s\\a' "$status" \
+                > /dev/tty 2>/dev/null || :
+        else
+            # The session established and ran; a later non-zero exit is a
+            # normal remote-command end, not a launch failure. Report it as a
+            # neutral exit so the tab shows "ended" instead of "failed".
+            printf '\\033]2;kooky-remote-exit:%s\\a' "$status" \
+                > /dev/tty 2>/dev/null || :
+        fi
+    fi
+    exit "$status"
+    """
+
     /// Remote-side bootstrap used only by `sshWrapperScript`. It writes wrapper
     /// binaries into a temp dir on the remote, then starts the user's shell
     /// with that dir prepended after normal rc replay. The temp dir is removed
@@ -1786,6 +1924,50 @@ enum KookyShellIntegration {
         _kooky_slug="${0##*/}"
         _kooky_self_dir=$(CDPATH= cd "$(dirname "$0")" && pwd)
         _kooky_real=""
+        # A dead reaper must never SIGPIPE-kill the agent while we register.
+        trap '' PIPE
+        # Register this wrapper's live process group with the reaper through the
+        # inherited, already-open control fd (constraint 2: no FIFO open, single
+        # small frame, best-effort). The reaper verifies pid+start before it
+        # ever signals, and targets the CURRENT pgid, so a synchronously running
+        # agent's whole job is reclaimed on PTY death.
+        _kooky_reaper_reg=
+        if [ "${KOOKY_REAPER_ENABLED:-}" = 1 ]; then
+            _kooky_reap_pgid=$(ps -o pgid= -p $$ 2>/dev/null || printf '')
+            _kooky_reap_pgid=${_kooky_reap_pgid#${_kooky_reap_pgid%%[! ]*}}
+            _kooky_reap_pgid=${_kooky_reap_pgid%${_kooky_reap_pgid##*[! ]}}
+            _kooky_reap_sid=$(ps -o sid= -p $$ 2>/dev/null ||
+                ps -o sess= -p $$ 2>/dev/null || printf '')
+            _kooky_reap_sid=${_kooky_reap_sid#${_kooky_reap_sid%%[! ]*}}
+            _kooky_reap_sid=${_kooky_reap_sid%${_kooky_reap_sid##*[! ]}}
+            _kooky_reap_start=$(ps -o lstart= -p $$ 2>/dev/null || printf '')
+            case "$_kooky_reap_pgid:$_kooky_reap_sid" in
+                *[!0-9:]*|::*|*::|:*|*:) ;;
+                *)
+                    printf 'REG\t%s\t%s\t%s\t%s\n' \
+                        "$$" "$_kooky_reap_pgid" "$_kooky_reap_start" "$_kooky_reap_sid" \
+                        >&6 2>/dev/null && _kooky_reaper_reg=1 || :
+                    ;;
+            esac
+        fi
+        _kooky_collector_alive() {
+            _kooky_collector=
+            [ -n "${KOOKY_REMOTE_RUNTIME:-}" ] &&
+                IFS= read -r _kooky_collector \
+                    < "$KOOKY_REMOTE_RUNTIME/collector.pid" 2>/dev/null ||
+                return 1
+            case "$_kooky_collector" in *[!0-9]*|'') return 1 ;; esac
+            kill -0 "$_kooky_collector" 2>/dev/null
+        }
+        # Deregistration is a bookkeeping-only signal: it removes this wrapper
+        # from the reaper's table so a normal exit leaves no residue to reap
+        # (constraint 4 -- the reaper must not KILL an agent's intentional
+        # background jobs on a clean UNREG).
+        _kooky_reaper_unreg() {
+            [ -n "$_kooky_reaper_reg" ] || return 0
+            printf 'UNREG\t%s\n' "$$" >&6 2>/dev/null || :
+            _kooky_reaper_reg=
+        }
         _kooky_old_ifs=$IFS
         IFS=:
         for _kooky_dir in $PATH; do
@@ -1797,14 +1979,43 @@ enum KookyShellIntegration {
         IFS=$_kooky_old_ifs
 
         if [ -z "$_kooky_real" ]; then
+            _kooky_reaper_unreg
+            if [ -n "${KOOKY_REMOTE_FIFO:-}" ] && _kooky_collector_alive; then
+                printf 'P/1\tAGENT\t%s\tended\n' "$_kooky_slug" 2>/dev/null >&8 || :
+            fi
             printf '\033]2;kooky-agent:%s:ended\a' "$_kooky_slug" > /dev/tty 2>/dev/null
             printf '\n  %s is not installed.\n\n' "$_kooky_slug" >&2
             exit 127
         fi
 
+        if [ -n "${KOOKY_REMOTE_FIFO:-}" ] && _kooky_collector_alive; then
+            printf 'P/1\tAGENT\t%s\trunning\n' "$_kooky_slug" 2>/dev/null >&8 || :
+        fi
         printf '\033]2;kooky-agent:%s:running\a' "$_kooky_slug" > /dev/tty 2>/dev/null
-        "$_kooky_real" "$@"
+        case "$_kooky_slug" in
+            claude)
+                if [ -n "${KOOKY_REMOTE_CLAUDE_SETTINGS:-}" ]; then
+                    "$_kooky_real" --settings "$KOOKY_REMOTE_CLAUDE_SETTINGS" "$@"
+                else
+                    "$_kooky_real" "$@"
+                fi
+                ;;
+            codex)
+                if [ -n "${KOOKY_REMOTE_HOOK:-}" ]; then
+                    "$_kooky_real" -c "notify=[\"$KOOKY_REMOTE_HOOK\",\"AGENT\",\"codex\",\"attention\"]" "$@"
+                else
+                    "$_kooky_real" "$@"
+                fi
+                ;;
+            *)
+                "$_kooky_real" "$@"
+                ;;
+        esac
         _kooky_status=$?
+        _kooky_reaper_unreg
+        if [ -n "${KOOKY_REMOTE_FIFO:-}" ] && _kooky_collector_alive; then
+            printf 'P/1\tAGENT\t%s\tended\n' "$_kooky_slug" 2>/dev/null >&8 || :
+        fi
         printf '\033]2;kooky-agent:%s:ended\a' "$_kooky_slug" > /dev/tty 2>/dev/null
         exit "$_kooky_status"
         KOOKY_AGENT_WRAPPER
@@ -1835,6 +2046,32 @@ enum KookyShellIntegration {
         [[ -r "\${ZDOTDIR:-\$HOME}/.zshrc" ]] && source "\${ZDOTDIR:-\$HOME}/.zshrc"
         export KOOKY_AGENT_MARKERS=1
         export PATH="$_kooky_bin:\$PATH"
+        if [[ -n "\${KOOKY_REMOTE_FIFO:-}" ]]; then
+            autoload -Uz add-zsh-hook
+            __kooky_remote_precmd() {
+                local _kooky_last=\$?
+                local _kooky_collector
+                IFS= read -r _kooky_collector \
+                    < "\$KOOKY_REMOTE_RUNTIME/collector.pid" 2>/dev/null &&
+                    [[ "\$_kooky_collector" == <-> ]] &&
+                    kill -0 "\$_kooky_collector" 2>/dev/null ||
+                    return "\$_kooky_last"
+                local _kooky_cwd=\$PWD
+                _kooky_cwd=\${_kooky_cwd//\$'\\t'/ }
+                _kooky_cwd=\${_kooky_cwd//\$'\\r'/ }
+                _kooky_cwd=\${_kooky_cwd//\$'\\n'/ }
+                local _kooky_truncated=0
+                if (( \${#_kooky_cwd} > 96 )); then
+                    _kooky_cwd=\${_kooky_cwd[1,96]}
+                    _kooky_truncated=1
+                fi
+                printf 'P/1\\tPROMPT\\t%s\\t%s\\t%s\\t-\\n' \
+                    "\$_kooky_cwd" "\$_kooky_truncated" "\$_kooky_last" \
+                    2>/dev/null >&8 || :
+                return "\$_kooky_last"
+            }
+            add-zsh-hook precmd __kooky_remote_precmd
+        fi
         \#(remoteAgentEvalBlock(heredocEscaped: true))
         KOOKY_ZSHRC
                 KOOKY_ORIGINAL_ZDOTDIR="${ZDOTDIR:-}" ZDOTDIR="$_kooky_root/zsh" zsh -l
@@ -1856,9 +2093,76 @@ enum KookyShellIntegration {
         unset _kooky_login_rc_loaded
         export KOOKY_AGENT_MARKERS=1
         export PATH="$_kooky_bin:\$PATH"
+        if [[ -n "\${KOOKY_REMOTE_FIFO:-}" ]]; then
+            __kooky_remote_prompt() {
+                local _kooky_last=\$?
+                local _kooky_collector
+                IFS= read -r _kooky_collector \
+                    < "\$KOOKY_REMOTE_RUNTIME/collector.pid" 2>/dev/null ||
+                    return "\$_kooky_last"
+                case "\$_kooky_collector" in
+                    *[!0-9]*|'') return "\$_kooky_last" ;;
+                esac
+                kill -0 "\$_kooky_collector" 2>/dev/null ||
+                    return "\$_kooky_last"
+                local _kooky_cwd=\$PWD
+                _kooky_cwd=\${_kooky_cwd//\$'\\t'/ }
+                _kooky_cwd=\${_kooky_cwd//\$'\\r'/ }
+                _kooky_cwd=\${_kooky_cwd//\$'\\n'/ }
+                local _kooky_truncated=0
+                if (( \${#_kooky_cwd} > 96 )); then
+                    _kooky_cwd=\${_kooky_cwd:0:96}
+                    _kooky_truncated=1
+                fi
+                printf 'P/1\\tPROMPT\\t%s\\t%s\\t%s\\t-\\n' \
+                    "\$_kooky_cwd" "\$_kooky_truncated" "\$_kooky_last" \
+                    2>/dev/null >&8 || :
+                return "\$_kooky_last"
+            }
+            if declare -p PROMPT_COMMAND 2>/dev/null | grep -q 'declare -a'; then
+                PROMPT_COMMAND=(__kooky_remote_prompt "\${PROMPT_COMMAND[@]}")
+            else
+                PROMPT_COMMAND="__kooky_remote_prompt\${PROMPT_COMMAND:+;\$PROMPT_COMMAND}"
+            fi
+        fi
         \#(remoteAgentEvalBlock(heredocEscaped: true))
         KOOKY_BASHRC
                 bash --rcfile "$_kooky_root/bashrc" -i
+                ;;
+            */fish)
+                export KOOKY_AGENT_MARKERS=1
+                export PATH="$_kooky_bin:$PATH"
+                mkdir -p "$_kooky_root/fish/fish/vendor_conf.d"
+                cat > "$_kooky_root/fish/fish/vendor_conf.d/kooky.fish" <<'KOOKY_FISH'
+        if test -n "$KOOKY_REMOTE_FIFO"
+            function __kooky_remote_prompt --on-event fish_prompt
+                set -l _kooky_last $status
+                set -l _kooky_collector
+                read -l _kooky_collector \
+                    < "$KOOKY_REMOTE_RUNTIME/collector.pid" 2>/dev/null
+                and string match -rq '^[0-9]+$' -- "$_kooky_collector"
+                and kill -0 "$_kooky_collector" 2>/dev/null
+                or return $_kooky_last
+                set -l _kooky_cwd (string replace -a \t ' ' -- $PWD)
+                set _kooky_cwd (string replace -a \r ' ' -- $_kooky_cwd)
+                set _kooky_cwd (string replace -a \n ' ' -- $_kooky_cwd)
+                set -l _kooky_truncated 0
+                if test (string length -- $_kooky_cwd) -gt 96
+                    set _kooky_cwd (string sub -s 1 -l 96 -- $_kooky_cwd)
+                    set _kooky_truncated 1
+                end
+                printf 'P/1\tPROMPT\t%s\t%s\t%s\t-\n' \
+                    "$_kooky_cwd" "$_kooky_truncated" "$_kooky_last" >&8
+                return $_kooky_last
+            end
+        end
+        if test -n "$KOOKY_REMOTE_AGENT"
+            set -l _kooky_remote_agent $KOOKY_REMOTE_AGENT
+            set -e KOOKY_REMOTE_AGENT
+            eval "$_kooky_remote_agent"
+        end
+        KOOKY_FISH
+                XDG_DATA_DIRS="$_kooky_root/fish:${XDG_DATA_DIRS:-/usr/local/share:/usr/share}" fish -l
                 ;;
             *)
                 export KOOKY_AGENT_MARKERS=1

@@ -150,7 +150,7 @@ enum PaletteIndex {
         }
         items.append(PaletteItem(
             id: "create-ssh-workspace",
-            title: String(localized: "New SSH Workspace…", bundle: bundle),
+            title: String(localized: "New Remote Workspace…", bundle: bundle),
             subtitle: String(localized: "workspace on a remote host", bundle: bundle),
             kind: .createSSHWorkspace,
             symbol: "network",

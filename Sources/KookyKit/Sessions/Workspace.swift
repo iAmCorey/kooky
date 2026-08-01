@@ -58,13 +58,26 @@ final class Workspace: Identifiable {
     /// target the wrong path.
     var worktreePath: URL? = nil
 
-    /// SSH destination this workspace connects to (`user@host` or bare
-    /// `host`). Non-nil marks an SSH workspace: every new plain-terminal tab
-    /// auto-connects there, and agent tabs launch their agent on the remote
-    /// through the kooky-ssh wrapper. Set at creation, persisted, and never
-    /// mutated afterwards — a remote project stays one cohesive workspace
-    /// instead of each new tab dropping back to the local machine.
-    var sshRemoteHost: String? = nil
+    /// How tabs in this workspace are launched. Set at creation, persisted,
+    /// and inherited by every new tab and split.
+    var transport: WorkspaceTransport = .local
+
+    var isRemote: Bool { transport.isRemote }
+    var remoteDestination: String? { transport.remoteDestination }
+    var supportsRemoteUpload: Bool { transport.supportsRemoteUpload }
+    var transportLabel: String { transport.label }
+
+    /// Source compatibility for the pre-transport SSH implementation.
+    /// New business logic must use `transport` or the derived properties.
+    var sshRemoteHost: String? {
+        get {
+            guard case .ssh(let configuration) = transport else { return nil }
+            return configuration.destination
+        }
+        set {
+            transport = newValue.map { WorkspaceTransport.ssh(destination: $0) } ?? .local
+        }
+    }
 
     /// User-assigned marker drawn as a stripe down the row's leading edge, in
     /// both sidebar modes. Nil for every workspace until the user sets one from
@@ -88,10 +101,10 @@ final class Workspace: Identifiable {
         // Mirror the active tab's OSC title so an `ssh` session shows the
         // remote host in the sidebar, not the stale local directory.
         if let reported = activeSession?.terminalTitle, !reported.isEmpty { return reported }
-        // SSH workspaces are "about" their remote, not the local cwd the
-        // connection happened to spawn from. (`normalizedSSHHost` gates every
-        // write, so non-nil implies non-blank.)
-        if let host = sshRemoteHost { return host }
+        // Remote workspaces are "about" their destination, not the local cwd
+        // the transport process happened to spawn from.
+        if let destination = remoteDestination { return destination }
+        if isRemote { return transportLabel }
         if workingDirectory.path == homeDirectoryPath { return "Home" }
         let last = workingDirectory.lastPathComponent
         return last.isEmpty ? workingDirectory.path : last
@@ -117,11 +130,16 @@ final class Workspace: Identifiable {
         var locationLines: [String] = []
         if let branch = worktreeBranch, !branch.isEmpty {
             locationLines = ["branch \(singleLine(branch))", diskPath.path]
-        } else if let host = sshRemoteHost {
-            // An un-renamed SSH workspace whose remote reported no title is
+        } else if let host = remoteDestination {
+            // An un-renamed remote workspace whose remote reported no title is
             // already named after its host, so a location line would echo
             // line 1 — fold them together instead.
-            if titleLine == host { titleLine = "ssh \(host)" } else { locationLines = ["ssh \(host)"] }
+            let prefix = transportLabel.lowercased()
+            if titleLine == host {
+                titleLine = "\(prefix) \(host)"
+            } else {
+                locationLines = ["\(prefix) \(host)"]
+            }
         } else {
             locationLines = [workingDirectory.path]
         }

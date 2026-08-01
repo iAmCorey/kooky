@@ -569,6 +569,18 @@ final class LibghosttyEngine: TerminalEngine {
         get { surfaceView.pasteUploadHostProvider }
         set { surfaceView.pasteUploadHostProvider = newValue }
     }
+    var pasteUploadTargetProvider: (() -> RemoteUploadTarget?)? {
+        get { surfaceView.pasteUploadTargetProvider }
+        set { surfaceView.pasteUploadTargetProvider = newValue }
+    }
+    var pasteUploadFailureHandler: (() -> Void)? {
+        get { surfaceView.pasteUploadFailureHandler }
+        set { surfaceView.pasteUploadFailureHandler = newValue }
+    }
+    var pasteDeliveryAllowedProvider: (() -> Bool)? {
+        get { surfaceView.pasteDeliveryAllowedProvider }
+        set { surfaceView.pasteDeliveryAllowedProvider = newValue }
+    }
     var isRemoteSessionProvider: (() -> Bool)? {
         get { surfaceView.isRemoteSessionProvider }
         set { surfaceView.isRemoteSessionProvider = newValue }
@@ -696,6 +708,9 @@ final class GhosttySurfaceView: NSView {
     var onSearchTotal: ((Int) -> Void)?
     var onSearchSelected: ((Int) -> Void)?
     var pasteUploadHostProvider: (() -> String?)?
+    var pasteUploadTargetProvider: (() -> RemoteUploadTarget?)?
+    var pasteUploadFailureHandler: (() -> Void)?
+    var pasteDeliveryAllowedProvider: (() -> Bool)?
     var isRemoteSessionProvider: (() -> Bool)?
     var currentDirectory: URL?
     var foregroundPid: pid_t? {
@@ -1206,16 +1221,38 @@ final class GhosttySurfaceView: NSView {
         // path, not bare filename) and raw image data (screenshots →
         // spilled to a cache PNG so agents can open it as a path).
         if cmdOnly, event.charactersIgnoringModifiers?.lowercased() == "v" {
-            // One entry owns the whole tier ladder: remote upload for SSH
-            // workspaces, off-main transcode for clipboard images, escaped
-            // paths for files — and plain text handed to the core's protected
-            // paste path (clipboard-paste-protection).
-            if KookyShellIntegration.paste(
-                from: .general,
-                host: pasteUploadHostProvider?(),
-                plainText: .viaCore({ [weak self] in self?.pasteFromClipboardViaCore() ?? false }),
-                deliver: { [weak self] in self?.paste($0) }
-            ) {
+            // One entry owns the whole tier ladder: remote upload for SSH /
+            // mosh workspaces, off-main transcode for clipboard images,
+            // escaped paths for files, and plain text handed to the core's
+            // protected paste path (clipboard-paste-protection) on local
+            // surfaces.
+            let handled: Bool
+            if let target = pasteUploadTargetProvider?() {
+                handled = KookyShellIntegration.paste(
+                    from: .general,
+                    target: target,
+                    onRemoteFailure: { [weak self] in
+                        guard self?.pasteDeliveryAllowedProvider?() != false else {
+                            return
+                        }
+                        self?.pasteUploadFailureHandler?()
+                    },
+                    deliver: { [weak self] text in
+                        guard self?.pasteDeliveryAllowedProvider?() != false else {
+                            return
+                        }
+                        self?.paste(text)
+                    }
+                )
+            } else {
+                handled = KookyShellIntegration.paste(
+                    from: .general,
+                    host: pasteUploadHostProvider?(),
+                    plainText: .viaCore({ [weak self] in self?.pasteFromClipboardViaCore() ?? false }),
+                    deliver: { [weak self] in self?.paste($0) }
+                )
+            }
+            if handled {
                 return
             }
         }

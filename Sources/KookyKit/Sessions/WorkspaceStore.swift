@@ -151,6 +151,7 @@ final class WorkspaceStore {
     }
 
     var fileTreeRoot: URL? {
+        guard active?.isRemote != true else { return nil }
         guard let override = fileTreeRootOverride,
               override.workspaceId == active?.id,
               override.sessionId == active?.activeSession?.id else {
@@ -227,6 +228,7 @@ final class WorkspaceStore {
     /// mode, first promoting a hidden/compact sidebar to full — the tree
     /// only mounts in the full sidebar (`SidebarView.fileTreeIsMounted`).
     func revealFileTree(root: URL? = nil) {
+        guard active?.isRemote != true else { return }
         if let root, let workspace = active, let session = workspace.activeSession {
             fileTreeRootOverride = FileTreeRootOverride(
                 workspaceId: workspace.id,
@@ -270,7 +272,27 @@ final class WorkspaceStore {
     /// default a test construction silently inherits; `AppDelegate.addWindow`
     /// wires the real `RecentFolders` sink.
     private let noteRecentFolder: @MainActor (URL) -> Void
+    /// Creates one SSH status subscriber per Mosh pane. Kept injectable so
+    /// WorkspaceStore tests never need a real ssh binary or server.
+    private let remoteControlFactory: @MainActor (
+        RemoteRuntimeIdentity,
+        WorkspaceTransport,
+        @escaping @Sendable (RemoteControlSupervisorState) -> Void,
+        @escaping @Sendable (RemoteRuntimeFrame) -> Void
+    ) -> any RemoteControlSupervising
+    private let remoteCleanup: @MainActor (
+        RemoteControlChannelConfiguration,
+        @escaping @Sendable (Bool) -> Void
+    ) -> Void
     private let persistence: any Persistence
+    @ObservationIgnored
+    private var remoteControls: [UUID: any RemoteControlSupervising] = [:]
+    private var remoteShutdownRequested: Set<UUID> = []
+    /// In-flight token-scoped SSH cleanups. The app-termination coordinator
+    /// awaits these (bounded by its own deadline) so a ⌘Q actually delivers the
+    /// reaper SHUTDOWN / orphan reclamation before the process dies, instead of
+    /// racing a fixed sleep.
+    private var pendingRemoteCleanupCount = 0
     private let gitStatusFetcher = GitStatusFetcher()
     /// One watcher per session — refreshes git status when `.git/HEAD` or
     /// `.git/index` changes from any source (agent subprocess, external
@@ -342,7 +364,44 @@ final class WorkspaceStore {
         peerStores: @escaping @MainActor () -> [WorkspaceStore] = { [] },
         moveToNewWindow: @escaping @MainActor (UUID) -> Void = { _ in },
         onSessionAlert: @escaping @MainActor (UUID, SessionAlertKind) -> Void = { _, _ in },
-        noteRecentFolder: @escaping @MainActor (URL) -> Void = { _ in }
+        noteRecentFolder: @escaping @MainActor (URL) -> Void = { _ in },
+        remoteControlFactory: @escaping @MainActor (
+            RemoteRuntimeIdentity,
+            WorkspaceTransport,
+            @escaping @Sendable (RemoteControlSupervisorState) -> Void,
+            @escaping @Sendable (RemoteRuntimeFrame) -> Void
+        ) -> any RemoteControlSupervising = {
+            identity, transport, stateHandler, frameHandler in
+            let moshConfiguration: MoshWorkspaceConfiguration?
+            if case .mosh(let configuration) = transport {
+                moshConfiguration = configuration
+            } else {
+                moshConfiguration = nil
+            }
+            let configuration = RemoteControlChannelConfiguration(
+                destination: identity.destination,
+                runtimeToken: identity.token,
+                sshPort: moshConfiguration?.sshPort.flatMap(UInt16.init(exactly:)),
+                identityFile: moshConfiguration?.identityFile
+            )
+            return RemoteControlSupervisor(
+                runtimeToken: identity.token,
+                channelFactory: { eventHandler in
+                    RemoteControlChannel(
+                        configuration: configuration,
+                        eventHandler: eventHandler
+                    )
+                },
+                stateHandler: stateHandler,
+                frameHandler: frameHandler
+            )
+        },
+        remoteCleanup: @escaping @MainActor (
+            RemoteControlChannelConfiguration,
+            @escaping @Sendable (Bool) -> Void
+        ) -> Void = {
+            RemoteCleanupExecutor.run(configuration: $0, completion: $1)
+        }
     ) {
         self.persistence = persistence
         self.engineFactory = engineFactory
@@ -352,6 +411,8 @@ final class WorkspaceStore {
         self.moveToNewWindow = moveToNewWindow
         self.onSessionAlert = onSessionAlert
         self.noteRecentFolder = noteRecentFolder
+        self.remoteControlFactory = remoteControlFactory
+        self.remoteCleanup = remoteCleanup
         if let saved = persistence.load(), !saved.workspaces.isEmpty {
             restore(from: saved)
         } else {
@@ -367,7 +428,8 @@ final class WorkspaceStore {
         worktreeParent: Workspace? = nil,
         worktreeBranch: String? = nil,
         template: AgentTemplate = .terminal,
-        sshRemoteHost: String? = nil
+        sshRemoteHost: String? = nil,
+        transport requestedTransport: WorkspaceTransport? = nil
     ) -> Workspace {
         // NB: the home fallback (fresh window's seed workspace) reaching
         // `noteRecentFolder` below is caught by `RecentFolders.note()`'s own
@@ -384,7 +446,9 @@ final class WorkspaceStore {
         let workspace = Workspace(workingDirectory: dir, root: root)
         workspace.worktreeParentId = worktreeParent?.id
         workspace.worktreeBranch = worktreeBranch
-        workspace.sshRemoteHost = Self.normalizedSSHHost(sshRemoteHost)
+        workspace.transport = requestedTransport?.normalized()
+            ?? Self.normalizedSSHHost(sshRemoteHost).map { .ssh(destination: $0) }
+            ?? .local
         // Pin worktreePath at create time so `git worktree remove` always
         // targets the disk root, no matter where the user cd's later.
         // `.standardizedFileURL` resolves `/tmp` → `/private/tmp` etc. so
@@ -393,7 +457,11 @@ final class WorkspaceStore {
         if worktreeParent != nil {
             workspace.worktreePath = dir.standardizedFileURL
         }
-        let session = spawnSession(template: template, initialCwd: dir, sshRemoteHost: workspace.sshRemoteHost)
+        let session = spawnSession(
+            template: template,
+            initialCwd: dir,
+            workspaceTransport: workspace.transport
+        )
         wireSessionCallbacks(engine: session.engine, session: session, workspace: workspace, codexRolloutId: session.resumedConversationId)
         pane.tabs.append(session)
         pane.activeTabId = session.id
@@ -422,8 +490,8 @@ final class WorkspaceStore {
         let origin = inheritedFrom ?? workspaces.first(where: {
             $0 !== workspace && $0.workingDirectory.standardizedFileURL.path == dir.standardizedFileURL.path
         })
-        if worktreeParent == nil, workspace.sshRemoteHost == nil,
-           origin?.worktreeParentId == nil, origin?.sshRemoteHost == nil {
+        if worktreeParent == nil, !workspace.isRemote,
+           origin?.worktreeParentId == nil, origin?.isRemote != true {
             noteRecentFolder(dir)
         }
         scheduleSave()
@@ -500,6 +568,11 @@ final class WorkspaceStore {
     /// needs no payload).
     var pendingCreateSSHWorkspaceRequest = false
 
+    /// Explicit, user-driven interactive SSH authentication request. The
+    /// background subscriber always remains BatchMode=yes and can only park
+    /// here; it never opens a prompt by itself.
+    var pendingRemoteAuthenticationSession: Session?
+
     /// Park the SSH-workspace create request and reveal a hidden sidebar so
     /// `SidebarView` exists to consume it (mirrors
     /// `requestRenameActiveWorkspace`). Callers that want the reveal animated
@@ -509,6 +582,59 @@ final class WorkspaceStore {
         if sidebarMode == .hidden {
             setSidebarMode(.full)
         }
+    }
+
+    func requestRemoteAuthentication(for session: Session) {
+        guard session.remoteRuntime != nil else { return }
+        pendingRemoteAuthenticationSession = session
+        if sidebarMode == .hidden {
+            setSidebarMode(.full)
+        }
+    }
+
+    func retryRemoteControl(for session: Session) {
+        remoteControls[session.id]?.retryNow()
+    }
+
+    /// Gives every live remote pane one immediate control-channel attempt.
+    /// App lifecycle recovery (foreground, wake, network restoration) calls
+    /// this instead of waiting for each supervisor's current backoff slot.
+    /// Local panes and remote panes that have already closed have no entry
+    /// in `remoteControls`, so the operation is naturally scoped.
+    func retryAllRemoteControls() {
+        for supervisor in remoteControls.values {
+            supervisor.retryNow()
+        }
+    }
+
+    func remoteTransferFailed(for session: Session) {
+        session.remoteTransferError = String(
+            localized: "SSH upload failed; no local path was pasted. Check authentication or connectivity, then retry the paste.",
+            bundle: .kookyResources
+        )
+        remoteControls[session.id]?.retryNow()
+    }
+
+    func dismissRemoteTransferError(for session: Session) {
+        session.remoteTransferError = nil
+    }
+
+    func remoteAuthenticationSucceeded(for session: Session) {
+        pendingRemoteAuthenticationSession = nil
+        remotePowerLeaseRenewed(for: session)
+        remoteControls[session.id]?.retryNow()
+    }
+
+    /// Explicit fallback only: never called automatically after a Mosh
+    /// failure because the remote command may already have started.
+    func openSSHWorkspaceFallback(from workspace: Workspace, session: Session) {
+        guard case .mosh(let configuration) = session.workspaceTransport.normalized()
+        else { return }
+        _ = addWorkspace(
+            workingDirectory: workspace.workingDirectory,
+            template: session.agent,
+            transport: .ssh(destination: configuration.destination)
+        )
     }
 
     /// ⌘W-on-a-sheet request, parked for `SidebarView` to cancel whichever
@@ -767,7 +893,10 @@ final class WorkspaceStore {
 
     @discardableResult
     func duplicateWorkspace(_ workspace: Workspace) -> Workspace {
-        addWorkspace(workingDirectory: workspace.workingDirectory)
+        addWorkspace(
+            workingDirectory: workspace.workingDirectory,
+            transport: workspace.transport
+        )
     }
 
     /// Set or clear a user-provided workspace title. Empty / whitespace input
@@ -897,7 +1026,14 @@ final class WorkspaceStore {
         let cwd = initialCwd
             ?? template.extraCwd.map { resolvedSpawnCwd(($0 as NSString).expandingTildeInPath) }
             ?? workspace.workingDirectory
-        let session = spawnSession(template: template, initialCwd: cwd, conversationId: conversationId, forceResume: forceResume, initialPrompt: initialPrompt, sshRemoteHost: workspace.sshRemoteHost)
+        let session = spawnSession(
+            template: template,
+            initialCwd: cwd,
+            conversationId: conversationId,
+            forceResume: forceResume,
+            initialPrompt: initialPrompt,
+            workspaceTransport: workspace.transport
+        )
         wireSessionCallbacks(engine: session.engine, session: session, workspace: workspace, codexRolloutId: session.resumedConversationId)
         target.tabs.append(session)
         target.activeTabId = session.id
@@ -934,8 +1070,8 @@ final class WorkspaceStore {
         // in the first local workspace — and when EVERY workspace is SSH,
         // open one at the conversation's own directory, so a history click
         // can never silently no-op.
-        let workspace = (active?.sshRemoteHost == nil ? active : nil)
-            ?? workspaces.first { $0.sshRemoteHost == nil }
+        let workspace = (active?.isRemote == false ? active : nil)
+            ?? workspaces.first { !$0.isRemote }
             ?? addWorkspace(workingDirectory: resolvedSpawnCwd(record.cwd.path))
         activateWorkspace(workspace)
         return addTab(
@@ -1041,6 +1177,15 @@ final class WorkspaceStore {
         // store that owns it, slot it in here, and re-point its engine
         // callbacks at this store so focus / title / activity events follow.
         for source in peerStores() where source !== self {
+            guard let sourceTransport = source.transportForSession(id: droppedId)
+            else { continue }
+            // A workspace is transport-pinned. Allowing a live Mosh pane to
+            // land in a local/SSH workspace would work until restart, then
+            // persistence would silently respawn it with the destination
+            // workspace's transport.
+            guard sourceTransport == workspace.transport.normalized() else {
+                return false
+            }
             if let session = source.surrenderSession(id: droppedId) {
                 attachSession(session, to: destPane, at: destIndex, in: workspace)
                 wireSessionCallbacks(engine: session.engine, session: session, workspace: workspace, codexRolloutId: session.conversationId)
@@ -1048,6 +1193,12 @@ final class WorkspaceStore {
             }
         }
         return false
+    }
+
+    /// Cross-window adoption preflight used both by drag/drop and by
+    /// AppDelegate's "Move to New Window" orchestration.
+    func transportForSession(id: UUID) -> WorkspaceTransport? {
+        findSession(id: id)?.workspaceTransport.normalized()
     }
 
     /// Removes the session with `id` from this store and returns it for a
@@ -1262,7 +1413,11 @@ final class WorkspaceStore {
         guard case .pane(let existing) = leafNode.content else { return nil }
         let template = existing.activeTab?.agent ?? .terminal
         let cwd = existing.activeTab?.currentDirectory ?? workspace.workingDirectory
-        let newSession = spawnSession(template: template, initialCwd: cwd, sshRemoteHost: workspace.sshRemoteHost)
+        let newSession = spawnSession(
+            template: template,
+            initialCwd: cwd,
+            workspaceTransport: workspace.transport
+        )
         wireSessionCallbacks(engine: newSession.engine, session: newSession, workspace: workspace, codexRolloutId: newSession.resumedConversationId)
         let newPane = Pane(tabs: [newSession], activeTabId: newSession.id)
         let firstChild = PaneNode(pane: existing)
@@ -1497,6 +1652,29 @@ final class WorkspaceStore {
         persistence.save(snapshot())
     }
 
+    var hasLiveMoshSessions: Bool {
+        workspaces.contains { workspace in
+            workspace.root.allPanes.contains { pane in
+                pane.tabs.contains { session in
+                    if case .mosh = session.workspaceTransport { return true }
+                    return false
+                }
+            }
+        }
+    }
+
+    func prepareForApplicationTermination() {
+        for workspace in workspaces {
+            for pane in workspace.root.allPanes {
+                for session in pane.tabs {
+                    if case .mosh = session.workspaceTransport {
+                        requestRemoteShutdown(for: session)
+                    }
+                }
+            }
+        }
+    }
+
     /// Tears the store down when its window closes — releases every
     /// session's libghostty surface + PTY (AppKit closing the `NSWindow`
     /// does not, and Swift 6's nonisolated `deinit` can't reach the
@@ -1508,7 +1686,18 @@ final class WorkspaceStore {
         for workspace in workspaces {
             for pane in workspace.root.allPanes {
                 for tab in pane.tabs {
-                    tab.engine.terminate()
+                    tab.isClosing = true
+                    if case .mosh = tab.workspaceTransport {
+                        requestRemoteShutdown(for: tab)
+                        let engine = tab.engine
+                        Task { @MainActor in
+                            try? await Task.sleep(for: .milliseconds(750))
+                            engine.terminate()
+                        }
+                    } else {
+                        stopRemoteControl(for: tab, cleanup: true)
+                        tab.engine.terminate()
+                    }
                 }
             }
         }
@@ -1529,8 +1718,12 @@ final class WorkspaceStore {
     private func restore(from state: PersistedState) {
         let fm = FileManager.default
         for ws in state.workspaces {
-            let sshHost = Self.normalizedSSHHost(ws.sshRemoteHost)
-            guard let root = restorePane(ws.root, fm: fm, sshRemoteHost: sshHost) else { continue }
+            let transport = ws.resolvedTransport
+            guard let root = restorePane(
+                ws.root,
+                fm: fm,
+                workspaceTransport: transport
+            ) else { continue }
             let workspace = Workspace(
                 id: ws.id,
                 workingDirectory: URL(fileURLWithPath: ws.workingDirectoryPath),
@@ -1540,7 +1733,7 @@ final class WorkspaceStore {
             workspace.worktreeParentId = ws.worktreeParentId
             workspace.worktreeBranch = ws.worktreeBranch
             workspace.worktreePath = ws.worktreePath.map { URL(fileURLWithPath: $0) }
-            workspace.sshRemoteHost = sshHost
+            workspace.transport = transport
             // Exactly one of the two colour fields is ever written, so each
             // maps to its own case. An unknown preset (a colour a newer kooky
             // added, seen by an older build) restores untagged rather than
@@ -1581,7 +1774,11 @@ final class WorkspaceStore {
             ?? SidebarView.fullWidth
     }
 
-    private func restorePane(_ persisted: PersistedPaneNode, fm: FileManager, sshRemoteHost: String? = nil) -> PaneNode? {
+    private func restorePane(
+        _ persisted: PersistedPaneNode,
+        fm: FileManager,
+        workspaceTransport: WorkspaceTransport = .local
+    ) -> PaneNode? {
         switch persisted.kind {
         case .pane(let p):
             let pane = Pane(id: p.id)
@@ -1592,7 +1789,7 @@ final class WorkspaceStore {
                     initialCwd: resolvedSpawnCwd(tab.currentDirectoryPath),
                     sessionId: tab.id,
                     conversationId: tab.conversationId,
-                    sshRemoteHost: sshRemoteHost
+                    workspaceTransport: workspaceTransport
                 )
                 session.customTitle = tab.customTitle
                 pane.tabs.append(session)
@@ -1602,8 +1799,16 @@ final class WorkspaceStore {
                 : pane.tabs.first?.id
             return PaneNode(pane: pane)
         case .split(let orientation, let first, let second, let fraction):
-            guard let firstChild = restorePane(first, fm: fm, sshRemoteHost: sshRemoteHost),
-                  let secondChild = restorePane(second, fm: fm, sshRemoteHost: sshRemoteHost) else { return nil }
+            guard let firstChild = restorePane(
+                first,
+                fm: fm,
+                workspaceTransport: workspaceTransport
+            ),
+            let secondChild = restorePane(
+                second,
+                fm: fm,
+                workspaceTransport: workspaceTransport
+            ) else { return nil }
             return PaneNode(
                 id: persisted.id,
                 content: .split(
@@ -1619,7 +1824,15 @@ final class WorkspaceStore {
     /// Spawns the engine + Session. Caller wires `onPwdChange` / `onFocus`
     /// after a workspace ref is available — `restore` builds sessions before
     /// the workspace exists, so callbacks can't capture it here.
-    private func spawnSession(template: AgentTemplate, initialCwd: URL, sessionId: UUID = UUID(), conversationId: String? = nil, forceResume: Bool = false, initialPrompt: String? = nil, sshRemoteHost: String? = nil) -> Session {
+    private func spawnSession(
+        template: AgentTemplate,
+        initialCwd: URL,
+        sessionId: UUID = UUID(),
+        conversationId: String? = nil,
+        forceResume: Bool = false,
+        initialPrompt: String? = nil,
+        workspaceTransport: WorkspaceTransport = .local
+    ) -> Session {
         let engine = engineFactory()
         let extraOptions = optionsProvider(template.id)
         let persistsConversation = template.persistsConversation(extraOptions: extraOptions)
@@ -1651,13 +1864,27 @@ final class WorkspaceStore {
         // The template owns SSH composition (kooky-ssh wrapping, dropping the
         // local-only resume id, forcing a wrapped shell) — see
         // `makeSessionConfig(sshHost:)`.
-        let sshHost = Self.normalizedSSHHost(sshRemoteHost)
+        let normalizedTransport = workspaceTransport.normalized()
+        let remoteRuntimeToken: UUID?
+        if case .mosh = normalizedTransport {
+            remoteRuntimeToken = UUID()
+        } else {
+            remoteRuntimeToken = nil
+        }
+        let sshHost: String?
+        if case .ssh(let configuration) = normalizedTransport {
+            sshHost = configuration.destination
+        } else {
+            sshHost = nil
+        }
         var config = template.makeSessionConfig(
             extraOptions: extraOptions,
             resumeId: resumeId,
             newSessionId: newSessionId,
             initialPrompt: initialPrompt,
-            sshHost: sshHost
+            sshHost: sshHost,
+            workspaceTransport: normalizedTransport,
+            remoteRuntimeToken: remoteRuntimeToken
         )
         config.workingDirectory = initialCwd.path
         // A Claude-Code-based custom agent with an env block hands `claude`
@@ -1669,6 +1896,20 @@ final class WorkspaceStore {
         config.environment.merge(
             KookyShellIntegration.kookyEnvironment(for: sessionId, claudeCustomSettingsAgentId: claudeCustomId)
         ) { _, new in new }
+        let didConfigureMoshLaunch = config.environment["KOOKY_AGENT"]?
+            .contains("kooky-mosh") == true
+        let configuredRemoteRuntimeToken = didConfigureMoshLaunch
+            ? remoteRuntimeToken
+            : nil
+        if let token = configuredRemoteRuntimeToken,
+           case .mosh(let moshConfiguration) = normalizedTransport {
+            persistence.recordPendingRemoteReap(PersistedRemoteReap(
+                runtimeToken: token,
+                destination: moshConfiguration.destination,
+                sshPort: moshConfiguration.sshPort.flatMap(UInt16.init(exactly:)),
+                identityFile: moshConfiguration.identityFile
+            ))
+        }
         engine.start(config: config)
         let session = Session(
             id: sessionId,
@@ -1677,16 +1918,27 @@ final class WorkspaceStore {
             agent: template,
             conversationId: normalizedConversationId
         )
+        session.workspaceTransport = normalizedTransport
+        if let token = configuredRemoteRuntimeToken,
+           let destination = normalizedTransport.remoteDestination,
+           let kind = normalizedTransport.remoteKind {
+            session.remoteRuntime = RemoteRuntimeIdentity(
+                token: token,
+                destination: destination,
+                transport: kind
+            )
+            session.remoteConnectionState = .launching
+            session.remotePowerLeaseUpdatedAt = Date()
+        }
         // Mirror the drops `makeSessionConfig` applies downstream, so the
         // field records what actually reached the command line: an SSH host
         // never carries the LOCAL resume id (M5.rrrr), a non-empty initial
         // prompt suppresses the resume fragment (M5.hh), and a template
         // without a resume strategy never emits one at all.
         let promptSuppressesResume = !(initialPrompt?.isEmpty ?? true)
-        session.resumedConversationId = (sshHost == nil && !promptSuppressesResume && template.supportsResume)
+        session.resumedConversationId = (!normalizedTransport.isRemote && !promptSuppressesResume && template.supportsResume)
             ? resumeId : nil
-        if let sshHost {
-            session.sshWorkspaceHost = sshHost
+        if normalizedTransport.isRemote {
             // Optimistic: the remote shim's `running` marker confirms once
             // the connection + rc replay settle; until then the tab already
             // reads as "agent starting", matching the local launch feel.
@@ -1726,19 +1978,40 @@ final class WorkspaceStore {
             resumingConversationId: codexRolloutId
         )
         startKiroConversationIfNeeded(for: session)
-        // Paste-time upload routing. Deliberately `sshWorkspaceHost` (spawn
-        // pinned), NOT `remoteHost`: the latter is the status-bar display
+        startRemoteControlIfNeeded(for: session)
+        // Paste-time upload routing. Deliberately the workspace transport
+        // (spawn-pinned), NOT `remoteHost`: the latter is the status-bar display
         // signal with a marker→command-finished lifecycle that a remote
         // shell's own OSC 133;D can clear mid-connection.
-        engine.pasteUploadHostProvider = { [weak session] in session?.sshWorkspaceHost }
+        engine.pasteUploadHostProvider = { [weak session] in
+            guard let session, session.workspaceTransport.supportsRemoteUpload else { return nil }
+            return session.workspaceTransport.remoteDestination
+        }
+        engine.pasteUploadTargetProvider = { [weak session] in
+            guard let session, !session.isClosing else { return nil }
+            return RemoteUploadTarget(transport: session.workspaceTransport)
+        }
+        engine.pasteUploadFailureHandler = { [weak self, weak session] in
+            guard let self, let session else { return }
+            self.remoteTransferFailed(for: session)
+        }
+        engine.pasteDeliveryAllowedProvider = { [weak session] in
+            session?.isClosing == false
+        }
         // File paths printed by an SSH shell live on the remote machine. Keep
         // ordinary web links openable, but prevent Cmd+Click from treating a
         // remote absolute path as a coincidentally-existing local file.
         engine.isRemoteSessionProvider = { [weak session] in
-            session?.sshWorkspaceHost != nil || session?.remoteHost != nil
+            session?.workspaceTransport.isRemote == true || session?.remoteHost != nil
         }
         engine.onPwdChange = { [weak self, weak session, weak workspace] pwd in
             guard let session else { return }
+            if session.workspaceTransport.isRemote {
+                if session.remoteWorkingDirectory != pwd {
+                    session.remoteWorkingDirectory = pwd
+                }
+                return
+            }
             let url = URL(fileURLWithPath: pwd)
             // Compare against the URL's normalized path (what actually gets
             // stored) — not raw `pwd` — so a shell that reports a trailing-slash
@@ -1780,6 +2053,33 @@ final class WorkspaceStore {
         }
         engine.onTitleChange = { [weak self, weak session] title in
             guard let session else { return }
+            // A closing tab sends mosh's own quit escape; the resulting
+            // non-zero client exit is expected teardown, so neither remote
+            // marker may resurface as a launch failure. Always return so the
+            // raw marker can never leak into `terminalTitle`.
+            if RemoteSessionExitMarker.isMarker(title) {
+                if !session.isClosing,
+                   let exitCode = RemoteSessionExitMarker.parse(title) {
+                    // Established-then-exited: keep the buffer, stop the
+                    // control supervisor, and present this as ended rather
+                    // than a launch failure.
+                    session.remoteConnectionState = .disconnected(exitCode: exitCode)
+                    self?.remoteControls[session.id]?.moshDidExit()
+                }
+                return
+            }
+            if RemoteLaunchFailureMarker.isMarker(title) {
+                if !session.isClosing,
+                   let failure = RemoteLaunchFailureMarker.parse(title) {
+                    session.remoteConnectionState = .failed(failure)
+                    // libghostty intentionally keeps a non-zero child exit on
+                    // screen for diagnostics and therefore does not fire its
+                    // clean-exit callback. The structured wrapper marker is
+                    // the authoritative local mosh-client exit signal here.
+                    self?.remoteControls[session.id]?.moshDidExit()
+                }
+                return
+            }
             // A `kooky-remote-login:*` title is an ssh-destination marker, not
             // a visible title — record the host and stop before it reaches
             // `terminalTitle`. Cleared ONLY by the wrapper's logout marker
@@ -1798,11 +2098,23 @@ final class WorkspaceStore {
             // a known agent) and stop before it reaches `terminalTitle`.
             if AgentStatusMarker.isMarkerTitle(title) {
                 if let marker = AgentStatusMarker.parseTitle(title) {
-                    self?.applyAgentStatusMarker(
-                        agent: marker.agent,
-                        event: marker.event,
-                        session: session
-                    )
+                    // Mosh OSC is an unauthenticated fast path. Once the SSH
+                    // control plane has delivered its first sequence-bearing
+                    // snapshot, only that plane may mutate authoritative Agent
+                    // state; a delayed terminal marker must not roll it back.
+                    let hasAuthoritativeRemoteSnapshot =
+                        session.workspaceTransport.remoteKind == .mosh
+                        && session.remoteStatusUpdatedAt != nil
+                    let isUnprovenMoshEnd =
+                        session.workspaceTransport.remoteKind == .mosh
+                        && marker.event == .ended
+                    if !hasAuthoritativeRemoteSnapshot && !isUnprovenMoshEnd {
+                        self?.applyAgentStatusMarker(
+                            agent: marker.agent,
+                            event: marker.event,
+                            session: session
+                        )
+                    }
                 }
                 return
             }
@@ -1862,12 +2174,17 @@ final class WorkspaceStore {
             // libghostty exposes no command-START, so a keystroke (the first
             // character of the next command) is when we clear a stale
             // command-failure dot — covers any command, agent or manual.
-            guard let session, session.lastCommandExit != nil else { return }
+            guard let session else { return }
+            if session.workspaceTransport.isRemote {
+                session.remotePowerLeaseUpdatedAt = Date()
+            }
+            guard session.lastCommandExit != nil else { return }
             session.lastCommandExit = nil
             session.lastCommandDuration = nil
         }
         engine.onProcessExitedCleanly = { [weak self, weak session, weak workspace] in
             guard let self, let session, let workspace else { return }
+            self.remoteControls[session.id]?.moshDidExit()
             self.closeTab(session, in: workspace)
         }
         engine.onDesktopNotification = { [weak self, weak session] title, body in
@@ -1925,6 +2242,7 @@ final class WorkspaceStore {
     }
 
     private func refreshGitStatus(for session: Session) {
+        guard !session.workspaceTransport.isRemote else { return }
         gitStatusFetcher.fetch(id: session.id.uuidString, cwd: session.currentDirectory) { [weak session] status in
             guard let session, session.gitStatus != status else { return }
             session.gitStatus = status
@@ -2010,6 +2328,7 @@ final class WorkspaceStore {
         for session: Session,
         resumingConversationId: String? = nil
     ) {
+        guard !session.workspaceTransport.isRemote else { return }
         let key = session.displayAgent.baseAgentId ?? session.displayAgent.id
         guard key == AgentTemplate.codex.id else { return }
         // Resolve CODEX_HOME from the session's live shell env (a Dock-launched
@@ -2039,6 +2358,7 @@ final class WorkspaceStore {
     /// watcher once a repo appears in place — but the common unchanged-cwd
     /// prompt costs two dictionary hits and no filesystem walk.
     private func updateGitWatch(for session: Session) {
+        guard !session.workspaceTransport.isRemote else { return }
         let cwdPath = session.currentDirectory.path
         let cached = sessionGitWatch[session.id]
         if let cached, cached.cwdPath == cwdPath, let gitDir = cached.gitDir {
@@ -2108,10 +2428,202 @@ final class WorkspaceStore {
     /// surrender variant: the destination store re-wires the session, so
     /// the engine stays alive and agent records survive.
     private func teardownSessionMonitors(_ session: Session, keepForTransfer: Bool = false) {
+        if !keepForTransfer { session.isClosing = true }
+        if keepForTransfer {
+            stopRemoteControl(for: session, cleanup: false)
+        } else if case .mosh = session.workspaceTransport {
+            requestRemoteShutdown(for: session)
+        } else {
+            stopRemoteControl(for: session, cleanup: true)
+        }
         removeGitWatch(sessionId: session.id)
         codexUsageMonitor.stop(sessionId: session.id)
         kiroConversationMonitor.stop(sessionId: session.id, removeRecord: !keepForTransfer)
-        if !keepForTransfer { session.engine.terminate() }
+        if !keepForTransfer {
+            if case .mosh = session.workspaceTransport {
+                // Give Mosh's shutdown request/acknowledgement and the
+                // token-scoped SSH TERM a short head start before forcing the
+                // local PTY down.
+                let engine = session.engine
+                Task { @MainActor in
+                    try? await Task.sleep(for: .milliseconds(750))
+                    engine.terminate()
+                }
+            } else {
+                session.engine.terminate()
+            }
+        }
+    }
+
+    /// ASCII RS + "." is Mosh's default escape sequence for a graceful
+    /// shutdown request. The token-scoped SSH cleanup runs alongside it as
+    /// the Agent-cost safety path. Multiple close/lifecycle signals collapse
+    /// to this one request.
+    private func requestRemoteShutdown(for session: Session) {
+        guard case .mosh = session.workspaceTransport,
+              remoteShutdownRequested.insert(session.id).inserted
+        else { return }
+        stopRemoteControl(for: session, cleanup: true)
+        session.engine.sendInput("\u{001E}.")
+    }
+
+    private func startRemoteControlIfNeeded(for session: Session) {
+        guard remoteControls[session.id] == nil,
+              let identity = session.remoteRuntime,
+              case .mosh = session.workspaceTransport
+        else { return }
+        let sessionId = session.id
+        let supervisor = remoteControlFactory(
+            identity,
+            session.workspaceTransport,
+            { [weak self, weak session] state in
+                Task { @MainActor [weak self, weak session] in
+                    guard let self, let session,
+                          self.remoteControls[sessionId] != nil
+                    else { return }
+                    session.remoteConnectionState = Self.connectionState(from: state)
+                    if case .connected = state {
+                        self.remotePowerLeaseRenewed(for: session)
+                    }
+                }
+            },
+            { [weak self, weak session] frame in
+                Task { @MainActor [weak self, weak session] in
+                    guard let self, let session,
+                          self.remoteControls[sessionId] != nil
+                    else { return }
+                    switch frame {
+                    case .snapshot(let snapshot), .event(let snapshot):
+                        guard snapshot.sequence > session.remoteStatusSequence
+                            || (snapshot.sequence == 0 && session.remoteStatusUpdatedAt == nil)
+                        else { return }
+                        self.applyRemoteSnapshot(snapshot, to: session)
+                    case .ready, .error:
+                        break
+                    }
+                }
+            }
+        )
+        remoteControls[session.id] = supervisor
+        supervisor.start()
+    }
+
+    private func stopRemoteControl(for session: Session, cleanup: Bool) {
+        remoteControls.removeValue(forKey: session.id)?.stop(cleanup: false)
+        guard cleanup,
+              let runtime = session.remoteRuntime,
+              case .mosh(let configuration) = session.workspaceTransport
+        else { return }
+        let control = RemoteControlChannelConfiguration(
+            destination: runtime.destination,
+            runtimeToken: runtime.token,
+            sshPort: configuration.sshPort.flatMap(UInt16.init(exactly:)),
+            identityFile: configuration.identityFile
+        )
+        beginRemoteCleanup()
+        let runtimeToken = runtime.token
+        remoteCleanup(control) { [weak self] succeeded in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                if succeeded {
+                    self.persistence.clearPendingRemoteReap(runtimeToken: runtimeToken)
+                }
+                self.endRemoteCleanup()
+            }
+        }
+    }
+
+    private func beginRemoteCleanup() {
+        pendingRemoteCleanupCount += 1
+    }
+
+    private func endRemoteCleanup() {
+        pendingRemoteCleanupCount -= 1
+        if pendingRemoteCleanupCount < 0 { pendingRemoteCleanupCount = 0 }
+    }
+
+    /// True while any token-scoped SSH cleanup is still outstanding. The
+    /// termination coordinator polls this under its own deadline.
+    var hasPendingRemoteCleanup: Bool {
+        pendingRemoteCleanupCount > 0
+    }
+
+    private func applyRemoteSnapshot(
+        _ snapshot: RemoteRuntimeSnapshot,
+        to session: Session
+    ) {
+        let remoteAgent = snapshot.agent.flatMap(AgentTemplate.from(hookSlug:))
+        // A syntactically valid but unknown slug is still untrusted protocol
+        // input. Do not advance the sequence or mutate any visible state; a
+        // later valid frame with the same sequence must remain applicable.
+        guard snapshot.agent == nil || remoteAgent != nil else { return }
+        session.remoteStatusSequence = snapshot.sequence
+        session.remoteStatusUpdatedAt = Date()
+        remotePowerLeaseRenewed(for: session)
+        session.remoteWorkingDirectory = snapshot.cwd == "-" || snapshot.cwd.isEmpty
+            ? nil
+            : snapshot.cwd
+        session.lastCommandExit = snapshot.exitCode.map(Int.init)
+        session.lastCommandDuration = snapshot.durationMilliseconds.map {
+            TimeInterval($0) / 1_000
+        }
+
+        let agentBefore = session.agent.id
+        let previousActivity = session.activityState
+        switch snapshot.activity {
+        case .idle:
+            session.transientAgent = nil
+            session.activityState = .idle
+        case .ended:
+            if previousActivity != .idle,
+               session.remoteNotifiedActivitySequence != snapshot.sequence {
+                onSessionAlert(session.id, .completed)
+            }
+            session.remoteNotifiedActivitySequence = snapshot.sequence
+            if let remoteAgent,
+               session.agent.id == remoteAgent.id
+                    || session.agent.baseAgentId == remoteAgent.id {
+                session.agent = .terminal
+            }
+            session.transientAgent = nil
+            session.activityState = .idle
+        case .running:
+            if session.agent.isShell { session.transientAgent = remoteAgent }
+            session.activityState = .running
+        case .attention:
+            if session.agent.isShell { session.transientAgent = remoteAgent }
+            session.activityState = .attention
+            // Dedupe on the snapshot sequence, not on `previousActivity`: a
+            // reconnect frame whose sequence advanced past a missed
+            // `running → attention` must still alert even when the last
+            // applied activity was already `.attention`.
+            if session.remoteNotifiedActivitySequence != snapshot.sequence {
+                onSessionAlert(session.id, .attention)
+            }
+            session.remoteNotifiedActivitySequence = snapshot.sequence
+        }
+        if session.agent.id != agentBefore { scheduleSave() }
+    }
+
+    private func remotePowerLeaseRenewed(for session: Session) {
+        session.remotePowerLeaseUpdatedAt = Date()
+    }
+
+    private static func connectionState(
+        from state: RemoteControlSupervisorState
+    ) -> RemoteConnectionState {
+        switch state {
+        case .idle, .waitingForRuntime:
+            .launching
+        case .connected:
+            .connected
+        case .degraded(let since, let reason):
+            .degraded(since: since, reason: reason)
+        case .authenticationRequired(let since, _):
+            .authenticationRequired(since: since)
+        case .stopped:
+            .disconnected(exitCode: nil)
+        }
     }
 
     /// Shared-watcher fan-out. ONE git run per repo event, its result
@@ -2162,6 +2674,7 @@ final class WorkspaceStore {
     }
 
     private func refreshEnvironment(for session: Session) {
+        guard !session.workspaceTransport.isRemote else { return }
         let pid = session.engine.foregroundPid
         let env: ProjectEnvironment
         if session.shellEnvironment.isEmpty {
@@ -2199,6 +2712,7 @@ final class WorkspaceStore {
     }
 
     private func startKiroConversationIfNeeded(for session: Session) {
+        guard !session.workspaceTransport.isRemote else { return }
         let key = session.displayAgent.baseAgentId ?? session.displayAgent.id
         guard key == AgentTemplate.kiro.id else { return }
         let path = KookyShellIntegration.kiroACPRecordPath(for: session.id)

@@ -24,6 +24,61 @@ struct PersistedState: Codable, Equatable {
 /// kooky window's `WorkspaceStore`; array order is window restore order.
 struct PersistedApp: Codable, Equatable {
     var windows: [PersistedWindow]
+    var pendingRemoteReaps: [PersistedRemoteReap]
+
+    init(
+        windows: [PersistedWindow],
+        pendingRemoteReaps: [PersistedRemoteReap] = []
+    ) {
+        self.windows = windows
+        self.pendingRemoteReaps = pendingRemoteReaps
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case windows
+        case pendingRemoteReaps
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        windows = try container.decode([PersistedWindow].self, forKey: .windows)
+        pendingRemoteReaps = try container.decodeIfPresent(
+            [PersistedRemoteReap].self,
+            forKey: .pendingRemoteReaps
+        ) ?? []
+    }
+}
+
+struct PersistedRemoteReap: Codable, Equatable, Identifiable, Sendable {
+    var id: UUID { runtimeToken }
+    let runtimeToken: UUID
+    let destination: String
+    let sshPort: UInt16?
+    let identityFile: String?
+    let createdAt: Date
+
+    init(
+        runtimeToken: UUID,
+        destination: String,
+        sshPort: UInt16?,
+        identityFile: String?,
+        createdAt: Date = Date()
+    ) {
+        self.runtimeToken = runtimeToken
+        self.destination = destination
+        self.sshPort = sshPort
+        self.identityFile = identityFile
+        self.createdAt = createdAt
+    }
+
+    var controlConfiguration: RemoteControlChannelConfiguration {
+        RemoteControlChannelConfiguration(
+            destination: destination,
+            runtimeToken: runtimeToken,
+            sshPort: sshPort,
+            identityFile: identityFile
+        )
+    }
 }
 
 /// Window frame (size / position) is intentionally not persisted — kooky
@@ -51,6 +106,9 @@ struct PersistedWorkspace: Codable, Equatable {
     /// SSH destination of an SSH workspace. Decoded as optional so state
     /// files written before the field restore as plain local workspaces.
     var sshRemoteHost: String?
+    /// Authoritative workspace transport. Optional in the persisted model so
+    /// state written before Mosh support can migrate from `sshRemoteHost`.
+    var transport: WorkspaceTransport?
     /// The workspace's tag. Exactly one of `tagPreset` (a `WorkspaceColorTag`
     /// raw value) and `tagCustomHex` is set, which keeps "the user picked this
     /// themselves" in the file rather than re-deriving it by comparing colours.
@@ -70,13 +128,16 @@ struct PersistedWorkspace: Codable, Equatable {
         self.worktreeParentId = ws.worktreeParentId
         self.worktreeBranch = ws.worktreeBranch
         self.worktreePath = ws.worktreePath?.path
-        self.sshRemoteHost = ws.sshRemoteHost
+        self.transport = ws.transport.normalized()
+        // Dual-write the real destination. Older Kooky releases therefore
+        // degrade a Mosh workspace to a usable SSH workspace, never local.
+        self.sshRemoteHost = ws.remoteDestination
         self.tagPreset = ws.tag?.color.preset?.rawValue
         self.tagCustomHex = ws.tag?.color.customHex
         self.tagName = ws.tag?.name
     }
 
-    init(id: UUID, workingDirectoryPath: String, root: PersistedPaneNode, activePaneId: UUID? = nil, customTitle: String? = nil, worktreeParentId: UUID? = nil, worktreeBranch: String? = nil, worktreePath: String? = nil, sshRemoteHost: String? = nil, tagPreset: String? = nil, tagCustomHex: String? = nil, tagName: String? = nil) {
+    init(id: UUID, workingDirectoryPath: String, root: PersistedPaneNode, activePaneId: UUID? = nil, customTitle: String? = nil, worktreeParentId: UUID? = nil, worktreeBranch: String? = nil, worktreePath: String? = nil, sshRemoteHost: String? = nil, transport: WorkspaceTransport? = nil, tagPreset: String? = nil, tagCustomHex: String? = nil, tagName: String? = nil) {
         self.id = id
         self.workingDirectoryPath = workingDirectoryPath
         self.root = root
@@ -85,7 +146,9 @@ struct PersistedWorkspace: Codable, Equatable {
         self.worktreeParentId = worktreeParentId
         self.worktreeBranch = worktreeBranch
         self.worktreePath = worktreePath
-        self.sshRemoteHost = sshRemoteHost
+        let resolved = (transport ?? .ssh(destination: sshRemoteHost)).normalized()
+        self.transport = resolved
+        self.sshRemoteHost = resolved.remoteDestination
         self.tagPreset = tagPreset
         self.tagCustomHex = tagCustomHex
         self.tagName = tagName
@@ -93,7 +156,7 @@ struct PersistedWorkspace: Codable, Equatable {
 
     private enum CodingKeys: String, CodingKey {
         case id, workingDirectoryPath, root, activePaneId, customTitle
-        case worktreeParentId, worktreeBranch, worktreePath, sshRemoteHost, tagPreset, tagCustomHex, tagName
+        case worktreeParentId, worktreeBranch, worktreePath, sshRemoteHost, transport, tagPreset, tagCustomHex, tagName
         // Legacy keys
         case tabs, activeTabId
     }
@@ -108,7 +171,9 @@ struct PersistedWorkspace: Codable, Equatable {
         try c.encodeIfPresent(worktreeParentId, forKey: .worktreeParentId)
         try c.encodeIfPresent(worktreeBranch, forKey: .worktreeBranch)
         try c.encodeIfPresent(worktreePath, forKey: .worktreePath)
-        try c.encodeIfPresent(sshRemoteHost, forKey: .sshRemoteHost)
+        let resolved = resolvedTransport
+        try c.encode(resolved, forKey: .transport)
+        try c.encodeIfPresent(resolved.remoteDestination, forKey: .sshRemoteHost)
         try c.encodeIfPresent(tagPreset, forKey: .tagPreset)
         try c.encodeIfPresent(tagCustomHex, forKey: .tagCustomHex)
         try c.encodeIfPresent(tagName, forKey: .tagName)
@@ -123,6 +188,17 @@ struct PersistedWorkspace: Codable, Equatable {
         worktreeBranch = try c.decodeIfPresent(String.self, forKey: .worktreeBranch)
         worktreePath = try c.decodeIfPresent(String.self, forKey: .worktreePath)
         sshRemoteHost = try c.decodeIfPresent(String.self, forKey: .sshRemoteHost)
+        if c.contains(.transport) {
+            transport = (try? c.decode(WorkspaceTransport.self, forKey: .transport))
+                ?? .unsupported(
+                    kind: "unknown",
+                    destination: WorkspaceTransport.normalizedNonEmpty(sshRemoteHost)
+                )
+        } else if let destination = WorkspaceTransport.normalizedNonEmpty(sshRemoteHost) {
+            transport = .ssh(destination: destination)
+        } else {
+            transport = .local
+        }
         tagPreset = try c.decodeIfPresent(String.self, forKey: .tagPreset)
         tagCustomHex = try c.decodeIfPresent(String.self, forKey: .tagCustomHex)
         tagName = try c.decodeIfPresent(String.self, forKey: .tagName)
@@ -141,6 +217,16 @@ struct PersistedWorkspace: Codable, Equatable {
             self.root = PersistedPaneNode(id: pane.id, kind: .pane(pane))
             self.activePaneId = pane.id
         }
+    }
+
+    var resolvedTransport: WorkspaceTransport {
+        if let transport {
+            return transport.normalized()
+        }
+        if let destination = WorkspaceTransport.normalizedNonEmpty(sshRemoteHost) {
+            return .ssh(destination: destination)
+        }
+        return .local
     }
 }
 
@@ -266,6 +352,13 @@ struct PersistedTab: Codable, Equatable {
 protocol Persistence {
     func load() -> PersistedState?
     func save(_ state: PersistedState)
+    func recordPendingRemoteReap(_ reap: PersistedRemoteReap)
+    func clearPendingRemoteReap(runtimeToken: UUID)
+}
+
+extension Persistence {
+    func recordPendingRemoteReap(_ reap: PersistedRemoteReap) {}
+    func clearPendingRemoteReap(runtimeToken: UUID) {}
 }
 
 /// Owns the single `state.json` for the whole app. Holds every window's
@@ -284,10 +377,14 @@ final class AppPersistence {
 
     private let fileURL: URL
     private var windows: [PersistedWindow]
+    private var pendingRemoteReaps: [PersistedRemoteReap]
+    private var didSchedulePendingRemoteReaps = false
 
     init(fileURL: URL = AppPersistence.defaultFileURL) {
         self.fileURL = fileURL
-        windows = Self.loadFromDisk(from: fileURL)
+        let app = Self.loadAppFromDisk(from: fileURL)
+        windows = app.windows
+        pendingRemoteReaps = app.pendingRemoteReaps
     }
 
     /// Window ids in restore order — `AppDelegate` rebuilds one window each.
@@ -315,10 +412,42 @@ final class AppPersistence {
         writeToDisk()
     }
 
+    func recordPendingRemoteReap(_ reap: PersistedRemoteReap) {
+        pendingRemoteReaps.removeAll { $0.runtimeToken == reap.runtimeToken }
+        pendingRemoteReaps.append(reap)
+        writeToDisk()
+    }
+
+    func clearPendingRemoteReap(runtimeToken: UUID) {
+        let previousCount = pendingRemoteReaps.count
+        pendingRemoteReaps.removeAll { $0.runtimeToken == runtimeToken }
+        if pendingRemoteReaps.count != previousCount { writeToDisk() }
+    }
+
+    /// Startup cleanup is deliberately non-interactive and non-blocking.
+    /// Failed/unauthenticated hosts retain their lease for a later launch;
+    /// the remote Mosh timeout remains the final orphan backstop.
+    func schedulePendingRemoteReaps() {
+        guard !didSchedulePendingRemoteReaps else { return }
+        didSchedulePendingRemoteReaps = true
+        for reap in pendingRemoteReaps {
+            RemoteCleanupExecutor.run(configuration: reap.controlConfiguration) {
+                [weak self] succeeded in
+                guard succeeded else { return }
+                Task { @MainActor [weak self] in
+                    self?.clearPendingRemoteReap(runtimeToken: reap.runtimeToken)
+                }
+            }
+        }
+    }
+
     private func writeToDisk() {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        guard let data = try? encoder.encode(PersistedApp(windows: windows)) else { return }
+        guard let data = try? encoder.encode(PersistedApp(
+            windows: windows,
+            pendingRemoteReaps: pendingRemoteReaps
+        )) else { return }
         try? data.write(to: fileURL, options: .atomic)
     }
 
@@ -326,15 +455,23 @@ final class AppPersistence {
     /// and the legacy bare `PersistedState` (pre-multi-window) — a legacy
     /// file migrates to one window. Returns `[]` for a missing / corrupt file.
     static func loadFromDisk(from url: URL) -> [PersistedWindow] {
-        guard let data = try? Data(contentsOf: url) else { return [] }
+        loadAppFromDisk(from: url).windows
+    }
+
+    static func loadAppFromDisk(from url: URL) -> PersistedApp {
+        guard let data = try? Data(contentsOf: url) else {
+            return PersistedApp(windows: [])
+        }
         let decoder = JSONDecoder()
         if let app = try? decoder.decode(PersistedApp.self, from: data) {
-            return app.windows
+            return app
         }
         if let legacy = try? decoder.decode(PersistedState.self, from: data) {
-            return [PersistedWindow(id: UUID(), state: legacy)]
+            return PersistedApp(windows: [
+                PersistedWindow(id: UUID(), state: legacy),
+            ])
         }
-        return []
+        return PersistedApp(windows: [])
     }
 }
 
@@ -346,6 +483,15 @@ struct WindowPersistence: Persistence {
     let windowId: UUID
     let app: AppPersistence
 
-    func load() -> PersistedState? { app.state(for: windowId) }
+    func load() -> PersistedState? {
+        app.schedulePendingRemoteReaps()
+        return app.state(for: windowId)
+    }
     func save(_ state: PersistedState) { app.setWindow(windowId, state: state) }
+    func recordPendingRemoteReap(_ reap: PersistedRemoteReap) {
+        app.recordPendingRemoteReap(reap)
+    }
+    func clearPendingRemoteReap(runtimeToken: UUID) {
+        app.clearPendingRemoteReap(runtimeToken: runtimeToken)
+    }
 }

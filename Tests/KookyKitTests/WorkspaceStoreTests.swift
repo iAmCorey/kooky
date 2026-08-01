@@ -4,6 +4,29 @@ import XCTest
 
 @MainActor
 final class WorkspaceStoreTests: XCTestCase {
+    private final class FakeRemoteSupervisor: RemoteControlSupervising, @unchecked Sendable {
+        let stateHandler: @Sendable (RemoteControlSupervisorState) -> Void
+        let frameHandler: @Sendable (RemoteRuntimeFrame) -> Void
+        private(set) var startCount = 0
+        private(set) var retryCount = 0
+        private(set) var stopCleanupValues: [Bool] = []
+
+        init(
+            stateHandler: @escaping @Sendable (RemoteControlSupervisorState) -> Void,
+            frameHandler: @escaping @Sendable (RemoteRuntimeFrame) -> Void
+        ) {
+            self.stateHandler = stateHandler
+            self.frameHandler = frameHandler
+        }
+
+        func start() { startCount += 1 }
+        func retryNow() { retryCount += 1 }
+        func moshDidExit() { stop(cleanup: true) }
+        func stop(cleanup: Bool) { stopCleanupValues.append(cleanup) }
+        func emit(_ state: RemoteControlSupervisorState) { stateHandler(state) }
+        func emit(_ frame: RemoteRuntimeFrame) { frameHandler(frame) }
+    }
+
     private let projectA = URL(fileURLWithPath: "/tmp/projectA")
     private let projectB = URL(fileURLWithPath: "/tmp/projectB")
     private let projectC = URL(fileURLWithPath: "/tmp/projectC")
@@ -19,15 +42,488 @@ final class WorkspaceStoreTests: XCTestCase {
     private func makeStore(
         initial: PersistedState? = nil,
         persistence: InMemoryPersistence? = nil,
-        noteRecentFolder: @escaping @MainActor (URL) -> Void = { _ in }
+        noteRecentFolder: @escaping @MainActor (URL) -> Void = { _ in },
+        onSessionAlert: @escaping @MainActor (UUID, SessionAlertKind) -> Void = { _, _ in },
+        remoteControlFactory: @escaping @MainActor (
+            RemoteRuntimeIdentity,
+            WorkspaceTransport,
+            @escaping @Sendable (RemoteControlSupervisorState) -> Void,
+            @escaping @Sendable (RemoteRuntimeFrame) -> Void
+        ) -> any RemoteControlSupervising = { _, _, state, frame in
+            FakeRemoteSupervisor(stateHandler: state, frameHandler: frame)
+        },
+        remoteCleanup: @escaping @MainActor (
+            RemoteControlChannelConfiguration,
+            @escaping @Sendable (Bool) -> Void
+        ) -> Void = { _, completion in completion(true) }
     ) -> WorkspaceStore {
         WorkspaceStore(
             persistence: persistence ?? InMemoryPersistence(initial: initial),
             engineFactory: { TestEngine() },
             optionsProvider: { _ in nil },
             resumeProvider: { true },
-            noteRecentFolder: noteRecentFolder
+            onSessionAlert: onSessionAlert,
+            noteRecentFolder: noteRecentFolder,
+            remoteControlFactory: remoteControlFactory,
+            remoteCleanup: remoteCleanup
         )
+    }
+
+    func testMoshWorkspaceTransportRuntimeControlAndRemoteCwdArePaneScoped() async throws {
+        let configuration = try XCTUnwrap(MoshWorkspaceConfiguration(
+            destination: "devbox",
+            udpPort: .range(60_000...61_000),
+            prediction: .adaptive,
+            sshPort: 2222,
+            identityFile: "/tmp/key with spaces"
+        ))
+        var supervisors: [FakeRemoteSupervisor] = []
+        var cleanupConfigurations: [RemoteControlChannelConfiguration] = []
+        let store = makeStore(
+            remoteControlFactory: { _, _, state, frame in
+                let supervisor = FakeRemoteSupervisor(
+                    stateHandler: state,
+                    frameHandler: frame
+                )
+                supervisors.append(supervisor)
+                return supervisor
+            },
+            remoteCleanup: { configuration, completion in
+                cleanupConfigurations.append(configuration)
+                completion(true)
+            }
+        )
+
+        let workspace = store.addWorkspace(
+            workingDirectory: projectA,
+            template: .claudeCode,
+            transport: .mosh(configuration)
+        )
+        let first = try XCTUnwrap(workspace.activeSession)
+        let firstRuntimeToken = try XCTUnwrap(first.remoteRuntime?.token)
+        XCTAssertEqual(first.workspaceTransport, .mosh(configuration))
+        XCTAssertEqual(first.remoteRuntime?.destination, "devbox")
+        XCTAssertEqual(first.remoteRuntime?.transport, .mosh)
+        XCTAssertEqual(first.remoteConnectionState, .launching)
+        XCTAssertEqual(supervisors.count, 1)
+        XCTAssertEqual(supervisors[0].startCount, 1)
+        let launch = try XCTUnwrap(engine(first).startedConfigs.last?.environment["KOOKY_AGENT"])
+        XCTAssertTrue(launch.contains("kooky-mosh"))
+        XCTAssertTrue(launch.contains("--predict=adaptive"))
+        XCTAssertEqual(
+            engine(first).startedConfigs.last?.environment["MOSH_ESCAPE_KEY"],
+            "\u{001E}"
+        )
+        XCTAssertTrue(launch.contains("60000:61000"))
+
+        let second = store.addTab(in: workspace, template: .terminal)
+        XCTAssertEqual(second.workspaceTransport, .mosh(configuration))
+        XCTAssertNotEqual(first.remoteRuntime?.token, second.remoteRuntime?.token)
+        let sourcePane = try XCTUnwrap(workspace.activePane)
+        let newPane = try XCTUnwrap(
+            store.splitPane(sourcePane, orientation: .horizontal, in: workspace)
+        )
+        let third = try XCTUnwrap(newPane.activeTab)
+        XCTAssertEqual(third.workspaceTransport, .mosh(configuration))
+        XCTAssertNotEqual(second.remoteRuntime?.token, third.remoteRuntime?.token)
+        XCTAssertEqual(supervisors.count, 3)
+
+        supervisors[0].emit(.connected(since: Date()))
+        supervisors[0].emit(.snapshot(RemoteRuntimeSnapshot(
+            sequence: 4,
+            agent: "codex",
+            activity: .running,
+            cwd: "/srv/project",
+            cwdTruncated: false,
+            exitCode: 7,
+            durationMilliseconds: 1_250
+        )))
+        await Task.yield()
+        await Task.yield()
+        XCTAssertEqual(first.remoteConnectionState, .connected)
+        XCTAssertEqual(first.remoteWorkingDirectory, "/srv/project")
+        XCTAssertEqual(first.currentDirectory, projectA)
+        XCTAssertEqual(first.remoteStatusSequence, 4)
+        XCTAssertEqual(first.lastCommandExit, 7)
+        XCTAssertEqual(first.lastCommandDuration, 1.25)
+        XCTAssertEqual(first.activityState, .running)
+        XCTAssertEqual(first.transientAgent, nil, "A pinned agent remains authoritative for display identity")
+        XCTAssertEqual(store.gitWatchHubStats.watchers, 0)
+
+        supervisors[0].emit(.event(RemoteRuntimeSnapshot(
+            sequence: 5,
+            agent: "syntactically-valid-but-unknown",
+            activity: .attention,
+            cwd: "/hostile",
+            cwdTruncated: false,
+            exitCode: nil,
+            durationMilliseconds: nil
+        )))
+        await Task.yield()
+        XCTAssertEqual(first.remoteStatusSequence, 4)
+        XCTAssertEqual(first.remoteWorkingDirectory, "/srv/project")
+        XCTAssertEqual(first.activityState, .running)
+
+        engine(first).emitTitle(
+            AgentStatusMarker.title(slug: "claude", event: .ended)
+        )
+        XCTAssertEqual(first.agent, .claudeCode)
+        XCTAssertEqual(
+            first.activityState,
+            .running,
+            "OSC must not overwrite a sequence-bearing control snapshot"
+        )
+
+        supervisors[0].emit(.degraded(
+            since: Date(),
+            reason: .controlDisconnected
+        ))
+        await Task.yield()
+        XCTAssertEqual(first.activityState, .running, "fail-stale must not infer idle")
+
+        supervisors[0].emit(.snapshot(RemoteRuntimeSnapshot(
+            sequence: 5,
+            agent: "claude",
+            activity: .ended,
+            cwd: "/srv/project",
+            cwdTruncated: false,
+            exitCode: 0,
+            durationMilliseconds: 2_000
+        )))
+        await Task.yield()
+        XCTAssertEqual(first.agent, .terminal)
+        XCTAssertEqual(first.activityState, .idle)
+
+        XCTAssertEqual(supervisors[0].stopCleanupValues, [])
+        store.closeTab(first, in: workspace)
+        XCTAssertEqual(supervisors[0].stopCleanupValues, [false])
+        XCTAssertEqual(engine(first).sentInputs, ["\u{001E}."])
+        XCTAssertEqual(cleanupConfigurations.map(\.runtimeToken), [firstRuntimeToken])
+    }
+
+    func testAttentionAlertFiresOnReconnectSnapshotEvenWhenActivityDidNotChange() async throws {
+        let configuration = try XCTUnwrap(MoshWorkspaceConfiguration(destination: "devbox"))
+        var supervisor: FakeRemoteSupervisor?
+        var alerts: [SessionAlertKind] = []
+        let store = makeStore(
+            onSessionAlert: { _, kind in alerts.append(kind) },
+            remoteControlFactory: { _, _, state, frame in
+                let s = FakeRemoteSupervisor(stateHandler: state, frameHandler: frame)
+                supervisor = s
+                return s
+            }
+        )
+        let workspace = store.addWorkspace(
+            workingDirectory: projectA,
+            template: .claudeCode,
+            transport: .mosh(configuration)
+        )
+        let session = try XCTUnwrap(workspace.activeSession)
+        let sup = try XCTUnwrap(supervisor)
+
+        sup.emit(.connected(since: Date()))
+        sup.emit(.snapshot(RemoteRuntimeSnapshot(
+            sequence: 1,
+            agent: "claude",
+            activity: .attention,
+            cwd: "/srv",
+            cwdTruncated: false,
+            exitCode: nil,
+            durationMilliseconds: nil
+        )))
+        await Task.yield()
+        XCTAssertEqual(session.activityState, .attention)
+        XCTAssertEqual(alerts, [.attention])
+
+        // The remote transitions running → attention entirely during a control
+        // outage; only the latest reconnect snapshot is delivered, and its
+        // activity still reads .attention. Dedupe on the sequence must still
+        // fire a fresh alert rather than swallowing it as a no-op transition.
+        sup.emit(.snapshot(RemoteRuntimeSnapshot(
+            sequence: 9,
+            agent: "claude",
+            activity: .attention,
+            cwd: "/srv",
+            cwdTruncated: false,
+            exitCode: nil,
+            durationMilliseconds: nil
+        )))
+        await Task.yield()
+        XCTAssertEqual(session.activityState, .attention)
+        XCTAssertEqual(alerts, [.attention, .attention])
+
+        // A redelivery of the SAME sequence must not double-alert.
+        sup.emit(.event(RemoteRuntimeSnapshot(
+            sequence: 9,
+            agent: "claude",
+            activity: .attention,
+            cwd: "/srv",
+            cwdTruncated: false,
+            exitCode: nil,
+            durationMilliseconds: nil
+        )))
+        await Task.yield()
+        XCTAssertEqual(alerts, [.attention, .attention])
+    }
+
+    func testNeutralRemoteExitMarkerEndsSessionWithoutFailure() throws {
+        let configuration = try XCTUnwrap(MoshWorkspaceConfiguration(destination: "devbox"))
+        var supervisor: FakeRemoteSupervisor?
+        let store = makeStore(
+            remoteControlFactory: { _, _, state, frame in
+                let s = FakeRemoteSupervisor(stateHandler: state, frameHandler: frame)
+                supervisor = s
+                return s
+            }
+        )
+        let workspace = store.addWorkspace(
+            workingDirectory: projectA,
+            template: .terminal,
+            transport: .mosh(configuration)
+        )
+        let session = try XCTUnwrap(workspace.activeSession)
+        let sup = try XCTUnwrap(supervisor)
+
+        engine(session).emitTitle(RemoteSessionExitMarker.title(exitCode: 130))
+
+        XCTAssertEqual(session.remoteConnectionState, .disconnected(exitCode: 130))
+        XCTAssertFalse((session.terminalTitle ?? "").contains("kooky-remote"))
+        // moshDidExit stops the supervisor so no background retry leaks.
+        XCTAssertEqual(sup.stopCleanupValues, [true])
+    }
+
+    func testRemoteMarkersAreSuppressedWhileSessionIsClosing() throws {
+        let configuration = try XCTUnwrap(MoshWorkspaceConfiguration(destination: "devbox"))
+        var supervisor: FakeRemoteSupervisor?
+        let store = makeStore(
+            remoteControlFactory: { _, _, state, frame in
+                let s = FakeRemoteSupervisor(stateHandler: state, frameHandler: frame)
+                supervisor = s
+                return s
+            }
+        )
+        let workspace = store.addWorkspace(
+            workingDirectory: projectA,
+            template: .terminal,
+            transport: .mosh(configuration)
+        )
+        let session = try XCTUnwrap(workspace.activeSession)
+        let sup = try XCTUnwrap(supervisor)
+        session.isClosing = true
+
+        // The explicit close sends mosh's quit escape, so the client exits
+        // non-zero; neither marker may mutate state into a failure while the
+        // tab is already tearing down.
+        engine(session).emitTitle(
+            RemoteLaunchFailureMarker.title(for: .processExited(code: 1, message: nil))
+        )
+        engine(session).emitTitle(RemoteSessionExitMarker.title(exitCode: 1))
+
+        if case .failed = session.remoteConnectionState {
+            XCTFail("closing session must not enter .failed from an exit marker")
+        }
+        XCTAssertFalse((session.terminalTitle ?? "").contains("kooky-remote"))
+        XCTAssertEqual(sup.stopCleanupValues, [])
+    }
+
+    func testMoshWorkspaceIsExcludedFromRecentFoldersAndManualRetryIsExplicit() throws {
+        let configuration = try XCTUnwrap(MoshWorkspaceConfiguration(destination: "devbox"))
+        var recent: [URL] = []
+        var supervisor: FakeRemoteSupervisor?
+        let store = makeStore(
+            noteRecentFolder: { recent.append($0) },
+            remoteControlFactory: { _, _, state, frame in
+                let created = FakeRemoteSupervisor(stateHandler: state, frameHandler: frame)
+                supervisor = created
+                return created
+            }
+        )
+        let workspace = store.addWorkspace(
+            workingDirectory: projectA,
+            transport: .mosh(configuration)
+        )
+        let session = try XCTUnwrap(workspace.activeSession)
+        XCTAssertFalse(recent.contains(projectA))
+
+        store.retryRemoteControl(for: session)
+        XCTAssertEqual(supervisor?.retryCount, 1)
+        store.requestRemoteAuthentication(for: session)
+        XCTAssertEqual(store.pendingRemoteAuthenticationSession?.id, session.id)
+        store.remoteAuthenticationSucceeded(for: session)
+        XCTAssertEqual(supervisor?.retryCount, 2)
+        XCTAssertNil(store.pendingRemoteAuthenticationSession)
+
+        store.remoteTransferFailed(for: session)
+        XCTAssertNotNil(session.remoteTransferError)
+        XCTAssertEqual(supervisor?.retryCount, 3)
+        store.dismissRemoteTransferError(for: session)
+        XCTAssertNil(session.remoteTransferError)
+    }
+
+    func testLifecycleRecoveryRetriesEveryLiveRemoteControlOnly() throws {
+        var supervisors: [FakeRemoteSupervisor] = []
+        let store = makeStore(
+            remoteControlFactory: { _, _, state, frame in
+                let created = FakeRemoteSupervisor(
+                    stateHandler: state,
+                    frameHandler: frame
+                )
+                supervisors.append(created)
+                return created
+            }
+        )
+        let configuration = try XCTUnwrap(
+            MoshWorkspaceConfiguration(destination: "devbox")
+        )
+        let remoteWorkspace = store.addWorkspace(
+            workingDirectory: projectA,
+            transport: .mosh(configuration)
+        )
+        _ = store.addTab(in: remoteWorkspace)
+        _ = store.addWorkspace(workingDirectory: projectB)
+        XCTAssertEqual(supervisors.count, 2)
+
+        store.retryAllRemoteControls()
+
+        XCTAssertEqual(supervisors.map(\.retryCount), [1, 1])
+    }
+
+    func testNonzeroMoshExitMarkerStopsControlRetriesButKeepsDiagnosticsTab() throws {
+        var supervisor: FakeRemoteSupervisor?
+        let store = makeStore(
+            remoteControlFactory: { _, _, state, frame in
+                let created = FakeRemoteSupervisor(
+                    stateHandler: state,
+                    frameHandler: frame
+                )
+                supervisor = created
+                return created
+            }
+        )
+        let configuration = try XCTUnwrap(
+            MoshWorkspaceConfiguration(destination: "devbox")
+        )
+        let workspace = store.addWorkspace(
+            workingDirectory: projectA,
+            transport: .mosh(configuration)
+        )
+        let session = try XCTUnwrap(workspace.activeSession)
+
+        engine(session).emitTitle(
+            RemoteLaunchFailureMarker.title(
+                for: .processExited(code: 255, message: nil)
+            )
+        )
+
+        XCTAssertEqual(
+            session.remoteConnectionState,
+            .failed(.processExited(code: 255, message: nil))
+        )
+        XCTAssertEqual(supervisor?.stopCleanupValues, [true])
+        XCTAssertNotNil(workspace.root.pane(containingSessionId: session.id))
+    }
+
+    func testCrossWindowAdoptionRejectsTransportMismatchAndPreservesMoshRuntime() throws {
+        var stores: [WorkspaceStore] = []
+        let peers: @MainActor () -> [WorkspaceStore] = { stores }
+        let factory: @MainActor (
+            RemoteRuntimeIdentity,
+            WorkspaceTransport,
+            @escaping @Sendable (RemoteControlSupervisorState) -> Void,
+            @escaping @Sendable (RemoteRuntimeFrame) -> Void
+        ) -> any RemoteControlSupervising = { _, _, state, frame in
+            FakeRemoteSupervisor(stateHandler: state, frameHandler: frame)
+        }
+        let source = WorkspaceStore(
+            persistence: InMemoryPersistence(),
+            engineFactory: { TestEngine() },
+            optionsProvider: { _ in nil },
+            resumeProvider: { true },
+            peerStores: peers,
+            remoteControlFactory: factory
+        )
+        let destination = WorkspaceStore(
+            persistence: InMemoryPersistence(),
+            engineFactory: { TestEngine() },
+            optionsProvider: { _ in nil },
+            resumeProvider: { true },
+            peerStores: peers,
+            remoteControlFactory: factory
+        )
+        stores = [source, destination]
+        let configuration = try XCTUnwrap(
+            MoshWorkspaceConfiguration(destination: "devbox")
+        )
+        let remoteWorkspace = source.addWorkspace(
+            workingDirectory: projectA,
+            transport: .mosh(configuration)
+        )
+        let session = try XCTUnwrap(remoteWorkspace.activeSession)
+        let runtime = try XCTUnwrap(session.remoteRuntime)
+        let localWorkspace = try XCTUnwrap(destination.active)
+        let localPane = try XCTUnwrap(localWorkspace.activePane)
+
+        XCTAssertFalse(destination.handleTabDrop(
+            droppedId: session.id,
+            to: localPane,
+            at: localPane.tabs.count,
+            in: localWorkspace
+        ))
+        XCTAssertNotNil(remoteWorkspace.root.pane(containingSessionId: session.id))
+        XCTAssertEqual(session.remoteRuntime, runtime)
+        XCTAssertEqual(
+            source.transportForSession(id: session.id),
+            .mosh(configuration)
+        )
+    }
+
+    func testRestoredMoshPaneGetsFreshRuntimeTokenAndControlWiring() throws {
+        let persistence = InMemoryPersistence()
+        var firstSupervisors: [FakeRemoteSupervisor] = []
+        let firstStore = makeStore(
+            persistence: persistence,
+            remoteControlFactory: { _, _, state, frame in
+                let created = FakeRemoteSupervisor(
+                    stateHandler: state,
+                    frameHandler: frame
+                )
+                firstSupervisors.append(created)
+                return created
+            }
+        )
+        let configuration = try XCTUnwrap(
+            MoshWorkspaceConfiguration(destination: "devbox")
+        )
+        let originalWorkspace = firstStore.addWorkspace(
+            workingDirectory: projectA,
+            transport: .mosh(configuration)
+        )
+        let originalToken = try XCTUnwrap(
+            originalWorkspace.activeSession?.remoteRuntime?.token
+        )
+        firstStore.flushPersistence()
+        let saved = try XCTUnwrap(persistence.saved)
+        var restoredSupervisors: [FakeRemoteSupervisor] = []
+
+        let restored = makeStore(
+            initial: saved,
+            remoteControlFactory: { _, _, state, frame in
+                let created = FakeRemoteSupervisor(
+                    stateHandler: state,
+                    frameHandler: frame
+                )
+                restoredSupervisors.append(created)
+                return created
+            }
+        )
+        let restoredWorkspace = try XCTUnwrap(
+            restored.workspaces.first { $0.transport == .mosh(configuration) }
+        )
+        let restoredSession = try XCTUnwrap(restoredWorkspace.activeSession)
+
+        XCTAssertNotEqual(restoredSession.remoteRuntime?.token, originalToken)
+        XCTAssertEqual(restoredSupervisors.count, 1)
+        XCTAssertEqual(restoredSupervisors[0].startCount, 1)
     }
 
     /// Two independent stores wired as each other's peers — models two kooky
@@ -2419,10 +2915,16 @@ final class WorkspaceStoreTests: XCTestCase {
         directory: URL,
         remoteHost: String? = nil,
         agent: AgentTemplate = .claudeCode,
+        remoteTransportLabel: String? = nil,
+        remoteDirectory: String? = nil,
         tag: WorkspaceTag? = nil
     ) -> AgentMonitor.Entry {
         AgentMonitor.Entry(id: UUID(), agent: agent, state: .running,
-                           tabTitle: tabTitle, directory: directory, remoteHost: remoteHost, tag: tag)
+                           tabTitle: tabTitle, directory: directory,
+                           remoteHost: remoteHost,
+                           remoteTransportLabel: remoteTransportLabel,
+                           remoteDirectory: remoteDirectory,
+                           tag: tag)
     }
 
     /// The panel repeats the workspace's tag so one marker means one thing in
@@ -2467,6 +2969,19 @@ final class WorkspaceStoreTests: XCTestCase {
         XCTAssertEqual(entry.locationLabel, "ssh corey@prod")
         XCTAssertFalse(entry.hoverText(tag: entry.tag).contains("/tmp/projectA"),
                        "a local path must not appear anywhere on a remote row")
+    }
+
+    func testAgentEntryMoshLocationIncludesRemoteCwdAndTransport() {
+        let entry = agentEntry(
+            tabTitle: "deploy",
+            directory: projectA,
+            remoteHost: "corey@prod",
+            remoteTransportLabel: "mosh",
+            remoteDirectory: "/srv/app"
+        )
+
+        XCTAssertEqual(entry.locationPathLabel, "mosh corey@prod:/srv/app")
+        XCTAssertFalse(entry.locationPathLabel.contains(projectA.path))
     }
 
     /// A session with no reported title is named after its own directory, so
