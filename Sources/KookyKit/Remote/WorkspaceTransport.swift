@@ -94,6 +94,10 @@ struct SSHWorkspaceConfiguration: Codable, Equatable, Sendable {
 }
 
 struct MoshWorkspaceConfiguration: Codable, Equatable, Sendable {
+    // Keep the long backstop for hosts where the remote `setsid` capability
+    // gate cannot establish a detached reaper. The server timeout is fixed
+    // before the remote bootstrap probes that capability, so lowering it
+    // globally would violate the safe fallback on unsupported hosts.
     static let defaultNetworkTimeoutSeconds = 7 * 24 * 60 * 60
     static let networkTimeoutRange = 3_600...2_592_000
 

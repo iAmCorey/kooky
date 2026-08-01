@@ -7,7 +7,7 @@ import Foundation
 enum RemoteCleanupExecutor {
     static func run(
         configuration: RemoteControlChannelConfiguration,
-        timeout: TimeInterval = 8,
+        timeout: TimeInterval = 18,
         completion: (@Sendable (Bool) -> Void)? = nil
     ) {
         DispatchQueue.global(qos: .utility).async {

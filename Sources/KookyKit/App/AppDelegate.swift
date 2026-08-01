@@ -581,7 +581,17 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate 
         }
         terminationReplyTask?.cancel()
         terminationReplyTask = Task { @MainActor in
-            try? await Task.sleep(for: .seconds(1))
+            let stores = windowControllers.map(\.store)
+            // Unified-deadline barrier: reply as soon as every window's remote
+            // cleanup has flushed, or when the deadline expires -- whichever
+            // comes first -- so ⌘Q neither hangs on a slow SSH nor quits before
+            // the reaper SHUTDOWN is on the wire.
+            let deadline = Date().addingTimeInterval(6)
+            while Date() < deadline {
+                if stores.allSatisfy({ !$0.hasPendingRemoteCleanup }) { break }
+                try? await Task.sleep(for: .milliseconds(100))
+                if Task.isCancelled { return }
+            }
             guard !Task.isCancelled else { return }
             NSApp.reply(toApplicationShouldTerminate: true)
         }

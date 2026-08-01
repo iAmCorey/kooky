@@ -1924,6 +1924,32 @@ enum KookyShellIntegration {
         _kooky_slug="${0##*/}"
         _kooky_self_dir=$(CDPATH= cd "$(dirname "$0")" && pwd)
         _kooky_real=""
+        # A dead reaper must never SIGPIPE-kill the agent while we register.
+        trap '' PIPE
+        # Register this wrapper's live process group with the reaper through the
+        # inherited, already-open control fd (constraint 2: no FIFO open, single
+        # small frame, best-effort). The reaper verifies pid+start before it
+        # ever signals, and targets the CURRENT pgid, so a synchronously running
+        # agent's whole job is reclaimed on PTY death.
+        _kooky_reaper_reg=
+        if [ "${KOOKY_REAPER_ENABLED:-}" = 1 ]; then
+            _kooky_reap_pgid=$(ps -o pgid= -p $$ 2>/dev/null || printf '')
+            _kooky_reap_pgid=${_kooky_reap_pgid#${_kooky_reap_pgid%%[! ]*}}
+            _kooky_reap_pgid=${_kooky_reap_pgid%${_kooky_reap_pgid##*[! ]}}
+            _kooky_reap_sid=$(ps -o sid= -p $$ 2>/dev/null ||
+                ps -o sess= -p $$ 2>/dev/null || printf '')
+            _kooky_reap_sid=${_kooky_reap_sid#${_kooky_reap_sid%%[! ]*}}
+            _kooky_reap_sid=${_kooky_reap_sid%${_kooky_reap_sid##*[! ]}}
+            _kooky_reap_start=$(ps -o lstart= -p $$ 2>/dev/null || printf '')
+            case "$_kooky_reap_pgid:$_kooky_reap_sid" in
+                *[!0-9:]*|::*|*::|:*|*:) ;;
+                *)
+                    printf 'REG\t%s\t%s\t%s\t%s\n' \
+                        "$$" "$_kooky_reap_pgid" "$_kooky_reap_start" "$_kooky_reap_sid" \
+                        >&6 2>/dev/null && _kooky_reaper_reg=1 || :
+                    ;;
+            esac
+        fi
         _kooky_collector_alive() {
             _kooky_collector=
             [ -n "${KOOKY_REMOTE_RUNTIME:-}" ] &&
@@ -1932,6 +1958,15 @@ enum KookyShellIntegration {
                 return 1
             case "$_kooky_collector" in *[!0-9]*|'') return 1 ;; esac
             kill -0 "$_kooky_collector" 2>/dev/null
+        }
+        # Deregistration is a bookkeeping-only signal: it removes this wrapper
+        # from the reaper's table so a normal exit leaves no residue to reap
+        # (constraint 4 -- the reaper must not KILL an agent's intentional
+        # background jobs on a clean UNREG).
+        _kooky_reaper_unreg() {
+            [ -n "$_kooky_reaper_reg" ] || return 0
+            printf 'UNREG\t%s\n' "$$" >&6 2>/dev/null || :
+            _kooky_reaper_reg=
         }
         _kooky_old_ifs=$IFS
         IFS=:
@@ -1944,6 +1979,7 @@ enum KookyShellIntegration {
         IFS=$_kooky_old_ifs
 
         if [ -z "$_kooky_real" ]; then
+            _kooky_reaper_unreg
             if [ -n "${KOOKY_REMOTE_FIFO:-}" ] && _kooky_collector_alive; then
                 printf 'P/1\tAGENT\t%s\tended\n' "$_kooky_slug" 2>/dev/null >&8 || :
             fi
@@ -1976,6 +2012,7 @@ enum KookyShellIntegration {
                 ;;
         esac
         _kooky_status=$?
+        _kooky_reaper_unreg
         if [ -n "${KOOKY_REMOTE_FIFO:-}" ] && _kooky_collector_alive; then
             printf 'P/1\tAGENT\t%s\tended\n' "$_kooky_slug" 2>/dev/null >&8 || :
         fi

@@ -288,6 +288,11 @@ final class WorkspaceStore {
     @ObservationIgnored
     private var remoteControls: [UUID: any RemoteControlSupervising] = [:]
     private var remoteShutdownRequested: Set<UUID> = []
+    /// In-flight token-scoped SSH cleanups. The app-termination coordinator
+    /// awaits these (bounded by its own deadline) so a ⌘Q actually delivers the
+    /// reaper SHUTDOWN / orphan reclamation before the process dies, instead of
+    /// racing a fixed sleep.
+    private var pendingRemoteCleanupCount = 0
     private let gitStatusFetcher = GitStatusFetcher()
     /// One watcher per session — refreshes git status when `.git/HEAD` or
     /// `.git/index` changes from any source (agent subprocess, external
@@ -2515,12 +2520,32 @@ final class WorkspaceStore {
             sshPort: configuration.sshPort.flatMap(UInt16.init(exactly:)),
             identityFile: configuration.identityFile
         )
+        beginRemoteCleanup()
+        let runtimeToken = runtime.token
         remoteCleanup(control) { [weak self] succeeded in
-            guard succeeded else { return }
             Task { @MainActor [weak self] in
-                self?.persistence.clearPendingRemoteReap(runtimeToken: runtime.token)
+                guard let self else { return }
+                if succeeded {
+                    self.persistence.clearPendingRemoteReap(runtimeToken: runtimeToken)
+                }
+                self.endRemoteCleanup()
             }
         }
+    }
+
+    private func beginRemoteCleanup() {
+        pendingRemoteCleanupCount += 1
+    }
+
+    private func endRemoteCleanup() {
+        pendingRemoteCleanupCount -= 1
+        if pendingRemoteCleanupCount < 0 { pendingRemoteCleanupCount = 0 }
+    }
+
+    /// True while any token-scoped SSH cleanup is still outstanding. The
+    /// termination coordinator polls this under its own deadline.
+    var hasPendingRemoteCleanup: Bool {
+        pendingRemoteCleanupCount > 0
     }
 
     private func applyRemoteSnapshot(
