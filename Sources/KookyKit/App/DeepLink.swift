@@ -11,8 +11,8 @@ import SwiftUI
 ///     kooky://resume?agent=<agent-id>&id=<conversation-id>[&cwd=<abs-path>]
 ///
 /// `agent` speaks the AgentTemplate/scanner roster ids — the caller contract
-/// (Wake sends `claude-code` / `codex` / `copilot` / `cursor` / `opencode` /
-/// `kiro` / `gemini`, which are exactly kooky's template ids). `cwd` is the
+/// (external session managers send `claude-code` / `codex` / `copilot` /
+/// `cursor` / `opencode` / `kiro` / `gemini`, kooky's template ids). `cwd` is the
 /// conversation's project directory: kooky prefers its OWN scan of the
 /// agent's session store for the spawn directory, but the scanner caps at
 /// 150 records per agent — `cwd` is what lets a caller resume an older
@@ -24,7 +24,7 @@ import SwiftUI
 /// `nil` and is dropped silently (the scheme is public surface; arbitrary
 /// malformed links must not pop UI), while a RECOGNIZED resume link with
 /// parameters kooky refuses parses to `.invalid(reason:)` — the requester
-/// (Wake's "Open In", a script) expects visible feedback, not a silent no-op.
+/// (an "Open In" button, a script) expects visible feedback, not a silent no-op.
 enum KookyDeepLink: Equatable {
     case resumeSession(agentId: String, conversationId: String, cwd: String?)
     case invalid(reason: String)

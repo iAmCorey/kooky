@@ -232,10 +232,10 @@ final class DeepLinkTests: XCTestCase {
         )
     }
 
-    /// Wake's seven caller agents must all stay on the scanner roster (the
+    /// The documented caller agents must all stay on the scanner roster (the
     /// deep-link whitelist). The resume half of the contract is pinned for
     /// the whole roster by `testEveryStoreAgentIdIsARealBuiltinWithResume`.
-    func testWakeCallerAgentsAreOnScannerRoster() {
+    func testDocumentedCallerAgentsAreOnScannerRoster() {
         for agentId in ["claude-code", "codex", "copilot", "cursor", "opencode", "kiro", "gemini"] {
             XCTAssertTrue(
                 AgentSessionScanner.supportedAgentIds.contains(agentId),
