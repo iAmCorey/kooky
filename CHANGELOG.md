@@ -2,6 +2,11 @@
 
 Notable changes per release. Tagged commits use `vX.Y.Z` shortform.
 
+## v0.50.6 — 2026-08-18
+
+- New: `kooky://` deep links — external tools can reopen an agent conversation in kooky. `kooky://resume?agent=<agent>&id=<conversation-id>[&cwd=<path>]` resumes the conversation in a new tab at its own project directory; if it's already open in a tab, kooky jumps there instead of spawning a duplicate. Works from a cold start, accepts the `cwd` parameter for conversations older than the session scan keeps, and every refused link explains itself in a visible sheet. Links can't inject prompts, commands, or arbitrary directories — conversation ids are strictly validated and only agents kooky already reads session stores for are accepted.
+- Fixed: picking a workspace or creating a worktree via ⌘P now restores the target window from the Dock when it was minimized.
+
 ## v0.50.5 — 2026-08-12
 
 - Fixed: switching windows could crash the whole app with a renderer segfault, typically on terminals that had been running for hours. The bundled terminal engine now guards the cursor render path, recovers cleanly from interrupted render updates, and no longer tears down its render state every frame on long-lived terminals. (#53)

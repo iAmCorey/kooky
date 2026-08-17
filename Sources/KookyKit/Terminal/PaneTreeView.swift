@@ -327,7 +327,7 @@ func paneStatusBarHasData(session: Session) -> Bool {
 @MainActor
 func sessionWantsToolCallActivity(_ session: Session) -> Bool {
     guard session.agent.reportsToolCalls, session.activityState != .idle else { return false }
-    let agentKey = session.agent.baseAgentId ?? session.agent.id
+    let agentKey = session.agent.rosterId
     return !KookySettingsModel.shared.hiddenToolCallAgents.contains(agentKey)
 }
 
@@ -343,7 +343,7 @@ func sessionWantsCodexUsage(_ session: Session) -> Bool {
     // Only on an actual Codex tab — once Codex exits the agent reverts to
     // `.terminal`, so this also hides a stale gauge the moment the session
     // is no longer Codex (belt-and-suspenders with the onCommandFinished clear).
-    let agentKey = session.displayAgent.baseAgentId ?? session.displayAgent.id
+    let agentKey = session.displayAgent.rosterId
     guard agentKey == AgentTemplate.codex.id else { return false }
     return !KookySettingsModel.shared.hiddenUsageAgents.contains(agentKey)
 }

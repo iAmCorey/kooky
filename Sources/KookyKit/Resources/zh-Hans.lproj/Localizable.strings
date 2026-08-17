@@ -410,3 +410,8 @@
 "closing %@" = "关闭 %@";
 "now" = "刚刚";
 "%@ ago" = "%@前";
+
+/* Deep-link failure sheet */
+"DEEP-LINK" = "深层链接";
+"Can't open this link" = "无法打开这个链接";
+"ok" = "好";

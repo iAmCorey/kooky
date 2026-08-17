@@ -169,6 +169,21 @@ cat > "${APP}/Contents/Info.plist" <<PLIST
     <string>${VERSION}</string>
     <key>CFBundleSignature</key>
     <string>????</string>
+    <!-- kooky:// deep links (resume an agent conversation from outside the
+         app). Grammar + handler: Sources/KookyKit/App/DeepLink.swift. -->
+    <key>CFBundleURLTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleTypeRole</key>
+            <string>Viewer</string>
+            <key>CFBundleURLName</key>
+            <string>${BUNDLE_ID}</string>
+            <key>CFBundleURLSchemes</key>
+            <array>
+                <string>kooky</string>
+            </array>
+        </dict>
+    </array>
     <key>LSApplicationCategoryType</key>
     <string>public.app-category.developer-tools</string>
     <key>LSMinimumSystemVersion</key>

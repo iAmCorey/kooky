@@ -943,17 +943,25 @@ final class WorkspaceStore {
         return addTab(in: workspace, pane: pane, template: session.agent, initialCwd: session.currentDirectory)
     }
 
-    /// History-list resume: a new tab in the active workspace, running the
-    /// record's agent with its resume arguments, spawned in the conversation's
-    /// own directory (a different cwd would break every file reference the
-    /// conversation holds — `resolvedSpawnCwd` still falls back to `$HOME`
-    /// when the directory is gone, which at least opens a resumable shell).
-    /// `forceResume` because a click on a history row is an explicit ask —
-    /// the `agents.resumeConversations` setting only governs automatic
-    /// relaunch-time resume.
+    /// History-row convenience — the seam's true dependency is only the
+    /// (agent, conversation, cwd) triple below, so a scanner record just
+    /// forwards its three fields.
     @discardableResult
     func resumeAgentSession(_ record: AgentSessionRecord) -> Session? {
-        guard let template = AgentTemplate.builtin(id: record.agentId),
+        resumeAgentSession(agentId: record.agentId, conversationId: record.conversationId, cwd: record.cwd)
+    }
+
+    /// Resume a conversation: a new tab in the active workspace, running the
+    /// agent with its resume arguments, spawned in the conversation's own
+    /// directory (a different cwd would break every file reference the
+    /// conversation holds — `resolvedSpawnCwd` still falls back to `$HOME`
+    /// when the directory is gone, which at least opens a resumable shell).
+    /// `forceResume` because both callers (History row click, deep link) are
+    /// explicit asks — the `agents.resumeConversations` setting only governs
+    /// automatic relaunch-time resume.
+    @discardableResult
+    func resumeAgentSession(agentId: String, conversationId: String, cwd: URL) -> Session? {
+        guard let template = AgentTemplate.builtin(id: agentId),
               template.supportsResume
         else { return nil }
         // The conversation lives on the LOCAL disk; an SSH workspace would
@@ -964,15 +972,44 @@ final class WorkspaceStore {
         // can never silently no-op.
         let workspace = (active?.sshRemoteHost == nil ? active : nil)
             ?? workspaces.first { $0.sshRemoteHost == nil }
-            ?? addWorkspace(workingDirectory: resolvedSpawnCwd(record.cwd.path))
+            ?? addWorkspace(workingDirectory: resolvedSpawnCwd(cwd.path))
         activateWorkspace(workspace)
         return addTab(
             in: workspace,
             template: template,
-            initialCwd: resolvedSpawnCwd(record.cwd.path),
-            conversationId: record.conversationId,
+            initialCwd: resolvedSpawnCwd(cwd.path),
+            conversationId: conversationId,
             forceResume: true
         )
+    }
+
+    /// The open tab already running `conversationId`, if any — so a deep link
+    /// jumps to the live tab instead of spawning a duplicate `--resume` of a
+    /// conversation that's already attached. `conversationId` (the persisted
+    /// id, overwritten by hook-reporting agents like Claude on every new
+    /// conversation) is the authority when present; `resumedConversationId`
+    /// (spawn-time, written once, never updated) only counts when no
+    /// persisted id exists — else a Claude tab that `/clear`ed to a new
+    /// conversation would still match its old resume id and swallow the
+    /// resume. Known residue this can't see: a non-reporting agent's
+    /// persisted id survives the agent exiting or the resume setting being
+    /// off, so a match can reveal a tab that RAN the conversation but no
+    /// longer does — the safe direction (the user lands on a related tab and
+    /// can resume from History) versus duplicate-resuming a live one.
+    func findOpenConversation(agentId: String, conversationId: String)
+        -> (workspace: Workspace, session: Session)? {
+        for workspace in workspaces {
+            for pane in workspace.root.allPanes {
+                for session in pane.tabs {
+                    guard session.agent.rosterId == agentId else { continue }
+                    let matches = session.conversationId != nil
+                        ? session.conversationId == conversationId
+                        : session.resumedConversationId == conversationId
+                    if matches { return (workspace, session) }
+                }
+            }
+        }
+        return nil
     }
 
     /// Set or clear a user-provided tab title. Empty / whitespace input clears
@@ -2072,7 +2109,7 @@ final class WorkspaceStore {
         for session: Session,
         resumingConversationId: String? = nil
     ) {
-        let key = session.displayAgent.baseAgentId ?? session.displayAgent.id
+        let key = session.displayAgent.rosterId
         guard key == AgentTemplate.codex.id else { return }
         // Resolve CODEX_HOME from the session's live shell env (a Dock-launched
         // kooky doesn't inherit it; the codex child does). The monitor snapshots
@@ -2297,7 +2334,7 @@ final class WorkspaceStore {
     }
 
     private func startKiroConversationIfNeeded(for session: Session) {
-        let key = session.displayAgent.baseAgentId ?? session.displayAgent.id
+        let key = session.displayAgent.rosterId
         guard key == AgentTemplate.kiro.id else { return }
         let path = KookyShellIntegration.kiroACPRecordPath(for: session.id)
         kiroConversationMonitor.start(sessionId: session.id, path: path) { [weak self, weak session] id in

@@ -48,6 +48,12 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
     /// here (not an arbitrary array slot) when a Settings / Update panel is
     /// the key window. Weak so a closed window doesn't pin its store.
     private weak var lastKeyController: KookyWindowController?
+    /// Deep links parked until launch completes. AppKit documents no ordering
+    /// between a cold-start `application(_:open:)` and
+    /// `applicationDidFinishLaunching`, and handling one needs the restored
+    /// window set — so URLs buffer here and drain at the end of launch.
+    private var pendingDeepLinks: [KookyDeepLink] = []
+    private var deepLinksReady = false
     /// Posts macOS notifications when a backgrounded agent needs attention or
     /// a command fails. Bundle-gated, so it no-ops under `swift run`.
     private let notificationManager = NotificationManager()
@@ -175,6 +181,12 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
         Task.detached(priority: .utility) {
             KookyShellIntegration.prunePastesCache()
         }
+
+        // LAST: windows + hook server + monitors all exist now, so a deep
+        // link that raced launch can finally act.
+        deepLinksReady = true
+        for link in pendingDeepLinks { handleDeepLink(link) }
+        pendingDeepLinks = []
     }
 
     /// System mode has two jobs on a macOS appearance flip: explicitly apply
@@ -377,12 +389,150 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
     /// place. Callers resolve the (controller, workspace, session) trio their
     /// own way — the palette by coordinate, the Dock by session id.
     private func revealTab(_ session: Session, in workspace: Workspace, controller: KookyWindowController) {
-        if let window = controller.window {
-            if window.isMiniaturized { window.deminiaturize(nil) }
-            window.makeKeyAndOrderFront(nil)
-        }
+        if let window = controller.window { front(window) }
         controller.store.activateWorkspace(workspace)
         controller.store.activateTab(session, in: workspace)
+    }
+
+    /// Deminiaturize-and-front — the shared tail of every "bring a kooky
+    /// window to the user" path (tab reveal, menu-bar open, deep link), so a
+    /// future fronting fix (Spaces, activation ordering) lands everywhere.
+    private func front(_ window: NSWindow) {
+        if window.isMiniaturized { window.deminiaturize(nil) }
+        window.makeKeyAndOrderFront(nil)
+    }
+
+    // MARK: - Deep links
+
+    /// `kooky://` URL entry point (registered via `CFBundleURLTypes` in the
+    /// generated Info.plist, so it only fires in the packaged .app — Launch
+    /// Services never routes URLs to a bundle-less `swift run` binary).
+    /// Unparseable URLs are dropped silently: the scheme is public surface,
+    /// so arbitrary malformed links must not beep or alert.
+    public func application(_ application: NSApplication, open urls: [URL]) {
+        // Mid-quit links are dropped: the stores are already flushed and
+        // terminated, so acting would spawn into a dying app (and the second
+        // persistence flush would write the phantom tab to state.json).
+        guard !isTerminating else { return }
+        let links = urls.compactMap(KookyDeepLink.parse)
+        guard deepLinksReady else {
+            pendingDeepLinks.append(contentsOf: links)
+            return
+        }
+        for link in links { handleDeepLink(link) }
+    }
+
+    private func handleDeepLink(_ link: KookyDeepLink) {
+        NSApp.activate(ignoringOtherApps: true)
+        switch link {
+        case .resumeSession(let agentId, let conversationId, let cwd):
+            resumeSessionFromDeepLink(agentId: agentId, conversationId: conversationId, cwd: cwd)
+        case .invalid(let reason):
+            presentDeepLinkFailure(reason)
+        }
+    }
+
+    /// Jump to the conversation if a tab is already running it, else find it
+    /// in the agent's own session store and resume — the History row's exact
+    /// pipeline, so SSH-workspace fallback rides along for free. Spawn-cwd
+    /// precedence: the scanner record's cwd while it still exists (local
+    /// store is first-hand), else the caller's validated cwd (covers a moved
+    /// project AND conversations beyond the scanner's per-agent cap — the
+    /// agent itself rejects an id it doesn't know, visibly in the tab), else
+    /// the record's dead cwd (`resolvedSpawnCwd` falls back to `$HOME`, the
+    /// History row's behavior). Every refusal is a visible sheet: the link
+    /// just activated the app, so silence would read as a dead link.
+    private func resumeSessionFromDeepLink(agentId: String, conversationId: String, cwd: String?) {
+        // Roster whitelist — the only agents a link can name are the ones
+        // whose session stores kooky itself reads.
+        guard AgentSessionScanner.supportedAgentIds.contains(agentId) else {
+            presentDeepLinkFailure("unknown agent '\(agentId)'")
+            return
+        }
+        if revealOpenConversation(agentId: agentId, conversationId: conversationId) { return }
+        let started = ContinuousClock.now
+        Task { [weak self] in
+            // Store read + cwd stat off-main, and the stat only when it can
+            // matter: `cwd` comes from an untrusted URL — a stat against an
+            // unmounted network path blocks for the automount timeout — so a
+            // scanner hit with a live directory never pays it.
+            let spawnCwd: URL? = await Task.detached(priority: .userInitiated) {
+                let statCallerCwd = { cwd.map(URL.init(fileURLWithPath:)).flatMap { isDirectory($0) ? $0 : nil } }
+                guard let record = AgentSessionScanner.findRecordInDefaultRoot(
+                    agentId: agentId, conversationId: conversationId
+                ) else { return statCallerCwd() }
+                if isDirectory(record.cwd) { return record.cwd }
+                return statCallerCwd() ?? record.cwd
+            }.value
+            guard let self, !self.isTerminating else { return }
+            // A continuation landing long after the click (that automount
+            // timeout) must not yank kooky frontmost or pop a sheet for an
+            // interaction the user has abandoned.
+            guard ContinuousClock.now - started < .seconds(10) else {
+                NSLog("kooky: deep link resolution for '%@' timed out; dropped", agentId)
+                return
+            }
+            // Re-check after the async hop: a double-fired link's first
+            // resume may have landed while this one was scanning.
+            if self.revealOpenConversation(agentId: agentId, conversationId: conversationId) { return }
+            guard let spawnCwd else {
+                if let cwd {
+                    self.presentDeepLinkFailure("directory does not exist: \(cwd)")
+                } else {
+                    self.presentDeepLinkFailure("conversation '\(conversationId)' is not among the newest sessions kooky scans for \(agentId) — pass &cwd= to resume an older one")
+                }
+                return
+            }
+            guard let controller = self.deepLinkController() else { return }
+            // Front the window first; `resumeAgentSession` then activates
+            // the workspace + new tab itself (History-row semantics).
+            if let window = controller.window { self.front(window) }
+            guard let session = controller.store.resumeAgentSession(
+                agentId: agentId, conversationId: conversationId, cwd: spawnCwd
+            ) else {
+                self.presentDeepLinkFailure("agent '\(agentId)' does not support resuming sessions")
+                return
+            }
+            // The spawn can silently drop the resume id (claude launch
+            // options carrying --no-session-persistence): the tab opened,
+            // but as a FRESH conversation — say so instead of faking success.
+            if session.resumedConversationId == nil {
+                self.presentDeepLinkFailure("the agent's launch options disable session persistence, so a fresh conversation was opened instead")
+            }
+        }
+    }
+
+    /// The window a deep link should land in — the active controller, or a
+    /// fresh window when none exists (Settings/About can keep the app alive
+    /// with zero terminal windows; a valid link must not silently vanish
+    /// there, mirroring the Dock menu's New Window recovery).
+    private func deepLinkController() -> KookyWindowController? {
+        if let controller = activeController { return controller }
+        guard !isTerminating else { return nil }
+        return addWindow()
+    }
+
+    private func presentDeepLinkFailure(_ reason: String) {
+        NSLog("kooky: deep link rejected — %@", reason)
+        // Defensive cap besides the parse-level limits: the sheet has no
+        // scroll view, so an oversized reason must never reach layout.
+        let display = reason.count > 500 ? String(reason.prefix(500)) + "…" : reason
+        guard let window = deepLinkController()?.window else { return }
+        // A sheet on a miniaturized window is invisible (NSApp.activate does
+        // not deminiaturize) — front it like the success path does.
+        front(window)
+        DeepLinkFailurePresenter.present(on: window, reason: display)
+    }
+
+    /// True when some window already runs the conversation and was revealed.
+    private func revealOpenConversation(agentId: String, conversationId: String) -> Bool {
+        for controller in windowControllers {
+            if let hit = controller.store.findOpenConversation(agentId: agentId, conversationId: conversationId) {
+                revealTab(hit.session, in: hit.workspace, controller: controller)
+                return true
+            }
+        }
+        return false
     }
 
     // MARK: - Notifications
@@ -980,7 +1130,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
         case .workspace(let wsId, let winId):
             guard let target = windowControllers.first(where: { $0.windowId == winId }),
                   let ws = target.store.workspaces.first(where: { $0.id == wsId }) else { return }
-            target.window?.makeKeyAndOrderFront(nil)
+            if let window = target.window { front(window) }
             target.store.activateWorkspace(ws)
         case .tab(let sId, let wsId, let winId):
             // `pane(containingSessionId:)` short-circuits on the first
@@ -994,7 +1144,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
         case .createWorktree(let wsId, let winId):
             guard let target = windowControllers.first(where: { $0.windowId == winId }),
                   let ws = target.store.workspaces.first(where: { $0.id == wsId }) else { return }
-            target.window?.makeKeyAndOrderFront(nil)
+            if let window = target.window { front(window) }
             target.store.activateWorkspace(ws)
             target.store.pendingCreateWorktreeRequest = ws
             if target.store.sidebarMode == .hidden {
@@ -1353,8 +1503,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
     private func openKookyFromMenuBar() {
         NSApp.activate(ignoringOtherApps: true)
         guard let window = activeController?.window else { return }
-        if window.isMiniaturized { window.deminiaturize(nil) }
-        window.makeKeyAndOrderFront(nil)
+        front(window)
     }
 
     @objc private func handleCenterWindow() {

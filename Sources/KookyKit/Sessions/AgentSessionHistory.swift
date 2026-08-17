@@ -101,6 +101,25 @@ enum AgentSessionScanner {
         scan(roots: Dictionary(uniqueKeysWithValues: stores.map { ($0.agentId, $0.defaultRoot()) }))
     }
 
+    /// Production single-conversation lookup — the deep-link path's entry.
+    /// The second explicitly-named real-store reader beside
+    /// `scanDefaultRoots()`, same discipline: everything else (tests,
+    /// fixtures) must pass an explicit root to `findRecord(agentId:
+    /// conversationId:root:)` below.
+    static func findRecordInDefaultRoot(agentId: String, conversationId: String) -> AgentSessionRecord? {
+        guard let store = stores.first(where: { $0.agentId == agentId }) else { return nil }
+        return findRecord(agentId: agentId, conversationId: conversationId, root: store.defaultRoot())
+    }
+
+    /// Explicit-root core (fixture-testable). Reads ONE agent's store,
+    /// skipping the 13-way dispatch and cross-store sort a full scan pays;
+    /// `collect` sorts newest-first internally, so on duplicate ids the
+    /// newest record wins — the same one a full scan would rank first.
+    static func findRecord(agentId: String, conversationId: String, root: URL) -> AgentSessionRecord? {
+        guard let store = stores.first(where: { $0.agentId == agentId }) else { return nil }
+        return store.collect(root).first { $0.conversationId == conversationId }
+    }
+
     /// Stores without an entry in `roots` are skipped; a missing/empty root
     /// yields an empty slice, never an error. Stores are independent, so
     /// they collect CONCURRENTLY — wall time is roughly the slowest store

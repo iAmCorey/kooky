@@ -100,6 +100,8 @@
 
 **可配置。** Settings 面板（`⌘,`）还可以调字体、光标、背景透明度（搭配 liquid-glass 或数字 `background-blur`,任何 macOS 版本都能拥有传统毛玻璃）、默认新 tab 行为、Terminal 预设、agents、Open in 和 pane 底部状态栏。开启 `confirm-close-surface` 后,关闭有进程在跑的 tab 会先确认。外观修改会立即同步到所有已打开的窗口。
 
+**深层链接。** 其他应用可以在 kooky 里重新打开一个 agent 会话：`kooky://resume?agent=<agent>&id=<会话id>[&cwd=<路径>]` 在会话已打开时直接跳到对应 tab，否则在会话自己的项目目录里新开一个 tab 恢复（`agent` 与 History 面板使用同一套 id：`claude-code`、`codex`、`copilot`、`cursor`、`opencode`、`kiro`、`gemini` 等）。可选的 `cwd` 让链接也能恢复超出会话扫描保留范围的更早会话。会话 id 严格校验，链接无法携带 prompt 或命令；被拒绝的链接会用弹窗说明原因。`cwd` 里的空格必须编码为 `%20`（`+` 不会被解码）。
+
 **默认本地。** 不需要账号，不做遥测，没有云同步。kooky 的状态都留在本机。
 
 **基于 libghostty。** 使用和 ghostty 同源的 GPU 终端渲染引擎，渲染跟随屏幕刷新率，在 120Hz / ProMotion 屏上滚动顺滑、不撕裂。

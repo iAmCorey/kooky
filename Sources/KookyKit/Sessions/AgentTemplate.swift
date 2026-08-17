@@ -120,6 +120,13 @@ struct AgentTemplate: Identifiable, Hashable {
     /// exist there are many shell templates, not one.
     var isShell: Bool { initialCommand == nil }
 
+    /// The builtin roster id this template answers to — a custom agent
+    /// resolves to its frozen base, a builtin to itself. This is the key the
+    /// per-agent settings, tool/usage gates, and deep-link matching all speak
+    /// (the scanner roster only knows builtins), so every consumer must use
+    /// this one spelling rather than re-deriving `baseAgentId ?? id`.
+    var rosterId: String { baseAgentId ?? id }
+
     init(
         id: String,
         title: String,

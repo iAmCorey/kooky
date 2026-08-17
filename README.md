@@ -100,6 +100,8 @@ A minimal modern terminal built for AI coding. Sidebar workspaces; horizontal / 
 
 **Configurable.** Settings (`⌘,`) also covers font, cursor, background opacity (pairs with liquid-glass or a numeric `background-blur` for the traditional frosted look on any macOS), default new-tab behavior, Terminal presets, agents, Open in, and the pane status bar. Opt into `confirm-close-surface` and closing a tab with a running process asks first. Appearance changes update every open window immediately.
 
+**Deep links.** Other apps can reopen an agent conversation in kooky: `kooky://resume?agent=<agent>&id=<conversation-id>[&cwd=<path>]` jumps to the tab when the conversation is already open, otherwise resumes it in a new tab at its own project directory (`agent` takes the same ids as the History panel: `claude-code`, `codex`, `copilot`, `cursor`, `opencode`, `kiro`, `gemini`, …). The optional `cwd` lets links reach conversations older than the session scan keeps. Conversation ids are strictly validated and links can't carry prompts or commands; a refused link explains why in a sheet. Percent-encode spaces in `cwd` as `%20` (`+` is not decoded).
+
 **Local by default.** No accounts, no telemetry, no cloud sync. Kooky keeps its own state on your device.
 
 **libghostty-powered.** GPU-accelerated cell rendering, same engine as ghostty — synced to your display's refresh rate, so scrolling stays smooth and tear-free on 120Hz / ProMotion screens.
