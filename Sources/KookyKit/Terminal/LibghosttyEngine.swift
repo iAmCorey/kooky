@@ -1340,11 +1340,6 @@ final class GhosttySurfaceView: NSView {
         // back to the CSI form; a non-mode-aware arrow still beats a dead one.
         if !hasMarkedText(),
            Self.shouldForwardModeAwareKeyToLibghostty(keyCode: event.keyCode, modifierFlags: mods) {
-            // Arrow keys at a shell prompt recall history (↑/↓) or move the
-            // cursor (←/→) — the start of the next command, so clear a stale
-            // command-failure dot. Scrollback is the wheel, not arrows; inside
-            // a TUI the dot is already cleared, so this is a no-op there.
-            onUserInput?()
             if !sendKey(event: event, action: GHOSTTY_ACTION_PRESS, surface: surface),
                let bytes = Self.handWrittenEscapeSequence(forKeyCode: event.keyCode, modifierFlags: mods) {
                 sendInputBytes(bytes, to: surface)
@@ -1361,14 +1356,12 @@ final class GhosttySurfaceView: NSView {
             return
         }
 
-        // Ctrl+letter — NSEvent already gives the control byte (Ctrl+A →
-        // "\u{01}"); IME would swallow these, so we forward them ourselves.
-        if mods.contains(.control), !mods.contains(.option),
-           let chars = event.characters, !chars.isEmpty,
-           let scalar = chars.unicodeScalars.first?.value, scalar < 0x20 {
-            sendInputBytes(chars, to: surface)
-            return
-        }
+        // No pre-IME Ctrl fast path on purpose: the IME gets first dibs on
+        // every key (some IMEs bind non-composing Ctrl combos — Rime's
+        // Ctrl+`), and a Ctrl combo it produces no text for is sent from the
+        // empty-accumulator branch below. The old raw-byte path covered only
+        // AppKit-pre-translated Ctrl+letter, leaving Ctrl+Space / Ctrl+digit
+        // / Ctrl+punctuation dead (issue #54).
 
         // Regular text + IME composition. inputContext routes through
         // NSTextInputClient: insertText for committed input, setMarkedText
@@ -1428,6 +1421,25 @@ final class GhosttySurfaceView: NSView {
             for text in accumulated {
                 sendKeyText(text, event: event, translationMods: translationMods, to: surface)
             }
+        } else if mods.contains(.control), !hasMarkedText(), !hadMarkedTextBefore {
+            // The IME produced no text for a Ctrl combo — the normal case
+            // outside composition. Send the full key event so libghostty's
+            // encoder owns the bytes (its ctrlSeq table: Ctrl+Space → NUL,
+            // Ctrl+3 → ESC, …) and kitty sessions get CSI-u (issue #54).
+            // Keys `handWrittenEscapeSequence` claims (Ctrl+Enter/Tab/
+            // arrows/F1-12) are intercepted above and never reach here.
+            // Scoped to Ctrl on purpose — every other empty-accumulator
+            // keystroke still sends nothing (the v0.45.7 containment
+            // stands; widening also means plumbing `composing` through
+            // makeKeyEvent and porting upstream's composing-control
+            // suppression, not just dropping this guard). The marked-text
+            // guards keep composition-adjacent Ctrl combos (Japanese
+            // Ctrl+H deleting a preedit char) with the IME.
+            if !sendKey(event: event, action: GHOSTTY_ACTION_PRESS, translationMods: translationMods,
+                        text: Self.keyEventText(for: event, translationMods: translationMods), surface: surface),
+               let fallback = Self.legacyControlBytes(unshiftedCodepoint: Self.unshiftedCodepoint(of: event)) {
+                sendInputBytes(fallback, to: surface)
+            }
         }
     }
 
@@ -1447,8 +1459,9 @@ final class GhosttySurfaceView: NSView {
     /// because the key-event path keeps cursor/wrap accounting in sync with how
     /// libghostty's grid expects user-driven keystrokes to advance; `text_input`
     /// is a lower-level injection that miscalculates wrap on long multi-byte
-    /// sequences. Control bytes (< 0x20) still go through `text_input` — those
-    /// are post-translation control sequences kooky already encodes itself.
+    /// sequences. Control bytes (< 0x20) still go through `text_input`: an
+    /// encoder key event would re-encode the physical key, not the byte the
+    /// IME committed (deliberately untouched by issue #54's encoder routing).
     /// Mirrors ghostty.app's `committedPreeditTextAction` pattern.
     /// `event` + `translationMods` (keyDown's batched path) attach the real
     /// key identity to the committed text: keycode, real mods (sided bits
@@ -1475,41 +1488,21 @@ final class GhosttySurfaceView: NSView {
         // control-byte branch above routes through sendInputBytes, which fires
         // its own onUserInput, so only this visible-text path needs one here.
         onUserInput?()
-        text.withCString { ptr in
-            var key_ev = ghostty_input_key_s()
-            key_ev.action = GHOSTTY_ACTION_PRESS
-            key_ev.text = ptr
-            key_ev.composing = false
-            if let event {
-                key_ev.keycode = UInt32(event.keyCode)
-                key_ev.mods = Self.mapModifiers(event.modifierFlags)
-                // ghostty.app's heuristic: control and command never contribute
-                // to text translation; everything else in the translation mods
-                // did (NSEvent+Extension.swift `ghosttyKeyEvent`).
-                key_ev.consumed_mods = Self.mapModifiers(
-                    (translationMods ?? event.modifierFlags).subtracting([.control, .command])
-                )
-                if let scalar = event.characters(byApplyingModifiers: [])?.unicodeScalars.first {
-                    key_ev.unshifted_codepoint = scalar.value
-                }
-            } else {
-                key_ev.keycode = 0
-                key_ev.mods = GHOSTTY_MODS_NONE
-                key_ev.consumed_mods = GHOSTTY_MODS_NONE
-                key_ev.unshifted_codepoint = 0
-            }
-            _ = ghostty_surface_key(surface, key_ev)
-        }
+        // Nil event (mouse-click candidate commit) keeps the bare zeroed shape.
+        var key_ev = event.map { Self.makeKeyEvent(for: $0, translationMods: translationMods) }
+            ?? ghostty_input_key_s()
+        key_ev.action = GHOSTTY_ACTION_PRESS
+        Self.send(key_ev, text: text, to: surface)
     }
 
     private func sendInputBytes(_ bytes: String, to surface: ghostty_surface_t) {
-        // Chokepoint for every control-sequence input the user initiates —
-        // Return / Tab / function keys (handWrittenEscapeSequence), Ctrl+letter
-        // (^R history search, ^C, ^L), the Cocoa edit shortcuts (Cmd+←/→/⌫,
-        // Option+⌫), and pill injection (sendInput). All start the next command,
-        // so clear a stale failure dot here once rather than at each caller.
-        // Visible typing (ghostty_surface_key) and paste (ghostty_surface_text)
-        // don't route through here, so they fire at their own sites.
+        // Chokepoint for input delivered as raw bytes — Return / Tab /
+        // function keys (handWrittenEscapeSequence), the Cocoa edit shortcuts
+        // (Cmd+←/→/⌫, Option+⌫), pill injection (sendInput), IME-committed
+        // control bytes (sendKeyText), and the two declined-key fallbacks.
+        // All start the next command, so clear a stale failure dot here once
+        // rather than at each caller. Encoder-routed keys (`sendKey`) and
+        // paste (`ghostty_surface_text`) fire it at their own sites.
         onUserInput?()
         bytes.withCString { cstr in
             ghostty_surface_text_input(surface, cstr, UInt(strlen(cstr)))
@@ -1618,6 +1611,36 @@ final class GhosttySurfaceView: NSView {
         return "\u{1B}O\(final)"
     }
 
+    /// Last-resort byte for a Ctrl combo `ghostty_surface_key` returned false
+    /// for. Strictly, false means the core deliberately IGNORED the key (its
+    /// `InputEffect.ignored`, "should be forwarded to other subsystems"), not
+    /// that it failed — but for a Ctrl combo on a focused terminal there is
+    /// no known trigger, and if it ever happens a legacy byte beats a dead
+    /// key (conscious keep; the cursor-key path makes the same call with
+    /// `handWrittenEscapeSequence`). Table mirrors ghostty's `ctrlSeq`
+    /// (src/input/key_encode.zig), keyed on the unshifted codepoint like the
+    /// encoder itself. Two deliberate divergences for a fallback-only path:
+    /// i/m/[ get their legacy xterm bytes even though ghostty CSI-u's them
+    /// (fixterms), and keys with no legacy byte (Ctrl+` …) return nil —
+    /// those only exist under the kitty protocol, which a declining
+    /// libghostty can't emit anyway.
+    nonisolated static func legacyControlBytes(unshiftedCodepoint scalar: UInt32) -> String? {
+        let byte: UInt8
+        switch scalar {
+        case 0x20, 0x32, 0x40: byte = 0x00             // Space, 2, @ → NUL
+        case 0x33, 0x5B: byte = 0x1B                   // 3, [ → ESC
+        case 0x34, 0x5C: byte = 0x1C                   // 4, \ → FS
+        case 0x35, 0x5D: byte = 0x1D                   // 5, ] → GS
+        case 0x36, 0x5E, 0x7E: byte = 0x1E             // 6, ^, ~ → RS
+        case 0x37, 0x2F, 0x5F: byte = 0x1F             // 7, /, _ → US
+        case 0x38, 0x3F: byte = 0x7F                   // 8, ? → DEL
+        case 0x30, 0x31, 0x39: byte = UInt8(scalar)    // 0, 1, 9 → literal digit
+        case 0x61...0x7A: byte = UInt8(scalar - 0x60)  // a…z → C0 0x01…0x1A
+        default: return nil
+        }
+        return String(Unicode.Scalar(byte))
+    }
+
     override func keyUp(with event: NSEvent) {
         // Intentionally do not forward key-release to libghostty: when an
         // app (e.g. Codex / ratatui-crossterm) pushes kitty keyboard
@@ -1637,6 +1660,18 @@ final class GhosttySurfaceView: NSView {
             return
         }
         sendKey(event: event, action: GHOSTTY_ACTION_PRESS, surface: surface)
+    }
+
+    override func doCommand(by selector: Selector) {
+        // Deliberately empty. Not calling super is what suppresses the system
+        // beep NSResponder's default raises for unimplemented standard-key-
+        // binding commands (Ctrl+A → moveToBeginningOfParagraph: …), which
+        // every Ctrl+letter now triggers via `handleEvent`. ghostty.app
+        // overrides this too, though its version also redispatches
+        // performKeyEquivalent-originated events — kooky doesn't need that
+        // (Cmd combos exit keyDown before the IME). NB: this silences the
+        // beep for ALL unhandled keys, not just the Ctrl combos keyDown
+        // encodes. Byte encoding happens in keyDown, never here.
     }
 
     private var scrollAccum: NSPoint = .zero
@@ -1900,35 +1935,114 @@ final class GhosttySurfaceView: NSView {
     }
 
     @discardableResult
-    private func sendKey(event: NSEvent, action: ghostty_input_action_e, surface: ghostty_surface_t) -> Bool {
-        let mods = Self.mapModifiers(event.modifierFlags)
-        // NSEvent raises NSInternalInconsistencyException on `characters` for
+    private func sendKey(
+        event: NSEvent,
+        action: ghostty_input_action_e,
+        translationMods: NSEvent.ModifierFlags? = nil,
+        text: String? = nil,
+        surface: ghostty_surface_t
+    ) -> Bool {
+        // Any real keypress is the start of the next command (arrows recall
+        // history, ^C/^R/tmux-prefix act on it) — clear a stale failure dot.
+        // A bare modifier press (flagsChanged routes here too) must not.
+        if event.type == .keyDown { onUserInput?() }
+        return Self.send(
+            Self.makeKeyEvent(for: event, action: action, translationMods: translationMods),
+            text: text,
+            to: surface
+        )
+    }
+
+    /// Build the `ghostty_input_key_s` identity for a physical key event —
+    /// mirrors ghostty.app's `ghosttyKeyEvent`: `consumed_mods` = the mods
+    /// text translation used minus ctrl/cmd (their long-standing heuristic:
+    /// those two never contribute to translation), `unshifted_codepoint` for
+    /// the encoder's ctrlSeq keying. Text is separate: `keyEventText`
+    /// derives it, `send` attaches it.
+    nonisolated static func makeKeyEvent(
+        for event: NSEvent,
+        action: ghostty_input_action_e = GHOSTTY_ACTION_PRESS,
+        translationMods: NSEvent.ModifierFlags? = nil
+    ) -> ghostty_input_key_s {
+        var key = ghostty_input_key_s()
+        key.action = action
+        key.keycode = UInt32(event.keyCode)
+        key.mods = mapModifiers(event.modifierFlags)
+        // NSEvent raises NSInternalInconsistencyException on `characters*` for
         // FlagsChanged events (modifier-only, no text) — and that ObjC unwind
         // through this Swift frame is undefined behavior, thousands of times a
         // day (every Shift/Cmd/Option press). Modifiers carry their state via
         // `mods` + `keycode` alone, matching ghostty.app's flagsChanged path.
-        let chars = event.type == .flagsChanged ? "" : (event.characters ?? "")
-        // NSEvent gives function/arrow keys a Private-Use-Area "character"
-        // (e.g. NSUpArrowFunctionKey = 0xF700). Those aren't real text — strip
-        // them so libghostty relies on `keycode` instead and emits the correct
-        // escape sequence (CSI A/B/C/D, etc.).
-        let firstScalar = chars.unicodeScalars.first?.value ?? 0
-        let textToSend = (firstScalar >= 0xE000 && firstScalar <= 0xF8FF) ? "" : chars
+        guard event.type == .keyDown || event.type == .keyUp else { return key }
+        key.consumed_mods = mapModifiers(
+            (translationMods ?? event.modifierFlags).subtracting([.control, .command])
+        )
+        key.unshifted_codepoint = unshiftedCodepoint(of: event)
+        return key
+    }
 
-        return textToSend.withCString { cstr in
-            var key = ghostty_input_key_s()
-            key.action = action
-            key.mods = mods
-            key.consumed_mods = ghostty_input_mods_e(rawValue: 0)
-            key.keycode = UInt32(event.keyCode)
-            key.text = textToSend.isEmpty ? nil : cstr
-            key.unshifted_codepoint = 0
-            key.composing = false
+    /// First scalar of the event's characters with no modifiers applied — the
+    /// value the encoder's ctrlSeq table keys on. keyDown/keyUp only (the
+    /// `characters*` APIs raise on FlagsChanged, see `makeKeyEvent`).
+    nonisolated static func unshiftedCodepoint(of event: NSEvent) -> UInt32 {
+        guard event.type == .keyDown || event.type == .keyUp else { return 0 }
+        return event.characters(byApplyingModifiers: [])?.unicodeScalars.first?.value ?? 0
+    }
+
+    /// The text to attach to a key event — ghostty.app's `ghosttyCharacters`
+    /// + `keyAction` attach rule: an AppKit pre-translated control byte
+    /// (Ctrl+A → "\u{01}") becomes the un-ctrl'd character so the encoder
+    /// owns C0 mapping (and kitty sessions get CSI-u); a Private-Use-Area
+    /// function-key "character" (NSUpArrowFunctionKey = 0xF700) becomes nil
+    /// so the encoder keys off `keycode`; text still < 0x20 after
+    /// un-ctrl'ing (Ctrl+Enter → "\r") becomes nil — the encoder derives
+    /// those from keycode + mods.
+    nonisolated static func keyEventText(
+        for event: NSEvent,
+        translationMods: NSEvent.ModifierFlags? = nil
+    ) -> String? {
+        guard event.type == .keyDown || event.type == .keyUp else { return nil }
+        // When the translation mods equal the event's own, read `.characters`
+        // off the original event, not a re-translation — dead-key state only
+        // lives on the real event.
+        var text = event.characters
+        if let translationMods, translationMods != event.modifierFlags {
+            text = event.characters(byApplyingModifiers: translationMods)
+        }
+        if text?.count == 1, let scalar = text?.unicodeScalars.first {
+            if scalar.value < 0x20 {
+                text = event.characters(
+                    byApplyingModifiers: (translationMods ?? event.modifierFlags).subtracting(.control)
+                )
+            } else if (0xE000...0xF8FF).contains(scalar.value) {
+                text = nil
+            }
+        }
+        if (text?.utf8.first ?? 0) < 0x20 { text = nil }
+        return text
+    }
+
+    /// Attach `text` (if any) with the C-string lifetime `ghostty_surface_key`
+    /// needs, and deliver. Callers hand text that is already attach-clean —
+    /// `keyEventText` never returns a control byte, and `sendKeyText`'s
+    /// visible-text guarantee covers the other caller.
+    @discardableResult
+    nonisolated static func send(
+        _ key: ghostty_input_key_s,
+        text: String?,
+        to surface: ghostty_surface_t
+    ) -> Bool {
+        var key = key
+        guard let text, !text.isEmpty else {
+            return ghostty_surface_key(surface, key)
+        }
+        return text.withCString { cstr in
+            key.text = cstr
             return ghostty_surface_key(surface, key)
         }
     }
 
-    static func mapModifiers(_ flags: NSEvent.ModifierFlags) -> ghostty_input_mods_e {
+    nonisolated static func mapModifiers(_ flags: NSEvent.ModifierFlags) -> ghostty_input_mods_e {
         var raw: UInt32 = 0
         if flags.contains(.shift)    { raw |= GHOSTTY_MODS_SHIFT.rawValue }
         if flags.contains(.control)  { raw |= GHOSTTY_MODS_CTRL.rawValue }

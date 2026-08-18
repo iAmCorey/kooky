@@ -2,6 +2,10 @@
 
 Notable changes per release. Tagged commits use `vX.Y.Z` shortform.
 
+## v0.50.7 — 2026-08-18
+
+- Fixed: Ctrl+Space, Ctrl+digit, and Ctrl+punctuation combos sent nothing at all — e.g. Ctrl+Space as a tmux prefix was dead. They now send the standard terminal bytes, and Ctrl+Option combos and the kitty keyboard protocol work too. Thanks @h0hmj for the report and a draft fix. (#54)
+
 ## v0.50.6 — 2026-08-18
 
 - New: `kooky://` deep links — external tools can reopen an agent conversation in kooky. `kooky://resume?agent=<agent>&id=<conversation-id>[&cwd=<path>]` resumes the conversation in a new tab at its own project directory; if it's already open in a tab, kooky jumps there instead of spawning a duplicate. Works from a cold start, accepts the `cwd` parameter for conversations older than the session scan keeps, and every refused link explains itself in a visible sheet. Links can't inject prompts, commands, or arbitrary directories — conversation ids are strictly validated and only agents kooky already reads session stores for are accepted.

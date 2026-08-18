@@ -55,6 +55,206 @@ final class TerminalKeyRoutingTests: XCTestCase {
     }
 
     func testGhosttyCursorKeyTracksApplicationCursorMode() throws {
+        let up = try Self.keyDownEvent(keyCode: 126, characters: "\u{F700}", mods: [])
+        try withManualSurface { surface, output in
+            XCTAssertTrue(Self.press(event: up, on: surface))
+            XCTAssertEqual(output.takeString(), "\u{1B}[A")
+
+            "\u{1B}[?1h".withCString { cstr in
+                ghostty_surface_process_output(surface, cstr, UInt(strlen(cstr)))
+            }
+            XCTAssertTrue(Self.press(event: up, on: surface))
+            XCTAssertEqual(output.takeString(), "\u{1B}OA")
+        }
+    }
+
+    // MARK: - Ctrl combos through the libghostty key encoder (issue #54)
+
+    /// The `od -c` contract for Ctrl combos, end to end through the REAL
+    /// production key-event construction (`makeKeyEvent`) and a real
+    /// libghostty surface. Events are synthesized with the exact
+    /// `characters` macOS delivers for each combo: AppKit pre-translates
+    /// only Ctrl+letter into a control byte; Ctrl+Space / Ctrl+digit arrive
+    /// as plain text — the class of keys that used to die in the IME path.
+    func testCtrlCombosEncodeGhosttyCtrlSeqBytes() throws {
+        // (keyCode, macOS-delivered characters, unshifted char, expected bytes)
+        let cases: [(UInt16, String, String, String)] = [
+            (49, " ", " ", "\u{00}"),       // Ctrl+Space → NUL
+            (18, "1", "1", "1"),            // Ctrl+1 → literal "1" (xterm legacy)
+            (19, "2", "2", "\u{00}"),       // Ctrl+2 → NUL
+            (20, "3", "3", "\u{1B}"),       // Ctrl+3 → ESC
+            (28, "8", "8", "\u{7F}"),       // Ctrl+8 → DEL
+            (0, "\u{01}", "a", "\u{01}"),   // Ctrl+A → ^A (pre-translated byte)
+            (8, "\u{03}", "c", "\u{03}"),   // Ctrl+C → ^C
+        ]
+        try withManualSurface { surface, output in
+            for (keyCode, chars, unshifted, expected) in cases {
+                let event = try Self.keyDownEvent(
+                    keyCode: keyCode, characters: chars, mods: [.control],
+                    requireUnshifted: unshifted
+                )
+                _ = output.takeString()
+                XCTAssertTrue(
+                    Self.press(event: event, on: surface),
+                    "libghostty declined keyCode \(keyCode)"
+                )
+                XCTAssertEqual(
+                    output.takeString(), expected,
+                    "wrong bytes for Ctrl+\(unshifted)"
+                )
+            }
+        }
+    }
+
+    /// Under the kitty keyboard protocol a TUI expects CSI-u, which only the
+    /// encoder can emit — the old path (raw pre-translated control byte via
+    /// `text_input`) bypassed it entirely. Ctrl+C with "disambiguate escape
+    /// codes" pushed must come out as `ESC [99;5u`, not 0x03.
+    func testCtrlLetterUnderKittyProtocolEncodesCSIu() throws {
+        try withManualSurface { surface, output in
+            "\u{1B}[>1u".withCString { cstr in
+                ghostty_surface_process_output(surface, cstr, UInt(strlen(cstr)))
+            }
+            let event = try Self.keyDownEvent(
+                keyCode: 8, characters: "\u{03}", mods: [.control], requireUnshifted: "c"
+            )
+            _ = output.takeString()
+            XCTAssertTrue(Self.press(event: event, on: surface))
+            XCTAssertEqual(output.takeString(), "\u{1B}[99;5u")
+        }
+    }
+
+    func testMakeKeyEventCtrlComboShape() throws {
+        // Ctrl+Space: plain-text characters ride through as `text`, the
+        // encoder's ctrlSeq keys on it; ctrl never lands in consumed_mods.
+        let space = try Self.keyDownEvent(
+            keyCode: 49, characters: " ", mods: [.control], requireUnshifted: " "
+        )
+        let spaceKey = GhosttySurfaceView.makeKeyEvent(for: space)
+        XCTAssertEqual(GhosttySurfaceView.keyEventText(for: space), " ")
+        XCTAssertEqual(spaceKey.unshifted_codepoint, 0x20)
+        XCTAssertNotEqual(spaceKey.mods.rawValue & GHOSTTY_MODS_CTRL.rawValue, 0)
+        XCTAssertEqual(spaceKey.consumed_mods.rawValue & GHOSTTY_MODS_CTRL.rawValue, 0)
+
+        // Ctrl+A: AppKit pre-translated "\u{01}" must NOT be sent as text —
+        // the un-ctrl'd character is (ghostty.app's ghosttyCharacters rule).
+        let letterA = try Self.keyDownEvent(
+            keyCode: 0, characters: "\u{01}", mods: [.control], requireUnshifted: "a"
+        )
+        XCTAssertEqual(GhosttySurfaceView.keyEventText(for: letterA), "a")
+        XCTAssertEqual(
+            GhosttySurfaceView.makeKeyEvent(for: letterA).unshifted_codepoint,
+            UInt32(UnicodeScalar("a").value)
+        )
+
+        // Ctrl+Enter: still a control byte after un-ctrl'ing → no text; the
+        // encoder derives the sequence from keycode + mods (keyAction rule).
+        let enter = try Self.keyDownEvent(keyCode: 36, characters: "\r", mods: [.control])
+        XCTAssertNil(GhosttySurfaceView.keyEventText(for: enter))
+    }
+
+    func testMakeKeyEventStripsFunctionKeyPUAText() throws {
+        // Arrow keys carry a Private-Use-Area "character" (0xF700) — not real
+        // text. The cursor-key path (v0.12.4) depends on this staying nil so
+        // libghostty keys off `keycode` and honors DECCKM (asserted end to
+        // end by testGhosttyCursorKeyTracksApplicationCursorMode, which
+        // presses through the same production pieces).
+        let up = try Self.keyDownEvent(keyCode: 126, characters: "\u{F700}", mods: [])
+        XCTAssertNil(GhosttySurfaceView.keyEventText(for: up))
+        XCTAssertEqual(GhosttySurfaceView.makeKeyEvent(for: up).keycode, 126)
+    }
+
+    func testMakeKeyEventFlagsChangedNeverTouchesCharacters() throws {
+        // Reading `characters*` on a FlagsChanged event raises
+        // NSInternalInconsistencyException (the v0.31.6 crash class) — the
+        // builder must return the bare mods+keycode shape without ever
+        // calling those APIs.
+        guard let event = NSEvent.keyEvent(
+            with: .flagsChanged, location: .zero, modifierFlags: [.control],
+            timestamp: 0, windowNumber: 0, context: nil,
+            characters: "x", charactersIgnoringModifiers: "x",
+            isARepeat: false, keyCode: 59
+        ) else {
+            throw XCTSkip("could not synthesize a flagsChanged event")
+        }
+        let key = GhosttySurfaceView.makeKeyEvent(for: event)
+        XCTAssertNil(GhosttySurfaceView.keyEventText(for: event))
+        XCTAssertEqual(GhosttySurfaceView.unshiftedCodepoint(of: event), 0)
+        XCTAssertEqual(key.unshifted_codepoint, 0)
+        XCTAssertEqual(key.consumed_mods.rawValue, 0)
+        XCTAssertNotEqual(key.mods.rawValue & GHOSTTY_MODS_CTRL.rawValue, 0)
+    }
+
+    func testMakeKeyEventConsumedModsFollowTranslationMods() throws {
+        // consumed_mods = translation mods − ctrl − cmd (ghostty.app's
+        // heuristic). With macos-option-as-alt stripping option from the
+        // translation mods, option must stay OUT of consumed_mods so the
+        // encoder ESC-prefixes (issue #46's machinery, now on this path too).
+        let event = try Self.keyDownEvent(
+            keyCode: 8, characters: "\u{03}", mods: [.control, .option]
+        )
+        let asAlt = GhosttySurfaceView.makeKeyEvent(for: event, translationMods: [.control])
+        XCTAssertEqual(asAlt.consumed_mods.rawValue & GHOSTTY_MODS_ALT.rawValue, 0)
+
+        let asText = GhosttySurfaceView.makeKeyEvent(
+            for: event, translationMods: [.control, .option]
+        )
+        XCTAssertNotEqual(asText.consumed_mods.rawValue & GHOSTTY_MODS_ALT.rawValue, 0)
+    }
+
+    func testLegacyControlBytesMirrorsGhosttyCtrlSeq() {
+        func byte(_ ch: Unicode.Scalar) -> String? {
+            GhosttySurfaceView.legacyControlBytes(unshiftedCodepoint: ch.value)
+        }
+        XCTAssertEqual(byte(" "), "\u{00}")
+        XCTAssertEqual(byte("0"), "0")
+        XCTAssertEqual(byte("1"), "1")
+        XCTAssertEqual(byte("2"), "\u{00}")
+        XCTAssertEqual(byte("3"), "\u{1B}")
+        XCTAssertEqual(byte("4"), "\u{1C}")
+        XCTAssertEqual(byte("5"), "\u{1D}")
+        XCTAssertEqual(byte("6"), "\u{1E}")
+        XCTAssertEqual(byte("7"), "\u{1F}")
+        XCTAssertEqual(byte("8"), "\u{7F}")
+        XCTAssertEqual(byte("9"), "9")
+        XCTAssertEqual(byte("/"), "\u{1F}")
+        XCTAssertEqual(byte("?"), "\u{7F}")
+        XCTAssertEqual(byte("@"), "\u{00}")
+        XCTAssertEqual(byte("\\"), "\u{1C}")
+        XCTAssertEqual(byte("]"), "\u{1D}")
+        XCTAssertEqual(byte("^"), "\u{1E}")
+        XCTAssertEqual(byte("_"), "\u{1F}")
+        XCTAssertEqual(byte("~"), "\u{1E}")
+        XCTAssertEqual(byte("a"), "\u{01}")
+        XCTAssertEqual(byte("l"), "\u{0C}")
+        XCTAssertEqual(byte("z"), "\u{1A}")
+        // No legacy byte — only exists under the kitty protocol.
+        XCTAssertNil(byte("`"))
+        XCTAssertNil(byte("é"))
+    }
+
+    /// Ctrl+Shift+letter is ghostty's deliberate fixterms divergence: it
+    /// CSI-u's even in legacy mode so programs can tell Ctrl+C from
+    /// Ctrl+Shift+C (matches kitty; ghostty.app ships this). Old kooky sent
+    /// 0x03 for both — this pins the upstream-parity change of behavior.
+    func testCtrlShiftLetterEncodesCSIu() throws {
+        try withManualSurface { surface, output in
+            let event = try Self.keyDownEvent(
+                keyCode: 8, characters: "\u{03}", mods: [.control, .shift], requireUnshifted: "c"
+            )
+            _ = output.takeString()
+            XCTAssertTrue(Self.press(event: event, on: surface))
+            XCTAssertEqual(output.takeString(), "\u{1B}[99;6u")
+        }
+    }
+
+    // MARK: - Helpers
+
+    /// Runs `body` against a real manual-IO libghostty surface whose PTY-side
+    /// writes land in `output` instead of a live shell.
+    private func withManualSurface(
+        _ body: (ghostty_surface_t, ManualGhosttyOutput) throws -> Void
+    ) throws {
         guard let app = LibghosttyApp.shared.app else {
             throw XCTSkip("libghostty app did not initialize")
         }
@@ -89,15 +289,42 @@ final class TerminalKeyRoutingTests: XCTestCase {
 
         ghostty_surface_set_size(surface, 800, 600)
         ghostty_surface_set_focus(surface, true)
+        try body(surface, output)
+    }
 
-        XCTAssertTrue(Self.pressArrowUp(on: surface))
-        XCTAssertEqual(output.takeString(), "\u{1B}[A")
-
-        "\u{1B}[?1h".withCString { cstr in
-            ghostty_surface_process_output(surface, cstr, UInt(strlen(cstr)))
+    /// `requireUnshifted` skips (not fails) when the CURRENT keyboard layout
+    /// doesn't map the keycode to the expected US character —
+    /// `characters(byApplyingModifiers:)` re-translates from the keycode.
+    private static func keyDownEvent(
+        keyCode: UInt16,
+        characters: String,
+        mods: NSEvent.ModifierFlags,
+        requireUnshifted: String? = nil
+    ) throws -> NSEvent {
+        let event = NSEvent.keyEvent(
+            with: .keyDown, location: .zero, modifierFlags: mods,
+            timestamp: 0, windowNumber: 0, context: nil,
+            characters: characters, charactersIgnoringModifiers: characters,
+            isARepeat: false, keyCode: keyCode
+        )!
+        if let requireUnshifted {
+            try XCTSkipUnless(
+                event.characters(byApplyingModifiers: []) == requireUnshifted,
+                "keyboard layout does not map keyCode \(keyCode) to \(requireUnshifted)"
+            )
         }
-        XCTAssertTrue(Self.pressArrowUp(on: surface))
-        XCTAssertEqual(output.takeString(), "\u{1B}OA")
+        return event
+    }
+
+    /// Presses through the SAME production pieces `sendKey` composes —
+    /// `makeKeyEvent` + `keyEventText` + `send` — so a regression in any of
+    /// them reddens the od-contract assertions.
+    private static func press(event: NSEvent, on surface: ghostty_surface_t) -> Bool {
+        GhosttySurfaceView.send(
+            GhosttySurfaceView.makeKeyEvent(for: event),
+            text: GhosttySurfaceView.keyEventText(for: event),
+            to: surface
+        )
     }
 
     func testNonCursorSpecialKeysKeepExplicitSequences() {
@@ -136,17 +363,6 @@ final class TerminalKeyRoutingTests: XCTestCase {
         )
     }
 
-    private static func pressArrowUp(on surface: ghostty_surface_t) -> Bool {
-        var key = ghostty_input_key_s()
-        key.action = GHOSTTY_ACTION_PRESS
-        key.mods = GHOSTTY_MODS_NONE
-        key.consumed_mods = GHOSTTY_MODS_NONE
-        key.keycode = 126
-        key.text = nil
-        key.unshifted_codepoint = 0
-        key.composing = false
-        return ghostty_surface_key(surface, key)
-    }
     func testMapModifiersCarriesSidedOptionBits() {
         // Device-dependent NSEvent bits: left Option = NX_DEVICELALTKEYMASK
         // (0x20), right Option = NX_DEVICERALTKEYMASK (0x40). libghostty's
