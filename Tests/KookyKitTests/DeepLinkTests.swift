@@ -18,14 +18,7 @@ final class DeepLinkTests: XCTestCase {
         if let tempDir { try? FileManager.default.removeItem(at: tempDir) }
     }
 
-    private func makeStore() -> WorkspaceStore {
-        WorkspaceStore(
-            persistence: InMemoryPersistence(),
-            engineFactory: { TestEngine() },
-            optionsProvider: { _ in nil },
-            resumeProvider: { true }
-        )
-    }
+    private func makeStore() -> WorkspaceStore { makeTestStore() }
 
     // MARK: - Parse
 
@@ -104,6 +97,41 @@ final class DeepLinkTests: XCTestCase {
                 continue
             }
             XCTFail("should parse to .invalid: \(raw)")
+        }
+    }
+
+    /// `validateResume` is the field-level door the CLI's `resume` verb
+    /// enters through; it must be the SAME grammar `parse` applies to URLs —
+    /// for every good and bad shape above, both doors agree. A drift here
+    /// means the CLI accepts an id the deep link would refuse (or vice
+    /// versa), and both end up inside KOOKY_AGENT.
+    func testValidateResumeMatchesParseForEveryShape() throws {
+        let queries: [(agent: String?, id: String?, cwd: String?)] = [
+            ("claude-code", "abc-123", nil),
+            ("Codex", "aBc", "/tmp/x y"),          // case-normalization + spacey cwd
+            (nil, "x", nil),                       // missing agent
+            ("claude-code", nil, nil),             // missing id
+            ("  ", "x", nil),                      // blank agent
+            ("codex", "a;rm -rf ~", nil),          // hostile id
+            ("codex", "x", "rel/path"),            // relative cwd
+            (String(repeating: "a", count: 65), "x", nil),
+            ("codex", "x", "/" + String(repeating: "p", count: 1024)),
+        ]
+        for query in queries {
+            var components = URLComponents()
+            components.scheme = "kooky"
+            components.host = "resume"
+            var items: [URLQueryItem] = []
+            if let agent = query.agent { items.append(URLQueryItem(name: "agent", value: agent)) }
+            if let id = query.id { items.append(URLQueryItem(name: "id", value: id)) }
+            if let cwd = query.cwd { items.append(URLQueryItem(name: "cwd", value: cwd)) }
+            components.queryItems = items.isEmpty ? nil : items
+            let url = try XCTUnwrap(components.url)
+            XCTAssertEqual(
+                KookyDeepLink.parse(url),
+                KookyDeepLink.validateResume(agentId: query.agent, conversationId: query.id, cwd: query.cwd),
+                "parse and validateResume disagree for \(query)"
+            )
         }
     }
 

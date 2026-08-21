@@ -253,9 +253,10 @@ final class FileTreeModel {
     /// on "Folder unavailable" for any symlinked project dir. Resolving also
     /// realpaths the prefix, and the trailing `.standardizedFileURL` strips
     /// `/private` the same way child listings do, so root and child keys
-    /// converge on one canonical form.
+    /// converge on one canonical form (`canonicalDiskPath`, shared with the
+    /// CLI's workspace matching).
     private static func canonicalRoot(_ url: URL) -> URL {
-        url.resolvingSymlinksInPath().standardizedFileURL
+        canonicalDiskPath(url)
     }
 
     /// Root + 63 most recently expanded directories. Keeps the fd budget

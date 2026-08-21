@@ -27,6 +27,21 @@ let package = Package(
             dependencies: ["KookyHookKit"],
             path: "Sources/KookyHook"
         ),
+        // User-facing control CLI (`kooky-cli`): open tabs / run commands /
+        // resume conversations / list / focus / close / status over the same
+        // unix socket, but request-response instead of fire-and-forget.
+        // Separate from KookyHook on purpose — hook argv is positional
+        // (`kooky-hook <agent> <event>`) and a custom agent id could collide
+        // with a verb. Doesn't link KookyKit for the same reason KookyHook
+        // doesn't: the binary must stay small and AppKit-free. The target
+        // IS the shipped binary name so one name holds across dev builds,
+        // the bundle, and the Application Support mirror (nobody imports an
+        // executable, so the mangled module name never surfaces).
+        .executableTarget(
+            name: "kooky-cli",
+            dependencies: ["KookyHookKit"],
+            path: "Sources/KookyCLI"
+        ),
         // Payload builders + stdin parsing extracted out of `main.swift` so
         // they're unit-testable without spawning a subprocess. Foundation /
         // Darwin only — must not depend on KookyKit (would bloat the CLI).
@@ -38,6 +53,10 @@ let package = Package(
             name: "KookyKit",
             dependencies: [
                 "GhosttyKit",
+                // CLI wire types (KookyCLIRequest/Response) — compiled into
+                // both ends so the protocol can't drift. One-way dependency;
+                // KookyHookKit stays Foundation/Darwin-only.
+                "KookyHookKit",
             ],
             path: "Sources/KookyKit",
             resources: [
@@ -67,7 +86,9 @@ let package = Package(
         ),
         .testTarget(
             name: "KookyKitTests",
-            dependencies: ["KookyKit"],
+            // KookyHookKit is listed so socket integration tests can drive
+            // HookServer with the real CLI transport client.
+            dependencies: ["KookyKit", "KookyHookKit"],
             path: "Tests/KookyKitTests"
         ),
         .testTarget(

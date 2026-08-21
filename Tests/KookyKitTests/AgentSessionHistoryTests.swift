@@ -590,7 +590,7 @@ final class AgentSessionResumeTests: XCTestCase {
         let cwd = FileManager.default.temporaryDirectory
         let record = makeRecord(agentId: AgentTemplate.claudeCodeID, cwd: cwd)
 
-        let session = try XCTUnwrap(store.resumeAgentSession(record))
+        let session = try store.resumeAgentSession(record).get()
         XCTAssertEqual(session.agent.id, AgentTemplate.claudeCodeID)
         XCTAssertEqual(session.conversationId, record.conversationId)
         XCTAssertEqual(session.resumedConversationId, record.conversationId,
@@ -607,7 +607,7 @@ final class AgentSessionResumeTests: XCTestCase {
         XCTAssertNotNil(store.active?.sshRemoteHost)
 
         let record = makeRecord(agentId: AgentTemplate.claudeCodeID, cwd: FileManager.default.temporaryDirectory)
-        let session = try XCTUnwrap(store.resumeAgentSession(record))
+        let session = try store.resumeAgentSession(record).get()
         XCTAssertNil(store.active?.sshRemoteHost, "resumed tab must land in a local workspace")
         XCTAssertEqual(store.active?.activeSession?.id, session.id)
         XCTAssertEqual(session.resumedConversationId, record.conversationId)
@@ -625,7 +625,7 @@ final class AgentSessionResumeTests: XCTestCase {
 
         let cwd = FileManager.default.temporaryDirectory
         let record = makeRecord(agentId: AgentTemplate.claudeCodeID, cwd: cwd)
-        let session = try XCTUnwrap(store.resumeAgentSession(record))
+        let session = try store.resumeAgentSession(record).get()
         let landed = try XCTUnwrap(store.active)
         XCTAssertNil(landed.sshRemoteHost)
         XCTAssertEqual(landed.workingDirectory.standardizedFileURL, cwd.standardizedFileURL)
@@ -636,7 +636,12 @@ final class AgentSessionResumeTests: XCTestCase {
         let store = makeStore(resumeSetting: true)
         store.addWorkspace(workingDirectory: FileManager.default.temporaryDirectory)
         let record = makeRecord(agentId: "no-such-agent", cwd: FileManager.default.temporaryDirectory)
-        XCTAssertNil(store.resumeAgentSession(record))
+        // The refusal now carries its reason (the history panel shows it)
+        // instead of collapsing to nil.
+        guard case .failure(let refusal) = store.resumeAgentSession(record) else {
+            return XCTFail("an unknown agent must be refused")
+        }
+        XCTAssertEqual(refusal, .agentCannotResume)
     }
 
     func testResumedConversationIdMirrorsTheSSHDrop() {

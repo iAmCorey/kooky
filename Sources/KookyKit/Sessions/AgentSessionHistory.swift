@@ -490,6 +490,11 @@ struct SessionHistoryView: View {
     /// appears reads as a dead button. The real in-flight fact is the
     /// model's `isScanning`; this only stretches its tail.
     @State private var spinnerMinHold = false
+    /// Cleared on the next successful resume, and by the banner's own ✕.
+    /// `@State` is right despite this view being unmounted by the panel's
+    /// mode cycle — a stale failure from before the user navigated away is
+    /// exactly what shouldn't come back.
+    @State private var resumeError: String?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -498,6 +503,7 @@ struct SessionHistoryView: View {
             }
             searchField
             filterChips
+            resumeErrorBanner
             let visible = filteredRecords
             if visible.isEmpty {
                 PanelEmptyState(
@@ -509,7 +515,15 @@ struct SessionHistoryView: View {
                     LazyVStack(spacing: 0) {
                         ForEach(visible) { record in
                             SessionHistoryRow(record: record) {
-                                store.resumeAgentSession(record)
+                                switch store.resumeAgentSession(record) {
+                                case .success:
+                                    resumeError = nil
+                                case .failure(let refusal):
+                                    resumeError = refusal.message(
+                                        agentId: record.agentId,
+                                        conversationId: record.conversationId
+                                    )
+                                }
                             }
                         }
                     }
@@ -519,6 +533,34 @@ struct SessionHistoryView: View {
             Spacer(minLength: 0)
         }
         .onAppear { history.refresh() }
+    }
+
+    /// A refused resume is a configuration problem (launch options that
+    /// disable persistence, an id this agent can't take), so it needs to say
+    /// so — a click that silently does nothing reads as a broken panel.
+    /// Lives here rather than in a sheet: the failure belongs to the row the
+    /// user just clicked, and this panel is where they'll retry.
+    @ViewBuilder
+    private var resumeErrorBanner: some View {
+        if let resumeError {
+            HStack(alignment: .top, spacing: 8) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(Theme.mono(10))
+                Text(resumeError)
+                    .font(Theme.mono(10.5))
+                    .fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: 0)
+                Button { self.resumeError = nil } label: {
+                    Image(systemName: "xmark")
+                        .font(Theme.mono(9, weight: .medium))
+                }
+                .buttonStyle(.plain)
+            }
+            .foregroundStyle(Theme.activityFailure)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .background(Theme.activityFailure.opacity(0.12))
+        }
     }
 
     private var refreshButton: some View {

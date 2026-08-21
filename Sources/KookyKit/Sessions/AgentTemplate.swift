@@ -246,21 +246,28 @@ struct AgentTemplate: Identifiable, Hashable {
     /// with `resumeId` — asking a fresh question shouldn't graft onto a
     /// stale conversation, so `initialPrompt` wins and `resumeId` is
     /// silently dropped when both are supplied.
+    /// `rawLaunchCommand` (CLI `open -e`) is a caller-supplied shell command
+    /// line that becomes KOOKY_AGENT verbatim — the same eval channel agent
+    /// templates use, minus the template composition. Local-only semantics:
+    /// when `sshHost` is also set the ssh composition wins and the raw
+    /// command is dropped (running caller commands on a remote is not this
+    /// parameter's job; the CLI targets local workspaces only).
     func makeSessionConfig(
         extraOptions: String? = nil,
         resumeId: String? = nil,
         newSessionId: String? = nil,
         initialPrompt: String? = nil,
-        sshHost: String? = nil
+        sshHost: String? = nil,
+        rawLaunchCommand: String? = nil
     ) -> TerminalSessionConfig {
         // Pick a shell that has a kooky integration wrapper. Plain terminal
         // sessions respect $SHELL where we have a wrapper (zsh/bash/fish); other
         // shells (nu/...) get $SHELL too, just without cwd tracking.
         // Any session that carries a KOOKY_AGENT launch command — an agent
-        // template, or ANY template connecting to an `sshHost` — forces a
-        // wrapped shell so the auto-launch eval actually runs; `.other`
-        // users get zsh as a working fallback.
-        let needsLaunch = initialCommand != nil || sshHost != nil
+        // template, ANY template connecting to an `sshHost`, or a raw CLI
+        // command — forces a wrapped shell so the auto-launch eval actually
+        // runs; `.other` users get zsh as a working fallback.
+        let needsLaunch = initialCommand != nil || sshHost != nil || rawLaunchCommand != nil
         var config: TerminalSessionConfig
         switch (KookyShellIntegration.detectedUserShell, needsLaunch) {
         case (.bash, _):
@@ -295,6 +302,8 @@ struct AgentTemplate: Identifiable, Hashable {
             )
                 .map { " -- \($0)" } ?? ""
             config.environment["KOOKY_AGENT"] = "kooky-ssh \(KookyShellIntegration.quote(sshHost))\(agentSuffix)"
+        } else if let rawLaunchCommand {
+            config.environment["KOOKY_AGENT"] = rawLaunchCommand
         } else if let launch = launchCommand(
             extraOptions: extraOptions,
             resumeId: resumeId,

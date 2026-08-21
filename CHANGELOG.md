@@ -2,6 +2,10 @@
 
 Notable changes per release. Tagged commits use `vX.Y.Z` shortform.
 
+## v0.51.0 — 2026-08-21
+
+- New: `kooky-cli` — control kooky from scripts, launchers, and other apps. `open` opens a tab at a directory, optionally running a command or starting an agent there; `resume` reopens an agent conversation; `list` prints every window, workspace, and tab with their ids; `focus` and `close` target one tab; `status` reports whether kooky is running. Everything but `status` launches kooky first if it isn't running. See the README for the full command list and where the binary lives.
+
 ## v0.50.7 — 2026-08-18
 
 - Fixed: Ctrl+Space, Ctrl+digit, and Ctrl+punctuation combos sent nothing at all — e.g. Ctrl+Space as a tmux prefix was dead. They now send the standard terminal bytes, and Ctrl+Option combos and the kitty keyboard protocol work too. Thanks @h0hmj for the report and a draft fix. (#54)

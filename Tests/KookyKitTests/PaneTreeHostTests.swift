@@ -20,14 +20,7 @@ import XCTest
 /// on-device verification instead.
 @MainActor
 final class PaneTreeHostTests: XCTestCase {
-    private func makeStore() -> WorkspaceStore {
-        WorkspaceStore(
-            persistence: InMemoryPersistence(),
-            engineFactory: { TestEngine() },
-            optionsProvider: { _ in nil },
-            resumeProvider: { true }
-        )
-    }
+    private func makeStore() -> WorkspaceStore { makeTestStore() }
 
     /// Store + host sized like a real window, reconciled and laid out.
     private func makeHost(_ store: WorkspaceStore, size: NSSize = NSSize(width: 800, height: 600)) -> PaneTreeHostView {

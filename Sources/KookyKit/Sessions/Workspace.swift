@@ -83,6 +83,19 @@ final class Workspace: Identifiable {
     /// confirm-sheet subtitle needs the disk root.
     var diskPath: URL { worktreePath ?? workingDirectory }
 
+    /// True when closing this workspace's one remaining tab would cascade
+    /// into worktree removal (`closeTab` reroutes to the workspace-removal
+    /// confirm sheet instead of closing the tab). One predicate for the
+    /// store's reroute AND the CLI's refusal — a drift between the two is
+    /// either a refused closeable tab or a "closed" answer for a parked
+    /// confirmation. (`closePane` has its own, DIFFERENT pane-level cascade
+    /// condition; this models only the closeTab shape.)
+    var closingLastTabCascadesIntoWorktreeRemoval: Bool {
+        worktreeParentId != nil
+            && root.allPanes.count == 1
+            && root.allPanes.first?.tabs.count == 1
+    }
+
     var title: String {
         if let custom = customTitle, !custom.isEmpty { return custom }
         // Mirror the active tab's OSC title so an `ssh` session shows the

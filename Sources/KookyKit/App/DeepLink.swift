@@ -66,29 +66,38 @@ enum KookyDeepLink: Equatable {
         }
         switch action {
         case "resume":
-            // `normalizedTitle` is the codebase's one "blank collapses to
-            // nil" rule — not a title here, but the same trim-to-nil.
             func value(_ name: String) -> String? {
-                components.queryItems?.first { $0.name == name }?.value.flatMap(normalizedTitle)
+                components.queryItems?.first { $0.name == name }?.value
             }
-            guard let agent = value("agent") else { return .invalid(reason: "missing 'agent' parameter") }
-            guard agent.count <= 64 else { return .invalid(reason: "agent id is too long") }
-            guard let id = value("id") else { return .invalid(reason: "missing 'id' parameter") }
-            guard isValidConversationId(id) else {
-                return .invalid(reason: "conversation id contains characters kooky refuses")
-            }
-            let cwd = value("cwd")
-            if let cwd {
-                // Length-capped like the id: these strings reach the failure
-                // sheet and the log, and an ARG_MAX-sized value would stall
-                // CoreText layout on the main thread.
-                guard cwd.count <= 1024 else { return .invalid(reason: "cwd is too long") }
-                guard cwd.hasPrefix("/") else { return .invalid(reason: "cwd must be an absolute path") }
-            }
-            return .resumeSession(agentId: agent.lowercased(), conversationId: id, cwd: cwd)
+            return validateResume(agentId: value("agent"), conversationId: value("id"), cwd: value("cwd"))
         default:
             return nil
         }
+    }
+
+    /// Field-level construction shared by `parse` (URL query values) and the
+    /// CLI's `resume` verb (argv values) — one grammar, two front doors, so
+    /// the CLI can't accept an id the deep link would refuse. Blank values
+    /// collapse to missing (`normalizedTitle` is the codebase's one
+    /// "blank collapses to nil" rule — not a title here, but the same
+    /// trim-to-nil); the agent id lowercases; the conversation id keeps its
+    /// exact case.
+    static func validateResume(agentId rawAgent: String?, conversationId rawId: String?, cwd rawCwd: String?) -> KookyDeepLink {
+        guard let agent = rawAgent.flatMap(normalizedTitle) else { return .invalid(reason: "missing 'agent' parameter") }
+        guard agent.count <= 64 else { return .invalid(reason: "agent id is too long") }
+        guard let id = rawId.flatMap(normalizedTitle) else { return .invalid(reason: "missing 'id' parameter") }
+        guard isValidConversationId(id) else {
+            return .invalid(reason: "conversation id contains characters kooky refuses")
+        }
+        let cwd = rawCwd.flatMap(normalizedTitle)
+        if let cwd {
+            // Length-capped like the id: these strings reach the failure
+            // sheet and the log, and an ARG_MAX-sized value would stall
+            // CoreText layout on the main thread.
+            guard cwd.count <= 1024 else { return .invalid(reason: "cwd is too long") }
+            guard cwd.hasPrefix("/") else { return .invalid(reason: "cwd must be an absolute path") }
+        }
+        return .resumeSession(agentId: agent.lowercased(), conversationId: id, cwd: cwd)
     }
 
     /// The canonical spelling of a resume link — the single source for any

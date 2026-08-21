@@ -633,16 +633,31 @@ enum KookyShellIntegration {
     /// Re-copied every launch so a freshly-installed build's helper supersedes
     /// the stale copy. Falls back to the in-bundle path if the copy fails
     /// (dev `swift run` runs fine in place from `.build/<config>/` anyway).
-    static let kookyHookBinaryPath: String = {
+    static let kookyHookBinaryPath: String = mirroredHelperBinaryPath(name: "KookyHook")
+
+    /// Same Gatekeeper escape for the control CLI: external tools exec this
+    /// path (`~/Library/Application Support/kooky/bin/kooky-cli`), which
+    /// stays valid across app updates AND dodges the /Applications
+    /// exec-assessment kill the in-bundle path is subject to. AppDelegate
+    /// touches this at launch so the mirror refreshes with every build —
+    /// the returned VALUE currently has no reader; the refresh side effect
+    /// is the contract (the path is documented in the README for external
+    /// tools, and a future Settings page may render it).
+    static let kookyCLIBinaryPath: String = mirroredHelperBinaryPath(name: "kooky-cli")
+
+    /// One name per helper, everywhere: the SPM target names ARE the shipped
+    /// binary names, so dev builds and the packaged app resolve identically.
+    private static func mirroredHelperBinaryPath(name: String) -> String {
         guard let exe = Bundle.main.executablePath else { return "" }
-        let bundled = (exe as NSString).deletingLastPathComponent + "/KookyHook"
+        let bundled = (exe as NSString).deletingLastPathComponent + "/" + name
         let fm = FileManager.default
         // No bundled helper next to us (e.g. the xctest runner) → return the
-        // bundle path and DON'T touch the Application Support copy, so running
-        // the test suite can't clobber the helper a live kooky depends on.
+        // bundle path and DON'T touch the Application Support copy, so
+        // running the test suite can't clobber the helper a live kooky
+        // depends on.
         guard fm.fileExists(atPath: bundled) else { return bundled }
         // `kookyBinDirectory` is the App Support `kooky/bin` dir (already created).
-        let dest = (kookyBinDirectory as NSString).appendingPathComponent("KookyHook")
+        let dest = (kookyBinDirectory as NSString).appendingPathComponent(name)
         // Stat gate on the pre-first-frame path: `copyItem` preserves the
         // source's mtime, so equal size+mtime means the installed copy IS
         // this build's helper — no need to read ~245KB of binaries just to
@@ -666,7 +681,7 @@ enum KookyShellIntegration {
         } catch {
             return bundled
         }
-    }()
+    }
 
     /// Per-session env vars our wrappers + hook helper read. Caller supplies
     /// the surface UUID; everything else is process-wide. PATH prepends

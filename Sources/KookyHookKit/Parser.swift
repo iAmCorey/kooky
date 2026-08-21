@@ -23,26 +23,40 @@ public enum KookyHookKit {
         guard fd >= 0 else { return false }
         defer { close(fd) }
 
-        var addr = sockaddr_un()
-        addr.sun_family = sa_family_t(AF_UNIX)
-        let pathBytes = Array(path.utf8)
-        guard pathBytes.count < MemoryLayout.size(ofValue: addr.sun_path) else { return false }
-        withUnsafeMutableBytes(of: &addr.sun_path) { dst in
-            pathBytes.withUnsafeBufferPointer { src in
-                dst.baseAddress?.copyMemory(from: src.baseAddress!, byteCount: src.count)
-            }
-        }
-
-        let len = socklen_t(MemoryLayout<sockaddr_un>.size)
-        let connected = withUnsafePointer(to: &addr) { addrPtr in
-            addrPtr.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-                connect(fd, $0, len)
-            }
+        let connected = withUnixSocketAddress(path: path) { addr, len in
+            connect(fd, addr, len)
         }
         guard connected == 0 else { return false }
 
         let written = payload.withUnsafeBytes { write(fd, $0.baseAddress, $0.count) }
         return written >= 0
+    }
+
+    /// Builds the `sockaddr_un` for a unix socket path and hands it to
+    /// `body` (a `connect` or `bind` call). Nil when the path doesn't fit
+    /// `sun_path` (the `<` bound keeps the implicit NUL terminator). The
+    /// single home for this fiddly construction — the hook sender, the CLI
+    /// transport, and HookServer's bind all route through it, so the length
+    /// guard can't drift between the three.
+    public static func withUnixSocketAddress<R>(
+        path: String,
+        _ body: (UnsafePointer<sockaddr>, socklen_t) -> R
+    ) -> R? {
+        var addr = sockaddr_un()
+        addr.sun_family = sa_family_t(AF_UNIX)
+        let pathBytes = Array(path.utf8)
+        guard pathBytes.count < MemoryLayout.size(ofValue: addr.sun_path) else { return nil }
+        withUnsafeMutableBytes(of: &addr.sun_path) { dst in
+            pathBytes.withUnsafeBufferPointer { src in
+                dst.baseAddress?.copyMemory(from: src.baseAddress!, byteCount: src.count)
+            }
+        }
+        let len = socklen_t(MemoryLayout<sockaddr_un>.size)
+        return withUnsafePointer(to: &addr) { addrPtr in
+            addrPtr.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                body($0, len)
+            }
+        }
     }
 
     /// Env-snapshot payload from positional args. Order follows the

@@ -105,6 +105,12 @@ final class ConsentSheetController: NSWindowController, DismissablePanel {
     /// Presenter-specific bookkeeping run once at teardown, before the
     /// decision (the clipboard presenter clears its per-window pending slot).
     fileprivate var onTeardown: (@MainActor (NSWindow) -> Void)?
+    /// Opaque tag identifying WHAT this sheet is about, for presenters whose
+    /// per-window guard has to tell "asked again about the same thing"
+    /// (idempotent) from "asked about something else while this one is up"
+    /// (must be refused — the pending sheet's decision closure captured the
+    /// first subject and will never act on the second).
+    var ownerKey: AnyHashable?
 
     func begin(on parent: NSWindow, onDecision: @escaping @MainActor (Bool) -> Void) {
         pending = onDecision

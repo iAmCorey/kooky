@@ -1,6 +1,20 @@
 import Foundation
 @testable import KookyKit
 
+/// The canonical zero-config test store: TestEngine (no libghostty/PTY),
+/// in-memory persistence, no real settings reads. Third verbatim copy
+/// (DeepLink / PaneTreeHost / CLIController) earned it the shared home —
+/// a new WorkspaceStore injection seam lands here once, not per file.
+@MainActor
+func makeTestStore() -> WorkspaceStore {
+    WorkspaceStore(
+        persistence: InMemoryPersistence(),
+        engineFactory: { TestEngine() },
+        optionsProvider: { _ in nil },
+        resumeProvider: { true }
+    )
+}
+
 /// Shared fixture helpers for the session-store tests and benchmarks.
 /// `isolatedRoots` is also the privacy guard with one home: a test scan must
 /// NEVER touch the developer's real agent stores — every store gets an

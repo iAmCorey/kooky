@@ -106,6 +106,32 @@
 
 **基于 libghostty。** 使用和 ghostty 同源的 GPU 终端渲染引擎，渲染跟随屏幕刷新率，在 120Hz / ProMotion 屏上滚动顺滑、不撕裂。
 
+## CLI
+
+`kooky-cli` 让脚本和其他本地应用驱动正在运行的 kooky——开 tab 跑命令、恢复 agent 会话、查询 / 聚焦 / 关闭 tab：
+
+```sh
+kooky-cli open --cwd ~/Github/vibex -e "npx @deepseek-ai/dsh web"   # 新 tab：cd 过去并执行命令
+kooky-cli open --cwd ~/Github/vibex --agent claude-code             # 新 tab 里启动一个 agent 模板
+kooky-cli open --agent my-terminal-preset                           # 终端预设自带目录，可省略 --cwd
+kooky-cli open --agent preset-1                                     # Terminal 预设自带目录，可以不给 --cwd
+kooky-cli resume --agent codex --id <会话id>                        # 与 kooky://resume 深层链接同语义
+kooky-cli list --json                                               # 窗口 → workspace → tab 树，带 id
+kooky-cli focus --tab <session-uuid>                                # 把某个 tab 带到最前
+kooky-cli close --tab <session-uuid>                                # 遵循应用内的关闭确认规则
+kooky-cli status                                                    # 版本与健康状态；未运行时退出码 1
+```
+
+除 `status` 外，每个命令都会在 kooky 未运行时先把它拉起。退出码 0 表示请求已受理；任何失败都在 stderr 打印一行原因。`--agent` 接受与 Settings → Agents 相同的模板 id（内置、自定义和 Terminal 预设）。`--cwd` 是必填的，只有指定 Terminal 预设时可以省略——预设自带固定目录；仍然可以传 `--cwd` 覆盖它。
+
+二进制随 app 打包在 `Kooky.app/Contents/MacOS/kooky-cli`，kooky 每次启动还会把它刷新到稳定路径 `~/Library/Application Support/kooky/bin/kooky-cli` —— 外部工具建议指向后者：这个路径跨版本更新不变，而且 macOS Gatekeeper 会杀掉从 `/Applications` 内部 exec 的未公证辅助二进制，Application Support 的拷贝不受影响。想加进 PATH？做个 symlink：
+
+```sh
+ln -s ~/Library/Application\ Support/kooky/bin/kooky-cli /usr/local/bin/kooky-cli
+```
+
+命令只经由 kooky 本地的、仅属主可访问的 socket 传递——`kooky://` URL 仍然无法携带命令。
+
 ## 安装
 
 从 [Releases](https://github.com/iAmCorey/kooky/releases) 下载最新的 `.dmg`，打开后把 `Kooky.app` 拖进 `Applications` 文件夹。

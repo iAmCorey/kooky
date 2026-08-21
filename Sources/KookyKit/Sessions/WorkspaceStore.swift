@@ -28,6 +28,15 @@ func resolvedSpawnCwd(_ path: String) -> URL {
     return isDirectory(url) ? url : URL(fileURLWithPath: NSHomeDirectory())
 }
 
+/// kooky's one canonical form for on-disk path identity: shells report the
+/// LOGICAL cwd, workspaces may hold either spelling, so equality checks must
+/// resolve symlinks (`/tmp` vs `/private/tmp`) before comparing. Shared by
+/// the file tree's re-rooting and the CLI's workspace matching — a drift
+/// here is "opening the same project stacks new workspaces".
+func canonicalDiskPath(_ url: URL) -> URL {
+    url.resolvingSymlinksInPath().standardizedFileURL
+}
+
 /// Trims a title string; blank or whitespace-only input collapses to `nil`.
 /// Shared by the manual-rename paths and the OSC-title observer so "empty
 /// means no title" stays one rule.
@@ -356,6 +365,14 @@ final class WorkspaceStore {
     private static let closedTabHistoryLimit = 50
 
     private var pendingSave: Task<Void, Never>?
+
+    /// Set by `terminate()`. The window layer drops its controller only on
+    /// the NEXT main-queue tick (releasing an NSWindow synchronously inside
+    /// windowWillClose crashes AppKit), so for one tick a dead store is
+    /// still reachable through `windowControllers` — anything that acts on
+    /// a store from outside the UI (the CLI) must skip it, or it lands a tab
+    /// in a store that is about to be dropped and reports success.
+    private(set) var isTerminated = false
     private static let saveDebounce: UInt64 = 1_000_000_000
 
     var active: Workspace? {
@@ -395,7 +412,10 @@ final class WorkspaceStore {
         worktreeParent: Workspace? = nil,
         worktreeBranch: String? = nil,
         template: AgentTemplate = .terminal,
-        sshRemoteHost: String? = nil
+        sshRemoteHost: String? = nil,
+        conversationId: String? = nil,
+        forceResume: Bool = false,
+        rawLaunchCommand: String? = nil
     ) -> Workspace {
         // NB: the home fallback (fresh window's seed workspace) reaching
         // `noteRecentFolder` below is caught by `RecentFolders.note()`'s own
@@ -421,7 +441,18 @@ final class WorkspaceStore {
         if worktreeParent != nil {
             workspace.worktreePath = dir.standardizedFileURL
         }
-        let session = spawnSession(template: template, initialCwd: dir, sshRemoteHost: workspace.sshRemoteHost)
+        // A new workspace always comes up with exactly one tab. The spawn
+        // arguments are forwarded so that tab can BE what the caller wanted
+        // (see `localSpawn`) instead of a default shell the caller then has
+        // to open a second tab beside — one `open`, one PTY.
+        let session = spawnSession(
+            template: template,
+            initialCwd: dir,
+            conversationId: conversationId,
+            forceResume: forceResume,
+            sshRemoteHost: workspace.sshRemoteHost,
+            rawLaunchCommand: rawLaunchCommand
+        )
         wireSessionCallbacks(engine: session.engine, session: session, workspace: workspace, codexRolloutId: session.resumedConversationId)
         pane.tabs.append(session)
         pane.activeTabId = session.id
@@ -904,6 +935,9 @@ final class WorkspaceStore {
 
     // MARK: - Tabs
 
+    /// `rawLaunchCommand` (the CLI's `open -e`) rides KOOKY_AGENT verbatim —
+    /// see `makeSessionConfig(rawLaunchCommand:)`. Only meaningful with the
+    /// plain `.terminal` template; the CLI controller is its one caller.
     @discardableResult
     func addTab(
         in workspace: Workspace,
@@ -912,8 +946,16 @@ final class WorkspaceStore {
         initialCwd: URL? = nil,
         conversationId: String? = nil,
         forceResume: Bool = false,
-        initialPrompt: String? = nil
+        initialPrompt: String? = nil,
+        rawLaunchCommand: String? = nil
     ) -> Session {
+        // The raw channel replaces the template's own launch command inside
+        // makeSessionConfig, but everything else (Session.agent identity,
+        // conversation-id capture, resume persistence) would still run with
+        // the template's semantics — a silent mismatch. Keep the invariant
+        // executable, not a comment.
+        precondition(template.isShell || rawLaunchCommand == nil,
+                     "rawLaunchCommand is only valid with a shell template")
         guard let target = pane ?? workspace.activePane ?? workspace.root.firstPane else {
             preconditionFailure("workspace has no panes")
         }
@@ -925,7 +967,7 @@ final class WorkspaceStore {
         let cwd = initialCwd
             ?? template.extraCwd.map { resolvedSpawnCwd(($0 as NSString).expandingTildeInPath) }
             ?? workspace.workingDirectory
-        let session = spawnSession(template: template, initialCwd: cwd, conversationId: conversationId, forceResume: forceResume, initialPrompt: initialPrompt, sshRemoteHost: workspace.sshRemoteHost)
+        let session = spawnSession(template: template, initialCwd: cwd, conversationId: conversationId, forceResume: forceResume, initialPrompt: initialPrompt, sshRemoteHost: workspace.sshRemoteHost, rawLaunchCommand: rawLaunchCommand)
         wireSessionCallbacks(engine: session.engine, session: session, workspace: workspace, codexRolloutId: session.resumedConversationId)
         target.tabs.append(session)
         target.activeTabId = session.id
@@ -946,9 +988,17 @@ final class WorkspaceStore {
     /// History-row convenience — the seam's true dependency is only the
     /// (agent, conversation, cwd) triple below, so a scanner record just
     /// forwards its three fields.
+    ///
+    /// Returns the Result rather than an optional on purpose: a refusal here
+    /// is a CONFIGURATION problem the user has to go fix (launch options
+    /// disabling persistence, an id this agent can't take), so the reason
+    /// has to survive far enough to be shown. Collapsing it to nil made a
+    /// history click do nothing at all, with no way to find out why.
     @discardableResult
-    func resumeAgentSession(_ record: AgentSessionRecord) -> Session? {
-        resumeAgentSession(agentId: record.agentId, conversationId: record.conversationId, cwd: record.cwd)
+    func resumeAgentSession(_ record: AgentSessionRecord) -> Result<Session, ResumeRefusal> {
+        resumeAgentSession(
+            agentId: record.agentId, conversationId: record.conversationId, cwd: record.cwd
+        )
     }
 
     /// Resume a conversation: a new tab in the active workspace, running the
@@ -960,27 +1010,135 @@ final class WorkspaceStore {
     /// explicit asks — the `agents.resumeConversations` setting only governs
     /// automatic relaunch-time resume.
     @discardableResult
-    func resumeAgentSession(agentId: String, conversationId: String, cwd: URL) -> Session? {
-        guard let template = AgentTemplate.builtin(id: agentId),
-              template.supportsResume
-        else { return nil }
-        // The conversation lives on the LOCAL disk; an SSH workspace would
-        // wrap the launch in kooky-ssh and drop the resume id
-        // (`makeSessionConfig(sshHost:)`), yielding a plain remote tab. Land
-        // in the first local workspace — and when EVERY workspace is SSH,
-        // open one at the conversation's own directory, so a history click
-        // can never silently no-op.
-        let workspace = (active?.sshRemoteHost == nil ? active : nil)
-            ?? workspaces.first { $0.sshRemoteHost == nil }
-            ?? addWorkspace(workingDirectory: resolvedSpawnCwd(cwd.path))
-        activateWorkspace(workspace)
-        return addTab(
-            in: workspace,
+    func resumeAgentSession(agentId: String, conversationId: String, cwd: URL) -> Result<Session, ResumeRefusal> {
+        if let refusal = Self.resumeRefusal(
+            agentId: agentId, conversationId: conversationId, options: optionsProvider
+        ) {
+            return .failure(refusal)
+        }
+        guard let template = AgentTemplate.builtin(id: agentId) else {
+            return .failure(.agentCannotResume)
+        }
+        let spawned = localSpawn(
             template: template,
-            initialCwd: resolvedSpawnCwd(cwd.path),
+            cwd: cwd,
             conversationId: conversationId,
             forceResume: true
         )
+        activateWorkspace(spawned.workspace)
+        return .success(spawned.session)
+    }
+
+    /// Why a resume was refused, decided before any session exists.
+    /// Whether a resume would be refused — WITHOUT touching any store, so
+    /// callers can decide before they cause side effects. The deep-link and
+    /// CLI paths ask first, because reaching `resumeAgentSession` may already
+    /// have built a window to land in, and a window created for a request
+    /// that then fails is one the user has to close (and one the persistence
+    /// layer would otherwise restore at next launch).
+    ///
+    /// Everything that would make `spawnSession` silently drop the resume id
+    /// lives here, so a refusal never leaves a tab that quietly started a
+    /// FRESH conversation. It mirrors `spawnSession`'s conditions for THIS
+    /// path specifically: `forceResume` is true, no initial prompt is passed,
+    /// and `localSpawn` guarantees a local (non-SSH) workspace — so these are
+    /// the only ways the id can still vanish.
+    @MainActor
+    static func resumeRefusal(
+        agentId: String,
+        conversationId: String,
+        options: @MainActor (String) -> String? = { KookySettingsModel.shared.agentOptions[$0] }
+    ) -> ResumeRefusal? {
+        guard let template = AgentTemplate.builtin(id: agentId), template.supportsResume else {
+            return .agentCannotResume
+        }
+        guard template.persistsConversation(extraOptions: options(template.id)) else {
+            return .launchOptionsDisablePersistence
+        }
+        guard template.normalizedConversationId(conversationId) != nil else {
+            return .unusableConversationId
+        }
+        return nil
+    }
+
+    enum ResumeRefusal: Error, Equatable {
+        case agentCannotResume
+        case launchOptionsDisablePersistence
+        case unusableConversationId
+
+        func message(agentId: String, conversationId: String) -> String {
+            switch self {
+            case .agentCannotResume:
+                return "agent '\(agentId)' does not support resuming sessions"
+            case .launchOptionsDisablePersistence:
+                return "the launch options for '\(agentId)' disable session persistence, so the conversation could not be resumed"
+            case .unusableConversationId:
+                return "'\(conversationId)' is not a conversation id \(agentId) can resume"
+            }
+        }
+    }
+
+    /// The workspace a LOCAL spawn may land in. An SSH workspace would wrap
+    /// the launch in kooky-ssh (`makeSessionConfig(sshHost:)`) — for resume
+    /// that also drops the local-only resume id — so: the active workspace
+    /// if it's local, else the first local one, else a fresh workspace at
+    /// `fallbackCwd` so the request can never silently no-op. One policy for
+    /// both explicit-spawn front doors (History/deep-link resume, CLI open);
+    /// a future exclusion (worktree children, new workspace kinds) lands in
+    /// both by construction.
+    /// `cwdIsConfirmed` says the caller has ALREADY established that `cwd`
+    /// is a directory — off the main actor, ideally. It matters twice over:
+    /// the probe it skips is a main-actor `stat` that a dead network volume
+    /// freezes the whole UI on, and its `$HOME` fallback SILENTLY relocates
+    /// the launch. For `kooky-cli open -e` that means running the caller's
+    /// command somewhere it never asked for — in the home directory rather
+    /// than the project — and still answering "ok". A caller that has
+    /// verified the path wants a failure there, not a different directory.
+    ///
+    /// Resume deliberately leaves this false: its recorded directory may be
+    /// long gone, and opening a resumable shell at `$HOME` beats refusing.
+    func localSpawn(
+        template: AgentTemplate,
+        cwd: URL,
+        cwdIsConfirmed: Bool = false,
+        conversationId: String? = nil,
+        forceResume: Bool = false,
+        rawLaunchCommand: String? = nil
+    ) -> (workspace: Workspace, session: Session) {
+        let dir = cwdIsConfirmed ? cwd : resolvedSpawnCwd(cwd.path)
+        if let existing = (active?.sshRemoteHost == nil ? active : nil)
+            ?? workspaces.first(where: { $0.sshRemoteHost == nil }) {
+            let session = addTab(
+                in: existing,
+                template: template,
+                initialCwd: dir,
+                conversationId: conversationId,
+                forceResume: forceResume,
+                rawLaunchCommand: rawLaunchCommand
+            )
+            return (existing, session)
+        }
+        // Nothing local to land in. The fresh workspace's own seed tab IS
+        // the launch — adding a tab beside it would leave a blank shell and
+        // a second PTY behind every such call.
+        let workspace = addWorkspace(
+            workingDirectory: dir,
+            template: template,
+            conversationId: conversationId,
+            forceResume: forceResume,
+            rawLaunchCommand: rawLaunchCommand
+        )
+        // `addWorkspace` always seeds one tab; the fallback keeps the return
+        // total rather than force-unwrapping an invariant held elsewhere.
+        let session = workspace.activeSession ?? addTab(
+            in: workspace,
+            template: template,
+            initialCwd: dir,
+            conversationId: conversationId,
+            forceResume: forceResume,
+            rawLaunchCommand: rawLaunchCommand
+        )
+        return (workspace, session)
     }
 
     /// The open tab already running `conversationId`, if any — so a deep link
@@ -1166,6 +1324,28 @@ final class WorkspaceStore {
         closeTab(session, in: workspace, recordHistory: false)
     }
 
+    /// Drops the tab this store was born with, once the caller that caused
+    /// the WINDOW to exist has landed the tab it actually wanted. A window
+    /// built to serve one request (`kooky-cli open`, a `kooky://resume`
+    /// arriving with zero terminal windows open) comes up with a seed tab of
+    /// its own; leaving it behind means one request produced two tabs and
+    /// two PTYs, and the caller — which is told about exactly one id — can
+    /// neither find nor clean up the other. `discardTab` rather than
+    /// `closeTab` keeps a synthetic placeholder out of the reopen stack.
+    ///
+    /// Deliberately gated on this store still having a newborn's exact shape
+    /// (one workspace, and now exactly that seed plus the caller's tab):
+    /// callers derive "I built this window" from the window layer, which has
+    /// a narrow window where it can hand back a controller whose window is
+    /// already closing. Being wrong by leaving a blank tab behind is
+    /// recoverable; being wrong by closing a real session is not.
+    func discardSeedTab(keeping session: Session) {
+        guard workspaces.count == 1, let workspace = workspaces.first else { return }
+        let tabs = workspace.root.allPanes.flatMap(\.tabs)
+        guard tabs.count == 2, let seed = tabs.first(where: { $0.id != session.id }) else { return }
+        discardTab(seed, in: workspace)
+    }
+
     private func closeTab(_ session: Session, in workspace: Workspace, recordHistory: Bool) {
         guard let pane = pane(containing: session, in: workspace),
               let idx = pane.tabs.firstIndex(where: { $0.id == session.id }) else { return }
@@ -1173,10 +1353,7 @@ final class WorkspaceStore {
         // detachSession → closePane → closeWorkspace, which would bypass
         // the confirm sheet. Reroute here before any state mutates so
         // the sheet's cancel path can keep the tab open.
-        let isLastTabInWorktree = workspace.worktreeParentId != nil
-            && workspace.root.allPanes.count == 1
-            && pane.tabs.count == 1
-        if isLastTabInWorktree {
+        if workspace.closingLastTabCascadesIntoWorktreeRemoval {
             requestCloseWorkspace(workspace)
             return
         }
@@ -1566,6 +1743,7 @@ final class WorkspaceStore {
     /// `@MainActor` engine state) and stops background work. Does not
     /// mutate `workspaces` or persist — the caller decides slot retention.
     func terminate() {
+        isTerminated = true
         pendingSave?.cancel()
         pendingSave = nil
         for workspace in workspaces {
@@ -1686,7 +1864,7 @@ final class WorkspaceStore {
     /// Spawns the engine + Session. Caller wires `onPwdChange` / `onFocus`
     /// after a workspace ref is available — `restore` builds sessions before
     /// the workspace exists, so callbacks can't capture it here.
-    private func spawnSession(template: AgentTemplate, initialCwd: URL, sessionId: UUID = UUID(), conversationId: String? = nil, forceResume: Bool = false, initialPrompt: String? = nil, sshRemoteHost: String? = nil) -> Session {
+    private func spawnSession(template: AgentTemplate, initialCwd: URL, sessionId: UUID = UUID(), conversationId: String? = nil, forceResume: Bool = false, initialPrompt: String? = nil, sshRemoteHost: String? = nil, rawLaunchCommand: String? = nil) -> Session {
         let engine = engineFactory()
         let extraOptions = optionsProvider(template.id)
         let persistsConversation = template.persistsConversation(extraOptions: extraOptions)
@@ -1724,7 +1902,8 @@ final class WorkspaceStore {
             resumeId: resumeId,
             newSessionId: newSessionId,
             initialPrompt: initialPrompt,
-            sshHost: sshHost
+            sshHost: sshHost,
+            rawLaunchCommand: rawLaunchCommand
         )
         config.workingDirectory = initialCwd.path
         // A Claude-Code-based custom agent with an env block hands `claude`

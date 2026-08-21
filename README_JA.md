@@ -106,6 +106,32 @@ AI コーディングのために作られた、ミニマルでモダンな macO
 
 **libghostty 駆動。** ghostty と同じ GPU 加速セルレンダリングエンジン。画面のリフレッシュレートに同期して描画するので、120Hz / ProMotion ディスプレイでもスクロールが滑らかでティアリングしません。
 
+## CLI
+
+`kooky-cli` を使うと、スクリプトや他のローカルアプリから起動中の kooky を操作できます — tab を開いてコマンドを実行、agent の会話を再開、tab の一覧 / フォーカス / クローズ：
+
+```sh
+kooky-cli open --cwd ~/Github/vibex -e "npx @deepseek-ai/dsh web"   # 新しい tab: そこへ cd してコマンドを実行
+kooky-cli open --cwd ~/Github/vibex --agent claude-code             # 新しい tab で agent テンプレートを起動
+kooky-cli open --agent my-terminal-preset                           # Terminal preset は自身のディレクトリを持つ
+kooky-cli open --agent preset-1                                     # Terminal preset は自前のディレクトリを持つ
+kooky-cli resume --agent codex --id <会話id>                        # kooky://resume ディープリンクと同じ意味論
+kooky-cli list --json                                               # ウィンドウ → workspace → tab のツリーと id
+kooky-cli focus --tab <session-uuid>                                # tab を最前面へ
+kooky-cli close --tab <session-uuid>                                # アプリ内の確認ルールに従います
+kooky-cli status                                                    # バージョンと状態。未起動なら終了コード 1
+```
+
+`status` 以外のコマンドは、kooky が起動していなければ先に起動します。終了コード 0 はリクエスト受理を意味し、失敗時は stderr に理由を 1 行出力します。`--agent` は Settings → Agents と同じテンプレート id(ビルトイン、カスタム、Terminal preset)を受け付けます。`--cwd` は必須ですが、Terminal preset を指定した場合だけ省略できます —— preset 自身がディレクトリを固定しているためです。`--cwd` を渡せばそちらが優先されます。
+
+バイナリは app 内の `Kooky.app/Contents/MacOS/kooky-cli` に同梱され、kooky は起動のたびに安定パス `~/Library/Application Support/kooky/bin/kooky-cli` へコピーを更新します。外部ツールからはこちらを呼んでください: このパスはアップデートをまたいで不変で、macOS Gatekeeper が `/Applications` 内から exec される未公証ヘルパーを kill する問題も回避できます。PATH に入れたい場合は symlink を:
+
+```sh
+ln -s ~/Library/Application\ Support/kooky/bin/kooky-cli /usr/local/bin/kooky-cli
+```
+
+コマンドは kooky のローカルな owner-only ソケットだけを通ります — `kooky://` URL からは今までどおりコマンドを渡せません。
+
 ## インストール
 
 [Releases](https://github.com/iAmCorey/kooky/releases) から最新の `.dmg` をダウンロード、開いて `Kooky.app` を `Applications` フォルダにドラッグしてください。

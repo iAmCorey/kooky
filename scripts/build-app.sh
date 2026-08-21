@@ -37,7 +37,7 @@ echo "==> Building release config"
 swift build -c release
 
 echo "==> Verifying build artifacts"
-for f in .build/release/Kooky .build/release/KookyHook; do
+for f in .build/release/Kooky .build/release/KookyHook .build/release/kooky-cli; do
     [ -f "$f" ] || { echo "missing: $f" >&2; exit 1; }
 done
 [ -d ".build/release/Kooky_KookyKit.bundle" ] || {
@@ -52,6 +52,11 @@ mkdir -p "${APP}/Contents/Resources"
 
 cp .build/release/Kooky "${APP}/Contents/MacOS/${APP_NAME}"
 cp .build/release/KookyHook "${APP}/Contents/MacOS/KookyHook"
+# Control CLI: the SPM target is already named kooky-cli, so one name holds
+# across dev builds, the bundle, and the Application Support mirror the app
+# refreshes at launch (Gatekeeper story in
+# ShellIntegration.mirroredHelperBinaryPath).
+cp .build/release/kooky-cli "${APP}/Contents/MacOS/kooky-cli"
 # Bundle.module's first lookup candidate is `Bundle.main.resourceURL`
 # (= Contents/Resources/), so the resource bundle has to live there or
 # the running .app will silently fall back to .build/release/ on disk.
@@ -272,6 +277,7 @@ echo "==> Adhoc codesign (skips Gatekeeper kill on first launch)"
 codesign --force --sign - "${APP}/Contents/Resources/Kooky_KookyKit.bundle"
 codesign --force --sign - "${APP}/Contents/MacOS/${APP_NAME}"
 codesign --force --sign - "${APP}/Contents/MacOS/KookyHook"
+codesign --force --sign - "${APP}/Contents/MacOS/kooky-cli"
 codesign --force --sign - "${APP}" 2>&1 | tail -3
 
 echo ""

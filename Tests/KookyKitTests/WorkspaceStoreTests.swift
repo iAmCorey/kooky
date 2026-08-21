@@ -2801,4 +2801,160 @@ extension WorkspaceStoreTests {
                        "different gitdirs never share a watcher")
         XCTAssertEqual(store.gitWatchHubStats.subscriptions, base.subscriptions + 2)
     }
+
+    // MARK: seed tab of a window built to serve one request
+
+    /// A window created for a single `kooky-cli open` / `kooky://resume` is
+    /// born with a tab; the request then lands its own beside it. The seed
+    /// is a byproduct the caller never hears about, so it goes.
+    func testDiscardSeedTabDropsTheBornWithTabAndKeepsTheRequestedOne() throws {
+        let store = makeStore()
+        let workspace = store.workspaces[0]
+        let seed = try XCTUnwrap(workspace.activeSession)
+        let wanted = store.addTab(in: workspace)
+
+        store.discardSeedTab(keeping: wanted)
+
+        let tabs = workspace.root.allPanes.flatMap(\.tabs)
+        XCTAssertEqual(tabs.map(\.id), [wanted.id])
+        XCTAssertFalse(tabs.contains { $0.id == seed.id })
+    }
+
+    /// The half that matters more: the shape gate. Callers learn "I built
+    /// this window" from the window layer, which has a narrow window where
+    /// it can hand back a controller whose window is already closing — so
+    /// anything that is not a newborn's exact shape must be left alone
+    /// rather than have a real session closed out from under the user.
+    func testDiscardSeedTabLeavesAnythingThatIsNotANewbornAlone() throws {
+        let store = makeStore()
+        let workspace = store.workspaces[0]
+        let wanted = store.addTab(in: workspace)
+        store.addTab(in: workspace)   // a third tab — not a newborn any more
+        XCTAssertEqual(workspace.root.allPanes.flatMap(\.tabs).count, 3)
+
+        store.discardSeedTab(keeping: wanted)
+        XCTAssertEqual(workspace.root.allPanes.flatMap(\.tabs).count, 3, "too many tabs to be a window we just built")
+
+        // Two tabs but a second workspace: still not a newborn.
+        let second = makeStore()
+        let secondWorkspace = second.workspaces[0]
+        let secondWanted = second.addTab(in: secondWorkspace)
+        second.addWorkspace(workingDirectory: URL(fileURLWithPath: NSTemporaryDirectory()))
+        second.discardSeedTab(keeping: secondWanted)
+        XCTAssertEqual(
+            secondWorkspace.root.allPanes.flatMap(\.tabs).count, 2,
+            "more than one workspace means this store was not born for this request"
+        )
+    }
+
+    /// A refused resume must leave NOTHING behind. Before this, the tab was
+    /// spawned first and the missing resume id noticed after — so a caller
+    /// got a failure AND a tab quietly running a fresh conversation, and a
+    /// retrying script stacked one more every time.
+    func testRefusedResumeSpawnsNoTab() {
+        let store = WorkspaceStore(
+            persistence: InMemoryPersistence(),
+            engineFactory: { TestEngine() },
+            // Claude with session persistence switched off in launch options:
+            // the resume id would be dropped downstream.
+            optionsProvider: { _ in "--no-session-persistence" },
+            resumeProvider: { true }
+        )
+        let before = store.workspaces.flatMap { $0.root.allPanes.flatMap(\.tabs) }.count
+
+        let outcome = store.resumeAgentSession(
+            agentId: AgentTemplate.claudeCode.id,
+            conversationId: UUID().uuidString,
+            cwd: URL(fileURLWithPath: NSTemporaryDirectory())
+        )
+
+        guard case .failure(let refusal) = outcome else {
+            return XCTFail("expected a refusal, got \(outcome)")
+        }
+        XCTAssertEqual(refusal, .launchOptionsDisablePersistence)
+        XCTAssertEqual(
+            store.workspaces.flatMap { $0.root.allPanes.flatMap(\.tabs) }.count, before,
+            "a refusal must not leave a session behind"
+        )
+    }
+
+    /// A caller that already verified the directory must get THAT directory
+    /// — never a silent substitution. `kooky-cli open -e "make"` relocated
+    /// to $HOME would run the build in the wrong place and still report
+    /// success, which is worse than any failure.
+    func testConfirmedCwdIsNotSecondGuessedIntoHome() {
+        let store = makeStore()
+        // A path that no longer exists: the unconfirmed path would swap in
+        // $HOME here, which is exactly what a verified caller must not get.
+        let vanished = URL(fileURLWithPath: "/tmp/kooky-vanished-\(UUID().uuidString)")
+
+        let confirmed = store.localSpawn(template: .terminal, cwd: vanished, cwdIsConfirmed: true)
+        XCTAssertEqual(
+            confirmed.session.currentDirectory.path, vanished.path,
+            "a confirmed cwd must reach the spawn untouched"
+        )
+
+        let probed = store.localSpawn(template: .terminal, cwd: vanished)
+        XCTAssertEqual(
+            probed.session.currentDirectory.path, NSHomeDirectory(),
+            "without confirmation the $HOME fallback still applies (resume relies on it)"
+        )
+    }
+
+    /// The deep-link / CLI paths ask this BEFORE building a window, so it
+    /// has to answer without a store.
+    func testResumeRefusalDecidesWithoutAStore() {
+        let id = UUID().uuidString
+        XCTAssertEqual(
+            WorkspaceStore.resumeRefusal(agentId: "no-such-agent", conversationId: id, options: { _ in nil }),
+            .agentCannotResume
+        )
+        XCTAssertEqual(
+            WorkspaceStore.resumeRefusal(
+                agentId: AgentTemplate.claudeCode.id, conversationId: id,
+                options: { _ in "--no-session-persistence" }
+            ),
+            .launchOptionsDisablePersistence
+        )
+        XCTAssertNil(
+            WorkspaceStore.resumeRefusal(
+                agentId: AgentTemplate.claudeCode.id, conversationId: id, options: { _ in nil }
+            )
+        )
+    }
+
+    func testResumeSucceedsWhenPersistenceIsOn() throws {
+        let store = makeStore()
+        let outcome = store.resumeAgentSession(
+            agentId: AgentTemplate.claudeCode.id,
+            conversationId: UUID().uuidString,
+            cwd: URL(fileURLWithPath: NSTemporaryDirectory())
+        )
+        let session = try XCTUnwrap(try? outcome.get())
+        XCTAssertNotNil(session.resumedConversationId, "the id must survive to the command line")
+    }
+
+    /// The flag the CLI and deep-link entry points filter on. A window's
+    /// controller is dropped only on the NEXT main-queue tick (releasing an
+    /// NSWindow inside windowWillClose crashes AppKit), so for one tick a
+    /// terminated store is still reachable from `windowControllers` — and
+    /// spawning into it would report success for a tab about to vanish.
+    func testTerminateMarksTheStoreSoOutsideCallersCanSkipIt() {
+        let store = makeStore()
+        XCTAssertFalse(store.isTerminated)
+        store.terminate()
+        XCTAssertTrue(store.isTerminated)
+    }
+
+    /// `discardTab`, not `closeTab` — the seed is synthetic, so ⌘⇧T must not
+    /// offer to reopen a tab the user never opened or closed.
+    func testDiscardedSeedTabDoesNotEnterTheReopenStack() throws {
+        let store = makeStore()
+        let workspace = store.workspaces[0]
+        let wanted = store.addTab(in: workspace)
+        let reopenableBefore = store.canReopenClosedTab
+
+        store.discardSeedTab(keeping: wanted)
+        XCTAssertEqual(store.canReopenClosedTab, reopenableBefore)
+    }
 }

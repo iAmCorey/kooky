@@ -106,6 +106,32 @@ A minimal modern terminal built for AI coding. Sidebar workspaces; horizontal / 
 
 **libghostty-powered.** GPU-accelerated cell rendering, same engine as ghostty — synced to your display's refresh rate, so scrolling stays smooth and tear-free on 120Hz / ProMotion screens.
 
+## CLI
+
+`kooky-cli` drives a running kooky from scripts and other local apps — open a tab and run a command, resume an agent conversation, list / focus / close tabs:
+
+```sh
+kooky-cli open --cwd ~/Github/vibex -e "npx @deepseek-ai/dsh web"   # new tab: cd there, run the command
+kooky-cli open --cwd ~/Github/vibex --agent claude-code             # new tab running an agent template
+kooky-cli open --agent my-terminal-preset                           # a Terminal preset brings its own directory
+kooky-cli open --agent preset-1                                     # a Terminal preset brings its own directory
+kooky-cli resume --agent codex --id <conversation-id>               # same semantics as kooky://resume
+kooky-cli list --json                                               # windows → workspaces → tabs, with ids
+kooky-cli focus --tab <session-uuid>                                # bring a tab to the front
+kooky-cli close --tab <session-uuid>                                # in-app confirmation rules apply
+kooky-cli status                                                    # version + health; exit 1 when not running
+```
+
+Every command except `status` launches kooky first when it isn't running. Exit code 0 means the request was accepted; any failure prints one reason line on stderr. `--agent` takes the same template ids as Settings → Agents (built-ins, customs, and Terminal presets). `--cwd` is required except when the named template is a Terminal preset, which pins its own directory — pass `--cwd` anyway to override it.
+
+The binary ships inside the app at `Kooky.app/Contents/MacOS/kooky-cli`, and kooky refreshes a stable copy at `~/Library/Application Support/kooky/bin/kooky-cli` on every launch — point external tools at that one: the path survives app updates, and macOS Gatekeeper kills unnotarized helper binaries exec'd from inside `/Applications`, which the Application Support copy sidesteps. Want it on your PATH? Symlink it:
+
+```sh
+ln -s ~/Library/Application\ Support/kooky/bin/kooky-cli /usr/local/bin/kooky-cli
+```
+
+Commands only flow through kooky's local, owner-only socket — `kooky://` URLs still can't carry commands.
+
 ## Install
 
 Download the latest `.dmg` from [Releases](https://github.com/iAmCorey/kooky/releases). Open it and drag `Kooky.app` to `Applications`.

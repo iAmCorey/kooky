@@ -151,7 +151,28 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
         NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
         installMainMenu()
+        // Wire the CLI verb executor before the socket opens so the first
+        // request can't race an unset handler. The isTerminating guard is
+        // the same discipline as the deep-link path: during the ⌘Q drain a
+        // request must not spawn a tab into a store that's already flushed
+        // (the second persistence flush would write the phantom tab).
+        hookServer.onCLIRequest = { [weak self] request, isCallerWaiting, completion in
+            guard let self, !self.isTerminating else {
+                completion(.failure("kooky is shutting down"))
+                return
+            }
+            self.cliController.handle(
+                request,
+                isCallerWaiting: isCallerWaiting,
+                completion: completion
+            )
+        }
         hookServer.start()
+        // Mirror kooky-cli into Application Support (same Gatekeeper story
+        // as KookyHook: /Applications exec-assessment kills fresh-cdhash
+        // adhoc binaries run from inside the bundle). Launch-time so the
+        // stable path always carries the running build's CLI.
+        _ = KookyShellIntegration.kookyCLIBinaryPath
         notificationManager.onActivate = { [weak self] sessionId in
             self?.activateFromNotification(sessionId)
         }
@@ -432,6 +453,22 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
         }
     }
 
+    /// Deep-link wrapper around `resumeSession` — failures become the
+    /// visible sheet (the link just activated the app, so silence would
+    /// read as a dead link), dropped tiers stay log-only exactly as before.
+    private func resumeSessionFromDeepLink(agentId: String, conversationId: String, cwd: String?) {
+        resumeSession(agentId: agentId, conversationId: conversationId, cwd: cwd) { [weak self] outcome in
+            switch outcome {
+            case .revealed, .opened:
+                break
+            case .failed(let reason):
+                self?.presentDeepLinkFailure(reason)
+            case .dropped(let reason):
+                NSLog("kooky: resume request dropped — %@", reason)
+            }
+        }
+    }
+
     /// Jump to the conversation if a tab is already running it, else find it
     /// in the agent's own session store and resume — the History row's exact
     /// pipeline, so SSH-workspace fallback rides along for free. Spawn-cwd
@@ -440,65 +477,181 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
     /// project AND conversations beyond the scanner's per-agent cap — the
     /// agent itself rejects an id it doesn't know, visibly in the tab), else
     /// the record's dead cwd (`resolvedSpawnCwd` falls back to `$HOME`, the
-    /// History row's behavior). Every refusal is a visible sheet: the link
-    /// just activated the app, so silence would read as a dead link.
-    private func resumeSessionFromDeepLink(agentId: String, conversationId: String, cwd: String?) {
-        // Roster whitelist — the only agents a link can name are the ones
+    /// History row's behavior).
+    ///
+    /// Shared core for BOTH front doors (kooky://resume, `kooky-cli
+    /// resume`): every path lands in `completion` exactly once, and the
+    /// wrapper decides the feedback channel — sheet for links, response
+    /// line for the CLI. The `dropped` tiers were always silent for links;
+    /// keeping them a distinct case preserves that while still answering a
+    /// CLI caller.
+    /// The whole resume request's budget, and the smaller one each directory
+    /// probe gets. The probe budget MUST stay strictly under the request's:
+    /// they are checked in series (the outer deadline starts first and is
+    /// read after the probes return), so equal budgets make the fallback
+    /// unreachable by arithmetic — a probe that runs its full length leaves
+    /// the request already expired, and a `--cwd` that resolved perfectly
+    /// well gets thrown away with it. That fallback is the entire point of
+    /// passing `--cwd` for a project that has since moved.
+    static let resumeRequestBudget: Duration = .seconds(10)
+    static let resumeProbeBudget: Duration = .seconds(6)
+
+    /// `isCallerWaiting` defaults to "yes" for the deep-link path, whose
+    /// caller is a URL that has no connection to lose. The CLI passes a real
+    /// check: its caller can ^C or time out while the scan below runs, and
+    /// nothing after that point should build a window for them.
+    func resumeSession(
+        agentId: String,
+        conversationId: String,
+        cwd: String?,
+        isCallerWaiting: @escaping @MainActor () -> Bool = { true },
+        completion: @escaping @MainActor (ResumeRequestOutcome) -> Void
+    ) {
+        // Roster whitelist — the only agents a caller can name are the ones
         // whose session stores kooky itself reads.
         guard AgentSessionScanner.supportedAgentIds.contains(agentId) else {
-            presentDeepLinkFailure("unknown agent '\(agentId)'")
+            completion(.failed("unknown agent '\(agentId)'"))
             return
         }
-        if revealOpenConversation(agentId: agentId, conversationId: conversationId) { return }
-        let started = ContinuousClock.now
+        if revealOpenConversation(agentId: agentId, conversationId: conversationId) {
+            completion(.revealed)
+            return
+        }
+        // Bounds the WHOLE request, not just the probes below: a probe can
+        // win its race and still land here after the user has moved on (or
+        // after the CLI's own timeout), and a session appearing minutes later
+        // is exactly what this used to prevent before the probe refactor
+        // replaced it with per-probe races.
+        let deadline = RequestDeadline(Self.resumeRequestBudget)
         Task { [weak self] in
             // Store read + cwd stat off-main, and the stat only when it can
-            // matter: `cwd` comes from an untrusted URL — a stat against an
-            // unmounted network path blocks for the automount timeout — so a
-            // scanner hit with a live directory never pays it.
-            let spawnCwd: URL? = await Task.detached(priority: .userInitiated) {
-                let statCallerCwd = { cwd.map(URL.init(fileURLWithPath:)).flatMap { isDirectory($0) ? $0 : nil } }
+            // matter: `cwd` comes from an untrusted caller — a stat against
+            // an unmounted network path blocks for the automount timeout —
+            // so a scanner hit with a live directory never pays it.
+            //
+            // The 10s bound is a RACE, not an elapsed-time check afterwards:
+            // a stat stuck on a dead mount never returns, so measuring after
+            // the await could never fire. Same reasoning (and same helper) as
+            // `KookyCLIController.handleOpen`.
+            // Two INDEPENDENT races, for the same reason `handleOpen` splits
+            // its own: the scanned record's directory can sit on a dead
+            // mount (the project moved and the record is stale) while the
+            // caller passed a perfectly healthy `--cwd`. Sharing one race
+            // let the stale half time out the whole resume, so the good cwd
+            // never got its turn. Either probe timing out just means "this
+            // source has nothing to offer".
+            // The double optional is the race's own: the OUTER nil means the
+            // probe timed out, the inner one that it found nothing. Both
+            // collapse to "nothing to offer" below.
+            // A `Task`, not `async let`: the caller's cwd only matters if the
+            // recorded one turns out unusable, and `async let` would still be
+            // awaited when this scope exits — so a healthy record would sit
+            // out the caller probe's full timeout for a value it never uses.
+            // Starting both at once keeps the both-needed case at max() rather
+            // than sum(); the loser is simply abandoned (its blocking stat
+            // can't be interrupted, but nothing waits on it).
+            let callerProbe = Task {
+                await withOffMainTimeout(Self.resumeProbeBudget) {
+                    cwd.map(URL.init(fileURLWithPath:)).flatMap { isDirectory($0) ? $0 : nil }
+                }
+            }
+            let record = (await withOffMainTimeout(Self.resumeProbeBudget) {
                 guard let record = AgentSessionScanner.findRecordInDefaultRoot(
                     agentId: agentId, conversationId: conversationId
-                ) else { return statCallerCwd() }
-                if isDirectory(record.cwd) { return record.cwd }
-                return statCallerCwd() ?? record.cwd
-            }.value
-            guard let self, !self.isTerminating else { return }
-            // A continuation landing long after the click (that automount
-            // timeout) must not yank kooky frontmost or pop a sheet for an
-            // interaction the user has abandoned.
-            guard ContinuousClock.now - started < .seconds(10) else {
-                NSLog("kooky: deep link resolution for '%@' timed out; dropped", agentId)
+                ) else { return (cwd: URL, usable: Bool)?.none }
+                return (record.cwd, isDirectory(record.cwd))
+            }) ?? nil
+            // Precedence unchanged: a usable recorded directory wins, else
+            // the caller's, else the recorded one anyway so `resolvedSpawnCwd`
+            // can fall back to $HOME rather than refusing outright.
+            let spawnCwd: URL?
+            if record?.usable == true {
+                spawnCwd = record?.cwd
+                callerProbe.cancel()
+            } else {
+                spawnCwd = ((await callerProbe.value) ?? nil) ?? record?.cwd
+            }
+            guard let self, !self.isTerminating else {
+                completion(.dropped("kooky is shutting down"))
                 return
             }
-            // Re-check after the async hop: a double-fired link's first
+            // Before ANY side effect below — the reveal fronts a window, and
+            // the resume builds one. A link the user abandoned must not
+            // yank kooky forward long after they stopped waiting.
+            guard !deadline.hasExpired else {
+                completion(.dropped("resume for '\(agentId)' timed out"))
+                return
+            }
+            // Same gate, different cause: the caller may have walked away
+            // while the scan ran. Everything below fronts or builds a window.
+            guard isCallerWaiting() else {
+                completion(.dropped("the caller stopped waiting"))
+                return
+            }
+            // Re-check after the async hop: a double-fired request's first
             // resume may have landed while this one was scanning.
-            if self.revealOpenConversation(agentId: agentId, conversationId: conversationId) { return }
+            if self.revealOpenConversation(agentId: agentId, conversationId: conversationId) {
+                completion(.revealed)
+                return
+            }
             guard let spawnCwd else {
                 if let cwd {
-                    self.presentDeepLinkFailure("directory does not exist: \(cwd)")
+                    completion(.failed("directory does not exist: \(cwd)"))
                 } else {
-                    self.presentDeepLinkFailure("conversation '\(conversationId)' is not among the newest sessions kooky scans for \(agentId) — pass &cwd= to resume an older one")
+                    completion(.failed("conversation '\(conversationId)' is not among the newest sessions kooky scans for \(agentId) — pass a cwd (&cwd= / --cwd) to resume an older one"))
                 }
                 return
             }
-            guard let controller = self.deepLinkController() else { return }
-            // Front the window first; `resumeAgentSession` then activates
-            // the workspace + new tab itself (History-row semantics).
-            if let window = controller.window { self.front(window) }
-            guard let session = controller.store.resumeAgentSession(
-                agentId: agentId, conversationId: conversationId, cwd: spawnCwd
-            ) else {
-                self.presentDeepLinkFailure("agent '\(agentId)' does not support resuming sessions")
+            // Refuse BEFORE anything is built. `deepLinkController()` below
+            // may create a window, and `handleWindowWillClose` treats a lone
+            // window as worth persisting — so a refusal after that point
+            // both leaves an empty window on screen and files it in
+            // state.json for next launch, once per failed attempt.
+            if let refusal = WorkspaceStore.resumeRefusal(
+                agentId: agentId, conversationId: conversationId
+            ) {
+                completion(.failed(refusal.message(agentId: agentId, conversationId: conversationId)))
                 return
             }
-            // The spawn can silently drop the resume id (claude launch
-            // options carrying --no-session-persistence): the tab opened,
-            // but as a FRESH conversation — say so instead of faking success.
-            if session.resumedConversationId == nil {
-                self.presentDeepLinkFailure("the agent's launch options disable session persistence, so a fresh conversation was opened instead")
+            guard let landing = self.deepLinkController() else {
+                completion(.dropped("kooky is shutting down"))
+                return
             }
+            let controller = landing.controller
+            // Refusals are decided before anything spawns, so a failure
+            // leaves no tab behind for a script to accumulate. Nothing is
+            // FRONTED yet either: a request that ends in a refusal must not
+            // pull the user's window forward to say no, and a window built
+            // just for this request has to go back where it came from —
+            // otherwise a retrying script leaves a stack of empty windows.
+            let session: Session
+            switch controller.store.resumeAgentSession(
+                agentId: agentId, conversationId: conversationId, cwd: spawnCwd
+            ) {
+            case .success(let spawned):
+                session = spawned
+            case .failure(let refusal):
+                // Defence in depth: the pre-check above uses the default
+                // options provider, this store could in principle carry a
+                // different one. Drop the persistence slot AFTER the close —
+                // `handleWindowWillClose` flushes on its way out, so removing
+                // it first would just be overwritten.
+                if landing.builtWindow {
+                    controller.window?.close()
+                    self.appPersistence.removeWindow(controller.windowId)
+                }
+                completion(.failed(refusal.message(agentId: agentId, conversationId: conversationId)))
+                return
+            }
+            // Same shape as `kooky-cli open`: a link that arrived with zero
+            // terminal windows had one built for it, and that window's seed
+            // tab is a byproduct of this resume, not a session of the user's.
+            if landing.builtWindow {
+                controller.store.discardSeedTab(keeping: session)
+            }
+            // Front only now, with the tab already in place.
+            if let window = controller.window { self.front(window) }
+            completion(.opened)
         }
     }
 
@@ -506,10 +659,17 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
     /// fresh window when none exists (Settings/About can keep the app alive
     /// with zero terminal windows; a valid link must not silently vanish
     /// there, mirroring the Dock menu's New Window recovery).
-    private func deepLinkController() -> KookyWindowController? {
-        if let controller = activeController { return controller }
+    /// `builtWindow` is true only when this call created the window. A
+    /// window built to serve one request arrives with a seed tab of its own,
+    /// and that tab exists solely because the request needed somewhere to
+    /// land — see `WorkspaceStore.discardSeedTab(keeping:)`. Reporting the
+    /// fact here keeps every caller from re-deriving it (and getting it
+    /// subtly wrong: `activeController` can still find a controller in the
+    /// window between a close and its deallocation).
+    private func deepLinkController() -> (controller: KookyWindowController, builtWindow: Bool)? {
+        if let controller = activeController { return (controller, false) }
         guard !isTerminating else { return nil }
-        return addWindow()
+        return (addWindow(), true)
     }
 
     private func presentDeepLinkFailure(_ reason: String) {
@@ -517,7 +677,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
         // Defensive cap besides the parse-level limits: the sheet has no
         // scroll view, so an oversized reason must never reach layout.
         let display = reason.count > 500 ? String(reason.prefix(500)) + "…" : reason
-        guard let window = deepLinkController()?.window else { return }
+        guard let window = deepLinkController()?.controller.window else { return }
         // A sheet on a miniaturized window is invisible (NSApp.activate does
         // not deminiaturize) — front it like the success path does.
         front(window)
@@ -526,13 +686,91 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
 
     /// True when some window already runs the conversation and was revealed.
     private func revealOpenConversation(agentId: String, conversationId: String) -> Bool {
-        for controller in windowControllers {
+        // Same one-tick hazard the CLI's `windows` provider filters: a store
+        // that has already been terminated is still in the array, and
+        // "revealing" one of its tabs would report success for a tab that
+        // disappears with the window a moment later.
+        for controller in windowControllers where !controller.store.isTerminated {
             if let hit = controller.store.findOpenConversation(agentId: agentId, conversationId: conversationId) {
                 revealTab(hit.session, in: hit.workspace, controller: controller)
                 return true
             }
         }
         return false
+    }
+
+    // MARK: - CLI control channel
+
+    /// Verb executor for `kooky-cli` requests arriving over the hook socket.
+    /// The window list, reveal, template lookup, and resume pipeline are
+    /// closures so the controller's decisions stay unit-testable without an
+    /// AppDelegate (DeepLinkTests' split: pure decisions pinned, AppKit
+    /// manual).
+    private lazy var cliController = KookyCLIController(
+        appVersion: KookyApp.displayVersion,
+        windows: { [weak self] in
+            guard let self else { return [] }
+            // Skip stores already torn down: `handleWindowWillClose` calls
+            // `terminate()` synchronously but only drops the controller on
+            // the next main-queue tick, so a CLI request that arrives in
+            // between would otherwise land a tab in a store that is about to
+            // vanish — and answer "ok" with an id nothing can reach.
+            return self.windowControllers
+                .filter { !$0.store.isTerminated }
+                .map { self.cliWindowContext(for: $0) }
+        },
+        fallbackWindow: { [weak self] in
+            guard let self, let landing = self.deepLinkController() else { return nil }
+            return (self.cliWindowContext(for: landing.controller), landing.builtWindow)
+        },
+        activateApp: { NSApp.activate(ignoringOtherApps: true) },
+        isShuttingDown: { [weak self] in self?.isTerminating ?? true },
+        templates: {
+            // Terminal presets first (their ids live in settings alongside
+            // agent ids), then the terminal itself, then real agents via
+            // `ordered(model:)` — built-ins + customs in the user's Settings
+            // order WITH its colliding-id dedup, hidden ones included
+            // (hiding curates the `+` menu, it shouldn't break an external
+            // script), and never half-configured customs (`isShell` filters
+            // those out).
+            var roster = KookySettingsModel.shared.terminalPresets.map(AgentTemplate.fromTerminalPreset)
+            roster.append(.terminal)
+            roster.append(contentsOf: AgentTemplate.ordered(model: KookySettingsModel.shared).filter { !$0.isShell })
+            return roster
+        },
+        resume: { [weak self] agentId, conversationId, cwd, isCallerWaiting, completion in
+            // No isTerminating check here — onCLIRequest already gated it in
+            // the same synchronous tick, and resumeSession re-checks after
+            // its async hop (the load-bearing one).
+            guard let self else {
+                completion(.dropped("kooky is shutting down"))
+                return
+            }
+            self.resumeSession(
+                agentId: agentId,
+                conversationId: conversationId,
+                cwd: cwd,
+                isCallerWaiting: isCallerWaiting,
+                completion: completion
+            )
+        }
+    )
+
+    private func cliWindowContext(for controller: KookyWindowController) -> KookyCLIController.WindowContext {
+        KookyCLIController.WindowContext(
+            store: controller.store,
+            // "Active" by kooky's own bookkeeping, not AppKit's isKeyWindow:
+            // CLI calls almost always arrive while kooky is in the
+            // background, where AppKit reports NO key window and every
+            // window would tie at false — activeController falls back to
+            // the last key window, which is the one the user works in.
+            isKey: controller === activeController,
+            reveal: { [weak self, weak controller] session, workspace in
+                guard let self, let controller else { return }
+                self.revealTab(session, in: workspace, controller: controller)
+            },
+            window: { [weak controller] in controller?.window }
+        )
     }
 
     // MARK: - Notifications
@@ -662,10 +900,15 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
     /// when it's one of ours, otherwise the most-recently-key kooky window.
     /// Nil only when no kooky window exists.
     private var activeController: KookyWindowController? {
-        if let key = NSApp.keyWindow, let controller = controller(for: key) {
+        if let key = NSApp.keyWindow, let controller = controller(for: key),
+           !controller.store.isTerminated {
             return controller
         }
-        return lastKeyController ?? windowControllers.first
+        if let last = lastKeyController, !last.store.isTerminated { return last }
+        // Same one-tick window as `windows()` above: a controller whose store
+        // is already terminated is still in the array, and handing it to a
+        // deep link or the CLI fallback would spawn into a dying store.
+        return windowControllers.first { !$0.store.isTerminated }
     }
 
     /// The `WorkspaceStore` of the key window — the target for menu actions.
