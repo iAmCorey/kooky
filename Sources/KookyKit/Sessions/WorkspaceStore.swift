@@ -1097,15 +1097,19 @@ final class WorkspaceStore {
     ///
     /// Resume deliberately leaves this false: its recorded directory may be
     /// long gone, and opening a resumable shell at `$HOME` beats refusing.
+    /// A nil `cwd` means "wherever the landing workspace already is" — the
+    /// caller named no directory, so `addTab`/`addWorkspace` fall back to the
+    /// workspace's own working directory rather than to some guess made here.
+    /// That is what `kooky-cli open` without `--cwd` asks for.
     func localSpawn(
         template: AgentTemplate,
-        cwd: URL,
+        cwd: URL?,
         cwdIsConfirmed: Bool = false,
         conversationId: String? = nil,
         forceResume: Bool = false,
         rawLaunchCommand: String? = nil
     ) -> (workspace: Workspace, session: Session) {
-        let dir = cwdIsConfirmed ? cwd : resolvedSpawnCwd(cwd.path)
+        let dir = cwd.map { cwdIsConfirmed ? $0 : resolvedSpawnCwd($0.path) }
         if let existing = (active?.sshRemoteHost == nil ? active : nil)
             ?? workspaces.first(where: { $0.sshRemoteHost == nil }) {
             let session = addTab(

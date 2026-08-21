@@ -2,6 +2,10 @@
 
 Notable changes per release. Tagged commits use `vX.Y.Z` shortform.
 
+## v0.51.1 — 2026-08-21
+
+- Improved: `kooky-cli open` no longer needs `--cwd`. Without it the tab opens where the active workspace already is, so `kooky-cli open` on its own means "give me a new tab" and `--agent` alone starts an agent right there. (#56)
+
 ## v0.51.0 — 2026-08-21
 
 - New: `kooky-cli` — control kooky from scripts, launchers, and other apps. `open` opens a tab at a directory, optionally running a command or starting an agent there; `resume` reopens an agent conversation; `list` prints every window, workspace, and tab with their ids; `focus` and `close` target one tab; `status` reports whether kooky is running. Everything but `status` launches kooky first if it isn't running. See the README for the full command list and where the binary lives.

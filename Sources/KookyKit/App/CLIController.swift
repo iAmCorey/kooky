@@ -286,15 +286,11 @@ final class KookyCLIController {
         // makes it participate in workspace matching too.
         let explicitCwd = request.cwd.flatMap { $0.isEmpty ? nil : $0 }
         let templateCwd = launchTemplate.extraCwd.map { ($0 as NSString).expandingTildeInPath }
-        guard let cwdPath = explicitCwd ?? templateCwd else {
-            completion(refuse(
-                request.agent == nil
-                    ? "open needs --cwd <dir>"
-                    : "open needs --cwd <dir> — the template '\(launchTemplate.id)' has no directory of its own (only Terminal presets do)"
-            ))
-            return
-        }
-        guard cwdPath.hasPrefix("/") else {
+        // No directory named at all is a legitimate request: open a tab
+        // wherever the landing workspace already is. Only a directory that
+        // WAS named has to be absolute and to exist.
+        let cwdPath = explicitCwd ?? templateCwd
+        if let cwdPath, !cwdPath.hasPrefix("/") {
             completion(refuse(
                 explicitCwd != nil
                     ? "cwd must be an absolute path"
@@ -316,6 +312,18 @@ final class KookyCLIController {
         // falls through to the placement ladder, which is the right answer
         // for a workspace that didn't exist when the request arrived.
         let deadline = RequestDeadline(Self.asyncVerbDeadline)
+        // Nothing to stat, nothing to match against: land in the active
+        // workspace and let it supply the directory.
+        guard let cwdPath else {
+            completion(openTab(
+                template: launchTemplate,
+                cwd: nil,
+                canonicalCwd: nil,
+                canonicalPaths: [:],
+                command: request.command
+            ))
+            return
+        }
         let workspacePaths: [(id: UUID, path: URL)] = windows().flatMap { context in
             context.store.workspaces.compactMap { workspace in
                 workspace.sshRemoteHost == nil ? (workspace.id, workspace.diskPath) : nil
@@ -419,16 +427,20 @@ final class KookyCLIController {
     /// local workspace there; else a fresh workspace at the cwd — the
     /// store's shared local-spawn policy, so SSH workspaces can never wrap a
     /// local command in kooky-ssh.
+    /// `cwd` / `canonicalCwd` are nil when the caller named no directory —
+    /// there is then nothing to match a workspace against, and the landing
+    /// workspace supplies the directory itself.
     private func openTab(
         template: AgentTemplate,
-        cwd: URL,
-        canonicalCwd: String,
+        cwd: URL?,
+        canonicalCwd: String?,
         canonicalPaths: [UUID: String],
         command: String?
     ) -> KookyCLIResponse {
         let allWindows = windows()
         let landed: (context: WindowContext, workspace: Workspace, session: Session)
-        if let match = workspaceMatch(in: allWindows, canonicalCwd: canonicalCwd, canonicalPaths: canonicalPaths) {
+        if let canonicalCwd,
+           let match = workspaceMatch(in: allWindows, canonicalCwd: canonicalCwd, canonicalPaths: canonicalPaths) {
             let session = match.context.store.addTab(
                 in: match.workspace,
                 template: template,
@@ -454,7 +466,8 @@ final class KookyCLIController {
             // `handleOpen` already confirmed this directory off-main and
             // refused if it was missing — re-probing here would re-freeze the
             // UI on a slow volume, and its $HOME fallback would quietly run
-            // `-e` somewhere the caller never named.
+            // `-e` somewhere the caller never named. (A nil cwd names no
+            // directory at all, so there is nothing to confirm or substitute.)
             let spawned = host.store.localSpawn(
                 template: template,
                 cwd: cwd,

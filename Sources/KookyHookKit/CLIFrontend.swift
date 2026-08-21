@@ -41,7 +41,7 @@ extension KookyHookKit {
         "open": VerbSpec(
             valueFlags: ["--cwd", "-e", "--agent"],
             boolFlags: [],
-            usage: "usage: kooky-cli open [--cwd <dir>] [-e <command> | --agent <template-id>] (--cwd is optional only for a Terminal preset, which carries its own directory)"
+            usage: "usage: kooky-cli open [--cwd <dir>] [-e <command> | --agent <template-id>]"
         ),
         "resume": VerbSpec(
             valueFlags: ["--agent", "--id", "--cwd"],
@@ -153,14 +153,11 @@ extension KookyHookKit {
             if command != nil, agent != nil {
                 return .failure(KookyCLIParseFailure("-e and --agent are mutually exclusive. \(spec.usage)"))
             }
-            let cwd = values["--cwd"]
-            // A Terminal preset brings its own directory, so `--cwd` is only
-            // required when nothing else can say where to open. Whether the
-            // named template actually carries one is the app's call.
-            if cwd == nil, agent == nil {
-                return .failure(KookyCLIParseFailure("open needs --cwd <dir>. \(spec.usage)"))
-            }
-            return .success(.open(cwd: cwd, command: command, agent: agent))
+            // `--cwd` is optional everywhere: a Terminal preset brings its
+            // own directory, and with no directory named at all the tab
+            // opens wherever the active workspace already is. Bare
+            // `kooky-cli open` is therefore "give me a new tab".
+            return .success(.open(cwd: values["--cwd"], command: command, agent: agent))
         case "resume":
             return require("--agent").flatMap { agent in
                 require("--id").map { id in
@@ -227,8 +224,9 @@ extension KookyHookKit {
                                   open a new tab at <dir>; -e runs a shell
                                   command there, --agent starts an agent
                                   (built-in, Settings → Agents custom, or a
-                                  Terminal preset — a preset brings its own
-                                  directory, so --cwd may be omitted for one)
+                                  Terminal preset). Without --cwd the tab
+                                  opens where the active workspace already
+                                  is — a Terminal preset uses its own path
           resume --agent <agent-id> --id <conversation-id> [--cwd <dir>]
                                   reopen an agent conversation (same
                                   semantics as kooky://resume deep links)

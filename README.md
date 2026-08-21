@@ -113,7 +113,7 @@ A minimal modern terminal built for AI coding. Sidebar workspaces; horizontal / 
 ```sh
 kooky-cli open --cwd ~/Github/vibex -e "npx @deepseek-ai/dsh web"   # new tab: cd there, run the command
 kooky-cli open --cwd ~/Github/vibex --agent claude-code             # new tab running an agent template
-kooky-cli open --agent my-terminal-preset                           # a Terminal preset brings its own directory
+kooky-cli open --agent claude-code                                  # no --cwd: opens where the active workspace already is
 kooky-cli open --agent preset-1                                     # a Terminal preset brings its own directory
 kooky-cli resume --agent codex --id <conversation-id>               # same semantics as kooky://resume
 kooky-cli list --json                                               # windows → workspaces → tabs, with ids

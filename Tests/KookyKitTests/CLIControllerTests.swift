@@ -400,12 +400,37 @@ final class CLIControllerTests: XCTestCase {
 
     /// Only presets carry a directory — everything else still needs one, and
     /// the refusal has to say which case it is.
-    func testOpenWithoutCwdRefusesATemplateThatHasNoDirectory() async {
-        let controller = makeController(stores: [makeStore()], templates: [.terminal, .claudeCode])
+    /// Issue #56: no `--cwd` means "wherever I already am" — the tab lands in
+    /// the active workspace and inherits ITS directory, rather than being
+    /// refused or guessing at one.
+    func testOpenWithoutCwdLandsInTheActiveWorkspaceDirectory() async throws {
+        let store = makeStore()
+        let target = store.addWorkspace(workingDirectory: URL(fileURLWithPath: dirB))
+        let controller = makeController(stores: [store], templates: [.terminal, .claudeCode])
+
         let response = await respond(controller, KookyCLIRequest(verb: .open, agent: "claude-code"))
-        XCTAssertFalse(response.ok)
-        XCTAssertTrue(response.error?.contains("--cwd") == true)
-        XCTAssertTrue(response.error?.contains("claude-code") == true, "the message must name the template that lacks one")
+        XCTAssertTrue(response.ok, "no directory named is a legitimate request: \(response.error ?? "")")
+
+        let session = try XCTUnwrap(target.activeSession)
+        XCTAssertEqual(response.tabId, session.id.uuidString)
+        XCTAssertEqual(session.agent.id, "claude-code")
+        XCTAssertEqual(
+            engine(session).startedConfigs.first?.workingDirectory, dirB,
+            "the tab inherits the active workspace's own directory"
+        )
+    }
+
+    /// A directory that WAS named still has to be usable — dropping the
+    /// required-ness of `--cwd` must not drop its validation.
+    func testOpenStillValidatesADirectoryThatWasNamed() async {
+        let controller = makeController(stores: [makeStore()])
+        let relative = await respond(controller, KookyCLIRequest(verb: .open, cwd: "relative/path"))
+        XCTAssertFalse(relative.ok)
+        XCTAssertTrue(relative.error?.contains("absolute") == true)
+
+        let missing = await respond(controller, KookyCLIRequest(verb: .open, cwd: "/tmp/kooky-cli-test-definitely-missing"))
+        XCTAssertFalse(missing.ok)
+        XCTAssertTrue(missing.error?.contains("does not exist") == true)
     }
 
     /// The bound has to be a RACE. A blocked synchronous `realpath`/`stat`

@@ -113,7 +113,7 @@ AI コーディングのために作られた、ミニマルでモダンな macO
 ```sh
 kooky-cli open --cwd ~/Github/vibex -e "npx @deepseek-ai/dsh web"   # 新しい tab: そこへ cd してコマンドを実行
 kooky-cli open --cwd ~/Github/vibex --agent claude-code             # 新しい tab で agent テンプレートを起動
-kooky-cli open --agent my-terminal-preset                           # Terminal preset は自身のディレクトリを持つ
+kooky-cli open --agent claude-code                                  # --cwd なし: アクティブな workspace のディレクトリで開く
 kooky-cli open --agent preset-1                                     # Terminal preset は自前のディレクトリを持つ
 kooky-cli resume --agent codex --id <会話id>                        # kooky://resume ディープリンクと同じ意味論
 kooky-cli list --json                                               # ウィンドウ → workspace → tab のツリーと id

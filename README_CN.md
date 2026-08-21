@@ -113,7 +113,7 @@
 ```sh
 kooky-cli open --cwd ~/Github/vibex -e "npx @deepseek-ai/dsh web"   # 新 tab：cd 过去并执行命令
 kooky-cli open --cwd ~/Github/vibex --agent claude-code             # 新 tab 里启动一个 agent 模板
-kooky-cli open --agent my-terminal-preset                           # 终端预设自带目录，可省略 --cwd
+kooky-cli open --agent claude-code                                  # 不给 --cwd：开在当前 workspace 所在目录
 kooky-cli open --agent preset-1                                     # Terminal 预设自带目录，可以不给 --cwd
 kooky-cli resume --agent codex --id <会话id>                        # 与 kooky://resume 深层链接同语义
 kooky-cli list --json                                               # 窗口 → workspace → tab 树，带 id

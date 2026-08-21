@@ -54,12 +54,25 @@ final class CLICommandTests: XCTestCase {
         )
     }
 
-    func testParseOpenStillNeedsCwdWithNothingElseToGoOn() {
-        XCTAssertNil(parsed(["open"]), "bare `open` must be refused")
-        XCTAssertTrue(parseError(["open"])?.contains("--cwd") == true)
-        // `-e` says WHAT to run, never WHERE — it can't stand in for --cwd.
-        XCTAssertNil(parsed(["open", "-e", "ls"]), "`open -e` without --cwd must be refused")
-        XCTAssertTrue(parseError(["open", "-e", "ls"])?.contains("--cwd") == true)
+    /// `--cwd` is optional (issue #56): with no directory named, the tab
+    /// opens wherever the active workspace already is — so bare `open` means
+    /// "give me a new tab", and `open -e` means "run this here".
+    func testParseOpenWithoutCwdIsAllowed() {
+        switch KookyHookKit.parseCLICommand(["open"]) {
+        case .success(.open(let cwd, let command, let agent)):
+            XCTAssertNil(cwd)
+            XCTAssertNil(command)
+            XCTAssertNil(agent)
+        case .success(let other): XCTFail("unexpected \(other)")
+        case .failure(let error): XCTFail("bare open should parse: \(error.message)")
+        }
+        switch KookyHookKit.parseCLICommand(["open", "-e", "ls"]) {
+        case .success(.open(let cwd, let command, _)):
+            XCTAssertNil(cwd)
+            XCTAssertEqual(command, "ls")
+        case .success(let other): XCTFail("unexpected \(other)")
+        case .failure(let error): XCTFail("open -e should parse: \(error.message)")
+        }
     }
 
     func testParseResume() {
@@ -115,7 +128,7 @@ final class CLICommandTests: XCTestCase {
     }
 
     func testParseFailsOnMissingRequiredFlags() {
-        XCTAssertNotNil(parseError(["open"]))
+        // NB: `open` has no required flags — see testParseOpenWithoutCwdIsAllowed.
         XCTAssertNotNil(parseError(["resume", "--agent", "claude-code"]))
         XCTAssertNotNil(parseError(["resume", "--id", "abc"]))
         XCTAssertNotNil(parseError(["focus"]))
@@ -205,13 +218,24 @@ final class CLICommandTests: XCTestCase {
     /// CLI's own working directory once the path is absolutized — by then it
     /// is a valid path and every downstream emptiness check is too late.
     func testBlankFlagValuesAreTreatedAsAbsent() {
+        // The point of folding blanks: `--cwd "$MAYBE"` with an unset
+        // variable must read as "no directory given", never as the directory
+        // the CLI happens to be running in (which is what path
+        // normalization would otherwise turn "" into).
         switch KookyHookKit.parseCLICommand(["open", "--cwd", ""]) {
-        case .success(let command): XCTFail("expected a refusal, got \(command)")
-        case .failure(let error): XCTAssertTrue(error.message.contains("--cwd"))
+        case .success(.open(let cwd, _, _)): XCTAssertNil(cwd)
+        case .success(let other): XCTFail("unexpected \(other)")
+        case .failure(let error): XCTFail("blank --cwd should fold, not fail: \(error.message)")
         }
         switch KookyHookKit.parseCLICommand(["open", "--cwd", "   "]) {
-        case .success(let command): XCTFail("whitespace is blank too, got \(command)")
-        case .failure: break
+        case .success(.open(let cwd, _, _)): XCTAssertNil(cwd, "whitespace is blank too")
+        case .success(let other): XCTFail("unexpected \(other)")
+        case .failure(let error): XCTFail("blank --cwd should fold, not fail: \(error.message)")
+        }
+        // A flag that IS required still refuses a blank value.
+        switch KookyHookKit.parseCLICommand(["resume", "--agent", "", "--id", "abc"]) {
+        case .success(let command): XCTFail("expected a refusal, got \(command)")
+        case .failure(let error): XCTAssertTrue(error.message.contains("--agent"))
         }
         // resume's cwd is optional, so blank must fold to nil rather than
         // spawn the conversation in whatever directory the CLI ran from.
