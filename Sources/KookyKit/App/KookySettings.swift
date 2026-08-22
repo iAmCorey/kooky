@@ -91,7 +91,10 @@ enum KookySettings {
                 for: rawTheme,
                 in: KookyTerminalTheme.availableThemes()
             ) {
-                if theme.isBundled {
+                // Scanned user themes keep their original lines so selection colors and
+                // other theme settings are applied directly; unknown names stay delegated
+                // to Ghostty's own theme lookup below.
+                if theme.isBundled || !theme.lines.isEmpty {
                     lines.append(contentsOf: theme.lines)
                 } else {
                     lines.append(contentsOf: formatGhosttyLines(key: "theme", value: theme.storedValue))
