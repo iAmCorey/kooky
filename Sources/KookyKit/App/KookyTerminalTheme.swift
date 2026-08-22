@@ -739,7 +739,8 @@ struct KookyTerminalTheme: Identifiable, Hashable {
             return KookyTerminalTheme(
                 userThemeName: url.lastPathComponent,
                 background: values["background"],
-                foreground: values["foreground"]
+                foreground: values["foreground"],
+                lines: text.split(whereSeparator: \.isNewline).map(String.init)
             )
         }
     }
@@ -775,13 +776,13 @@ struct KookyTerminalTheme: Identifiable, Hashable {
         }
     }
 
-    private init(userThemeName: String, background: String?, foreground: String?) {
+    private init(userThemeName: String, background: String?, foreground: String?, lines: [String]) {
         self.id = "ghostty-user:\(userThemeName)"
         self.title = userThemeName
         self.storedValue = userThemeName
         self.backgroundHex = background ?? "#282C34"
         self.foregroundHex = foreground ?? "#EFEFF1"
-        self.lines = []
+        self.lines = lines
         self.source = .ghosttyUser
     }
 
