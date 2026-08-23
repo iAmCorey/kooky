@@ -242,6 +242,15 @@
 "Reveal in Finder" = "在 Finder 中显示";
 "Close Other Workspaces" = "关闭其他工作区";
 "Duplicate Workspace" = "复制工作区";
+"Pin Workspace" = "固定工作区";
+"Unpin Workspace" = "取消固定工作区";
+"Pin workspace" = "固定工作区";
+"Unpin workspace" = "取消固定工作区";
+"Pinned — no terminals. Click to reopen one." = "已固定 — 无终端。点击可重新打开一个。";
+"No terminal" = "无终端";
+"Click to open a terminal" = "点击打开一个终端";
+"Pinned workspace — no terminal open" = "已固定工作区 — 未打开终端";
+"Click to open a new terminal" = "点击打开新终端";
 "Create Worktree…" = "创建工作树…";
 "Go to Source Workspace" = "前往源工作区";
 "Custom Tag…" = "自定义标签…";

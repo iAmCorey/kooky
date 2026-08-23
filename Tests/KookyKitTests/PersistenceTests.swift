@@ -211,4 +211,54 @@ final class PersistenceTests: XCTestCase {
         XCTAssertNil(decoded.worktreeBranch)
         XCTAssertNil(decoded.worktreePath)
     }
+
+    func testPersistedWorkspaceRoundtripsIsPinned() throws {
+        let dir = "/tmp/pinned"
+        let tab = PersistedTab(id: UUID(), agentId: "terminal", currentDirectoryPath: dir)
+        let pane = PersistedPane(id: UUID(), tabs: [tab], activeTabId: tab.id)
+        let node = PersistedPaneNode(id: pane.id, kind: .pane(pane))
+        let ws = PersistedWorkspace(
+            id: UUID(), workingDirectoryPath: dir, root: node, isPinned: true
+        )
+        let decoded = try JSONDecoder().decode(
+            PersistedWorkspace.self, from: try JSONEncoder().encode(ws)
+        )
+        XCTAssertEqual(decoded.isPinned, true)
+    }
+
+    func testPersistedWorkspaceOmitsIsPinnedKeyWhenUnpinned() throws {
+        // A never-pinned workspace must NOT write the key — encodeIfPresent
+        // keeps old kooky versions from choking on the field they don't know.
+        let dir = "/tmp/unpinned"
+        let tab = PersistedTab(id: UUID(), agentId: "terminal", currentDirectoryPath: dir)
+        let pane = PersistedPane(id: UUID(), tabs: [tab], activeTabId: tab.id)
+        let node = PersistedPaneNode(id: pane.id, kind: .pane(pane))
+        let ws = PersistedWorkspace(id: UUID(), workingDirectoryPath: dir, root: node)
+        let data = try JSONEncoder().encode(ws)
+        XCTAssertFalse(
+            String(decoding: data, as: UTF8.self).contains("isPinned"),
+            "unpinned must encode as an absent key"
+        )
+        let decoded = try JSONDecoder().decode(PersistedWorkspace.self, from: data)
+        XCTAssertNil(decoded.isPinned)
+    }
+
+    func testPersistedWorkspaceDecodesNilWhenIsPinnedMissing() throws {
+        // Pre-pin state.json files omit the key — decode must succeed and
+        // leave isPinned nil so the workspace restores unpinned.
+        let json = """
+        {
+          "id": "\(UUID().uuidString)",
+          "workingDirectoryPath": "/tmp",
+          "root": {
+            "id": "\(UUID().uuidString)",
+            "kind": { "pane": { "id": "\(UUID().uuidString)", "tabs": [] } }
+          }
+        }
+        """
+        let decoded = try JSONDecoder().decode(
+            PersistedWorkspace.self, from: Data(json.utf8)
+        )
+        XCTAssertNil(decoded.isPinned)
+    }
 }

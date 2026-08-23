@@ -511,13 +511,14 @@ struct SidebarView: View {
                         let canCreate = canCreateWorktree(from: workspace)
                         let goToSource: (() -> Void)? = workspace.worktreeParentId
                             .flatMap { id in store.workspaces.first { $0.id == id } }
-                            .map { parent in { store.activateWorkspace(parent) } }
+                            .map { parent in { store.activateOrRestoreWorkspace(parent) } }
                         DraggableWorkspaceRow(
                             workspace: workspace,
                             store: store,
                             myIndex: index,
                             isCompact: isCompact,
                             draggingId: $draggingWorkspaceId,
+                            onTogglePinned: { store.togglePinned(workspace) },
                             onCreateWorktree: canCreate ? { presentCreateWorktree(workspace) } : nil,
                             onGoToSource: goToSource
                         )
@@ -570,6 +571,7 @@ struct SidebarView: View {
             myIndex: parentIndex,
             isCompact: false,
             draggingId: $draggingWorkspaceId,
+            onTogglePinned: { store.togglePinned(parent) },
             disclosure: hasWorktrees
                 ? SidebarWorkspaceRow.WorktreeDisclosure(
                     isCollapsed: isCollapsed,
@@ -586,13 +588,14 @@ struct SidebarView: View {
                     isActive: worktree.id == store.activeWorkspaceId,
                     isCompact: false,
                     canCloseOthers: store.workspaces.count > 1,
-                    onActivate: { store.activateWorkspace(worktree) },
+                    onActivate: { store.activateOrRestoreWorkspace(worktree) },
                     onClose: { store.requestCloseWorkspace(worktree) },
                     onCloseOthers: { store.closeOtherWorkspaces(keeping: worktree) },
                     onDuplicate: { store.duplicateWorkspace(worktree) },
                     onRename: { store.renameWorkspace(worktree, to: $0) },
                     onSetTag: { store.setTag($0, for: worktree) },
-                    onGoToSource: { store.activateWorkspace(parent) }
+                    onTogglePinned: { store.togglePinned(worktree) },
+                    onGoToSource: { store.activateOrRestoreWorkspace(parent) }
                 )
                 // Source-list hierarchy should be visible without decoding a
                 // badge: worktree children sit one rhythm step inside their
@@ -650,6 +653,7 @@ private struct DraggableWorkspaceRow: View {
     let myIndex: Int
     let isCompact: Bool
     @Binding var draggingId: UUID?
+    let onTogglePinned: () -> Void
     /// Non-nil only for source workspaces that own at least one worktree.
     /// Worktree rows themselves render via `SidebarWorkspaceRow` directly,
     /// without this wrapper, so they don't pick up drag/drop handlers.
@@ -673,12 +677,13 @@ private struct DraggableWorkspaceRow: View {
             isActive: workspace.id == store.activeWorkspaceId,
             isCompact: isCompact,
             canCloseOthers: store.workspaces.count > 1,
-            onActivate: { store.activateWorkspace(workspace) },
+            onActivate: { store.activateOrRestoreWorkspace(workspace) },
             onClose: { store.requestCloseWorkspace(workspace) },
             onCloseOthers: { store.closeOtherWorkspaces(keeping: workspace) },
             onDuplicate: { store.duplicateWorkspace(workspace) },
             onRename: { store.renameWorkspace(workspace, to: $0) },
             onSetTag: { store.setTag($0, for: workspace) },
+            onTogglePinned: onTogglePinned,
             disclosure: disclosure,
             onCreateWorktree: onCreateWorktree,
             onGoToSource: onGoToSource

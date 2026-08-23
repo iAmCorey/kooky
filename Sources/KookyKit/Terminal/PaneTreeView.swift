@@ -156,7 +156,11 @@ private struct PaneView: View {
                 Rectangle().fill(Theme.chromeSeparator).frame(height: 1)
                 PaneStatusBar(session: active, paneId: pane.id, workspace: workspace, store: store)
             } else {
-                Color.clear
+                // A pinned workspace keeps its (empty) pane after its last
+                // terminal closes — show what that means and make the empty
+                // surface clickable so the workspace is one click from usable
+                // again, instead of a dead blank.
+                EmptyPanePlaceholder(workspace: workspace, store: store)
             }
         }
         .opacity(paneOpacity)
@@ -211,6 +215,40 @@ private struct PaneView: View {
                     if !engine.suspendsSizePropagation { engine.flushSize() }
                 }
             }
+        }
+    }
+}
+
+/// Rendered in a pane whose tab bar is empty — the shape a pinned workspace
+/// keeps after its last terminal closes. Explains the blank surface and makes
+/// it clickable: opening a terminal re-homes the workspace in one gesture,
+/// matching the sidebar row's activate-or-restore behaviour.
+private struct EmptyPanePlaceholder: View {
+    let workspace: Workspace
+    let store: WorkspaceStore
+
+    var body: some View {
+        VStack(spacing: 8) {
+            Image(systemName: "rectangle.stack.badge.plus")
+                .font(.system(size: 24, weight: .regular))
+                .foregroundStyle(Theme.chromeMuted.opacity(0.55))
+            Text(String(localized: "No terminal", bundle: .kookyResources))
+                .font(Theme.display(12.5, weight: .medium))
+                .foregroundStyle(Theme.chromeMuted.opacity(0.85))
+            Text(String(localized: "Click to open a terminal", bundle: .kookyResources))
+                .font(Theme.mono(10.5))
+                .foregroundStyle(Theme.chromeMuted.opacity(0.6))
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .contentShape(Rectangle())
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(String(localized: "Pinned workspace — no terminal open", bundle: .kookyResources))
+        .accessibilityHint(String(localized: "Click to open a new terminal", bundle: .kookyResources))
+        .accessibilityAddTraits(.isButton)
+        .onTapGesture {
+            let session = store.addTab(in: workspace)
+            store.activateTab(session, in: workspace)
+            session.engine.view.window?.makeFirstResponder(session.engine.view)
         }
     }
 }
@@ -1845,9 +1883,9 @@ private struct SplitContainer: View {
                                 second: second,
                                 renderedFraction: fraction
                             ))
-                    } else {
-                        VStack(spacing: 0) {
-                            PaneTreeView(node: first, workspace: workspace, store: store)
+                        } else {
+                            VStack(spacing: 0) {
+                                PaneTreeView(node: first, workspace: workspace, store: store)
                                 .frame(height: firstSize)
                                 .offset(x: firstPushX, y: firstPushY)
                                 .clipped()

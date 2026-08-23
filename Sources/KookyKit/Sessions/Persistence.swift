@@ -66,6 +66,10 @@ struct PersistedWorkspace: Codable, Equatable {
     var tagPreset: String?
     var tagCustomHex: String?
     var tagName: String?
+    /// Whether the user pinned this workspace to survive closing its last
+    /// terminal. Optional so pre-pin state.json files still decode; nil
+    /// restores as unpinned.
+    var isPinned: Bool?
 
     @MainActor
     init(_ ws: Workspace) {
@@ -81,9 +85,12 @@ struct PersistedWorkspace: Codable, Equatable {
         self.tagPreset = ws.tag?.color.preset?.rawValue
         self.tagCustomHex = ws.tag?.color.customHex
         self.tagName = ws.tag?.name
+        // Only write the key when pinned so a never-pinned workspace's
+        // state.json line stays absent.
+        self.isPinned = ws.isPinned ? true : nil
     }
 
-    init(id: UUID, workingDirectoryPath: String, root: PersistedPaneNode, activePaneId: UUID? = nil, customTitle: String? = nil, worktreeParentId: UUID? = nil, worktreeBranch: String? = nil, worktreePath: String? = nil, sshRemoteHost: String? = nil, tagPreset: String? = nil, tagCustomHex: String? = nil, tagName: String? = nil) {
+    init(id: UUID, workingDirectoryPath: String, root: PersistedPaneNode, activePaneId: UUID? = nil, customTitle: String? = nil, worktreeParentId: UUID? = nil, worktreeBranch: String? = nil, worktreePath: String? = nil, sshRemoteHost: String? = nil, tagPreset: String? = nil, tagCustomHex: String? = nil, tagName: String? = nil, isPinned: Bool? = nil) {
         self.id = id
         self.workingDirectoryPath = workingDirectoryPath
         self.root = root
@@ -96,11 +103,12 @@ struct PersistedWorkspace: Codable, Equatable {
         self.tagPreset = tagPreset
         self.tagCustomHex = tagCustomHex
         self.tagName = tagName
+        self.isPinned = isPinned
     }
 
     private enum CodingKeys: String, CodingKey {
         case id, workingDirectoryPath, root, activePaneId, customTitle
-        case worktreeParentId, worktreeBranch, worktreePath, sshRemoteHost, tagPreset, tagCustomHex, tagName
+        case worktreeParentId, worktreeBranch, worktreePath, sshRemoteHost, tagPreset, tagCustomHex, tagName, isPinned
         // Legacy keys
         case tabs, activeTabId
     }
@@ -119,6 +127,7 @@ struct PersistedWorkspace: Codable, Equatable {
         try c.encodeIfPresent(tagPreset, forKey: .tagPreset)
         try c.encodeIfPresent(tagCustomHex, forKey: .tagCustomHex)
         try c.encodeIfPresent(tagName, forKey: .tagName)
+        try c.encodeIfPresent(isPinned, forKey: .isPinned)
     }
 
     init(from decoder: Decoder) throws {
@@ -133,6 +142,7 @@ struct PersistedWorkspace: Codable, Equatable {
         tagPreset = try c.decodeIfPresent(String.self, forKey: .tagPreset)
         tagCustomHex = try c.decodeIfPresent(String.self, forKey: .tagCustomHex)
         tagName = try c.decodeIfPresent(String.self, forKey: .tagName)
+        isPinned = try c.decodeIfPresent(Bool.self, forKey: .isPinned)
         if let root = try c.decodeIfPresent(PersistedPaneNode.self, forKey: .root) {
             self.root = root
             self.activePaneId = try c.decodeIfPresent(UUID.self, forKey: .activePaneId)

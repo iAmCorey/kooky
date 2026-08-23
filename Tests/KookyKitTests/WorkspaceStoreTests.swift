@@ -1025,13 +1025,81 @@ final class WorkspaceStoreTests: XCTestCase {
         XCTAssertEqual(engine(second).terminateCount, 1)
     }
 
-    func testClosingLastTabClosesPaneAndWorkspaceWhenSinglePane() {
+    func testPinnedWorkspaceSurvivesClosingLastTab() {
+        // The whole feature: pin a workspace, close its last terminal — the
+        // row stays in the sidebar as an empty workspace instead of vanishing.
         let store = makeStore()
         let ws = store.workspaces[0]
+        store.togglePinned(ws)
         let pane = firstPane(ws)
         store.closeTab(pane.tabs[0], in: ws)
-        XCTAssertTrue(store.workspaces.isEmpty)
-        XCTAssertNil(store.activeWorkspaceId)
+        XCTAssertTrue(store.workspaces.contains { $0.id == ws.id },
+                      "pinned workspace must survive closing its last tab")
+        XCTAssertTrue(ws.hasNoTabs)
+        XCTAssertNil(ws.activePaneId)
+    }
+
+    func testUnpinEmptyPinnedWorkspaceClosesIt() {
+        // A pinned-empty workspace exists only because it was pinned — the
+        // only way out is unpinning, which must close it so the sidebar can't
+        // strand a permanent blank row.
+        let store = makeStore()
+        let ws = store.workspaces[0]
+        store.togglePinned(ws)
+        store.closeTab(firstPane(ws).tabs[0], in: ws)
+        XCTAssertTrue(ws.hasNoTabs)
+        store.togglePinned(ws)
+        XCTAssertFalse(store.workspaces.contains { $0.id == ws.id },
+                       "unpinning an empty workspace must delete it")
+    }
+
+    func testActivateOrRestoreWorkspaceReopensPinnedEmpty() {
+        // Clicking the sidebar row of a pinned-empty workspace opens a fresh
+        // terminal and activates it — one click back to usable.
+        let store = makeStore()
+        let ws = store.workspaces[0]
+        store.togglePinned(ws)
+        store.closeTab(firstPane(ws).tabs[0], in: ws)
+        XCTAssertTrue(ws.hasNoTabs)
+        store.activateOrRestoreWorkspace(ws)
+        XCTAssertFalse(ws.hasNoTabs, "row click must reopen a terminal")
+        XCTAssertEqual(store.activeWorkspaceId, ws.id)
+    }
+
+    func testCloseLastTabOfPinnedWorktreeKeepsWorkspace() {
+        // A pinned worktree must skip the worktree-removal confirm sheet
+        // (a directory-level decision) and keep its empty workspace — same
+        // survival as a plain pinned workspace.
+        let store = makeStore()
+        let source = store.workspaces[0]
+        let wt = store.addWorkspace(
+            workingDirectory: URL(fileURLWithPath: "/tmp/projectA-feat-x"),
+            worktreeParent: source, worktreeBranch: "feat-x"
+        )
+        store.togglePinned(wt)
+        let onlyTab = firstPane(wt).tabs[0]
+        store.closeTab(onlyTab, in: wt)
+        XCTAssertTrue(store.workspaces.contains { $0.id == wt.id })
+        XCTAssertNil(store.pendingRemovalRequest,
+                     "pinned worktree must not park a removal request")
+        XCTAssertTrue(wt.hasNoTabs)
+    }
+
+    func testRestoreBackfillsIsPinned() {
+        // isPinned persists and restores; a nil on disk (pre-pin state.json)
+        // restores as unpinned.
+        let dir = "/tmp/restore-pin"
+        let tab = PersistedTab(id: UUID(), agentId: "terminal", currentDirectoryPath: dir)
+        let pane = PersistedPane(id: UUID(), tabs: [tab], activeTabId: tab.id)
+        let node = PersistedPaneNode(id: pane.id, kind: .pane(pane))
+        let id = UUID()
+        let state = PersistedState(
+            workspaces: [PersistedWorkspace(id: id, workingDirectoryPath: dir, root: node, isPinned: true)],
+            activeWorkspaceId: id, sidebarMode: nil, rightSidebarMode: nil,
+            sidebarContent: nil, rightSidebarContent: nil, sidebarWidth: nil, collapsedInfoSections: nil
+        )
+        let store = makeStore(initial: state)
+        XCTAssertEqual(store.workspaces.first?.isPinned, true)
     }
 
     func testClosingMiddleWorkspaceActivatesNextNeighbor() {

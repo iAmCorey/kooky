@@ -854,6 +854,31 @@ final class WorkspaceStore {
         scheduleSave()
     }
 
+    /// Activate `workspace`, opening a fresh terminal first when it has none —
+    /// a pinned workspace whose last tab was closed would otherwise land the
+    /// user on a blank pane with nothing to interact with. The sidebar's row
+    /// click routes through here (not `activateWorkspace`) so a pinned-empty
+    /// workspace is always one click from being usable again.
+    func activateOrRestoreWorkspace(_ workspace: Workspace) {
+        if workspace.hasNoTabs {
+            addTab(in: workspace)
+        }
+        activateWorkspace(workspace)
+    }
+
+    /// Flip the workspace's pin. A pinned workspace survives closing its last
+    /// terminal (see `closePane`); unpinning an empty one — which exists only
+    /// because it was pinned — closes it, so the sidebar can't strand a
+    /// permanent blank row with no path back.
+    func togglePinned(_ workspace: Workspace) {
+        workspace.isPinned.toggle()
+        if !workspace.isPinned, workspace.hasNoTabs {
+            closeWorkspace(workspace)
+            return
+        }
+        scheduleSave()
+    }
+
     @discardableResult
     func duplicateWorkspace(_ workspace: Workspace) -> Workspace {
         addWorkspace(workingDirectory: workspace.workingDirectory)
@@ -1280,7 +1305,7 @@ final class WorkspaceStore {
         if pane.activeTabId == session.id {
             let next = pane.tabs[min(idx, pane.tabs.count - 1)]
             pane.activeTabId = next.id
-            if workspace.activePane?.id == pane.id, workspace.workingDirectory != next.currentDirectory {
+            if workspace.activePane?.id == pane.id, !workspace.isPinned, workspace.workingDirectory != next.currentDirectory {
                 workspace.workingDirectory = next.currentDirectory
             }
         }
@@ -1298,13 +1323,14 @@ final class WorkspaceStore {
         // Promoting to active mirrors `activateTab` so the sidebar title and
         // the next tab's spawn cwd follow the new focus without waiting for
         // the next OSC 7.
-        if workspace.workingDirectory != session.currentDirectory {
+        if !workspace.isPinned, workspace.workingDirectory != session.currentDirectory {
             workspace.workingDirectory = session.currentDirectory
         }
         invalidateStaleFileTreeRootOverride()
         scheduleSave()
     }
 
+    /// One-shot drop handler
     /// One-shot drop handler for tab reorder gestures. Dispatches three ways:
     /// a same-pane index reorder when source == dest, a cross-pane session
     /// move within this window, or — when the session isn't in this window at
@@ -1418,7 +1444,11 @@ final class WorkspaceStore {
         // detachSession → closePane → closeWorkspace, which would bypass
         // the confirm sheet. Reroute here before any state mutates so
         // the sheet's cancel path can keep the tab open.
-        if workspace.closingLastTabCascadesIntoWorktreeRemoval {
+        // A pinned worktree keeps its workspace after the last tab closes, so
+        // the worktree-removal confirm sheet (a directory-level decision the
+        // pinned flow must not silently trigger) doesn't apply — let the
+        // cascade through closePane, which preserves the empty workspace.
+        if !workspace.isPinned && workspace.closingLastTabCascadesIntoWorktreeRemoval {
             requestCloseWorkspace(workspace)
             return
         }
@@ -1515,7 +1545,7 @@ final class WorkspaceStore {
             }
             changed = true
         }
-        if workspace.workingDirectory != session.currentDirectory {
+        if !workspace.isPinned, workspace.workingDirectory != session.currentDirectory {
             workspace.workingDirectory = session.currentDirectory
             changed = true
         }
@@ -1609,7 +1639,7 @@ final class WorkspaceStore {
         // Worktree last-pane cascade — route through the confirm sheet
         // before any engines get terminated, so a sheet cancel leaves
         // the user's work intact.
-        if leafNode === workspace.root && workspace.worktreeParentId != nil {
+        if !workspace.isPinned && leafNode === workspace.root && workspace.worktreeParentId != nil {
             requestCloseWorkspace(workspace)
             return
         }
@@ -1628,6 +1658,22 @@ final class WorkspaceStore {
         // same `pane.id`. Comparing ids would falsely match a leaf child whose
         // pane shares an id with the root and route through `closeWorkspace`.
         if leafNode === workspace.root {
+            // A pinned workspace survives closing its last terminal: keep the
+            // now-empty workspace in the sidebar (with its cwd, custom title,
+            // and tag) instead of removing it. Unpinning an empty one deletes
+            // it again (see togglePinned); clicking its row re-opens a tab
+            // (see activateOrRestoreWorkspace).
+            if workspace.isPinned {
+                workspace.zoomedPaneId = nil
+                // Deliberately transient empty state: no active pane until
+                // `activateOrRestoreWorkspace` opens a tab and re-activates.
+                // `activePane` falls back to `root.firstPane` meanwhile, which
+                // for a pinned-empty workspace has no tabs (harmless no-op).
+                workspace.activePaneId = nil
+                invalidateStaleFileTreeRootOverride()
+                scheduleSave()
+                return
+            }
             closeWorkspace(workspace)
             return
         }
@@ -1637,6 +1683,7 @@ final class WorkspaceStore {
         if workspace.activePaneId == pane.id {
             workspace.activePaneId = info.sibling.firstPane?.id
             if let session = workspace.activeSession,
+               !workspace.isPinned,
                workspace.workingDirectory != session.currentDirectory {
                 workspace.workingDirectory = session.currentDirectory
             }
@@ -1657,7 +1704,7 @@ final class WorkspaceStore {
             }
             changed = true
         }
-        if let session = pane.activeTab, workspace.workingDirectory != session.currentDirectory {
+        if let session = pane.activeTab, !workspace.isPinned, workspace.workingDirectory != session.currentDirectory {
             workspace.workingDirectory = session.currentDirectory
             changed = true
         }
@@ -1857,6 +1904,7 @@ final class WorkspaceStore {
             workspace.worktreeBranch = ws.worktreeBranch
             workspace.worktreePath = ws.worktreePath.map { URL(fileURLWithPath: $0) }
             workspace.sshRemoteHost = sshHost
+            workspace.isPinned = ws.isPinned ?? false
             // Exactly one of the two colour fields is ever written, so each
             // maps to its own case. An unknown preset (a colour a newer kooky
             // added, seen by an older build) restores untagged rather than
@@ -2075,7 +2123,7 @@ final class WorkspaceStore {
                 session.currentDirectory = url
             }
             var workspaceCwdChanged = false
-            if let workspace, workspace.activeSession?.id == session.id, workspace.workingDirectory.path != path {
+            if let workspace, workspace.activeSession?.id == session.id, !workspace.isPinned, workspace.workingDirectory.path != path {
                 workspace.workingDirectory = url
                 workspaceCwdChanged = true
             }

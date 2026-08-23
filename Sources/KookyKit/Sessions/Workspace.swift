@@ -75,6 +75,22 @@ final class Workspace: Identifiable {
     /// rather than failing the restore.
     var tag: WorkspaceTag? = nil
 
+    /// User's "keep this workspace around" flag. A pinned workspace survives
+    /// closing its last terminal (see `WorkspaceStore.closePane`) as an empty
+    /// workspace so the sidebar row — and its cwd, custom title, and tag —
+    /// stays put; unpinning an empty one deletes it (see
+    /// `WorkspaceStore.togglePinned`). Persisted; restored as false for
+    /// state.json files written before the field existed.
+    var isPinned = false
+
+    /// True when every pane's tab bar is empty — the shape a pinned workspace
+    /// keeps after its last terminal closes. Pinned-empty workspaces are the
+    /// only ones with no tabs: every other path through `closePane` removes
+    /// the workspace.
+    var hasNoTabs: Bool {
+        root.allPanes.allSatisfy { $0.tabs.isEmpty }
+    }
+
     /// Single source of truth for "where the worktree actually lives on
     /// disk." For worktree workspaces `worktreePath` wins (pinned at
     /// create time); upgraded state.json files written before the field
@@ -137,6 +153,12 @@ final class Workspace: Identifiable {
             if titleLine == host { titleLine = "ssh \(host)" } else { locationLines = ["ssh \(host)"] }
         } else {
             locationLines = [workingDirectory.path]
+        }
+        // A pinned workspace whose last terminal closed keeps its row — spell
+        // out what that means so the empty surface doesn't read as a stale
+        // or broken entry.
+        if isPinned && hasNoTabs {
+            locationLines.append(String(localized: "Pinned — no terminals. Click to reopen one.", bundle: .kookyResources))
         }
         // Naming the agents only earns a line when the row shows a `+N` badge:
         // the badge says how many but never who.

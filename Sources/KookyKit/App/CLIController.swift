@@ -223,7 +223,9 @@ final class KookyCLIController {
         // a flow a background CLI call can't honestly drive (the sheet may
         // not even mount). Refuse loudly instead of reporting a close that
         // didn't happen. Same predicate closeTab's reroute uses.
-        if hit.workspace.closingLastTabCascadesIntoWorktreeRemoval {
+        // A pinned worktree keeps its empty workspace instead of removing the
+        // worktree, so the close is safe for a background CLI call to drive.
+        if !hit.workspace.isPinned && hit.workspace.closingLastTabCascadesIntoWorktreeRemoval {
             return refuse("that tab is the last one of a worktree workspace — closing it removes the worktree, which needs in-app confirmation")
         }
         // Same semantics as the tab's own ✕ / ⌘W: the shared ConfirmCloseTab

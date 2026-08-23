@@ -207,6 +207,7 @@ struct SidebarWorkspaceRow: View {
     let onDuplicate: () -> Void
     let onRename: (String) -> Void
     let onSetTag: (WorkspaceTag?) -> Void
+    let onTogglePinned: () -> Void
     var disclosure: WorktreeDisclosure? = nil
     /// Non-nil for source (top-level, non-worktree) workspaces — the
     /// right-click menu surfaces a "Create Worktree…" entry that the
@@ -262,6 +263,12 @@ struct SidebarWorkspaceRow: View {
                 KookyMenuRow(title: "Duplicate Workspace") {
                     isContextMenuOpen = false
                     onDuplicate()
+                }
+                KookyMenuRow(title: workspace.isPinned
+                    ? String(localized: "Unpin Workspace", bundle: .kookyResources)
+                    : String(localized: "Pin Workspace", bundle: .kookyResources)) {
+                    isContextMenuOpen = false
+                    onTogglePinned()
                 }
                 if let onCreateWorktree {
                     KookyMenuRow(title: "Create Worktree…") {
@@ -385,6 +392,20 @@ struct SidebarWorkspaceRow: View {
                     .opacity(isHovered ? 1 : 0)
                     .allowsHitTesting(isHovered)
                 }
+                // Pin state stays visible off-hover (like the disclosure
+                // chevron) so pinned rows read at a glance; the unpinned pin
+                // appears only on hover like the other actions.
+                HoverableIconButton(
+                    systemName: workspace.isPinned ? "pin.fill" : "pin",
+                    fontSize: 10,
+                    size: Theme.chromeContextButtonSize,
+                    help: workspace.isPinned
+                        ? String(localized: "Unpin workspace", bundle: .kookyResources)
+                        : String(localized: "Pin workspace", bundle: .kookyResources),
+                    action: onTogglePinned
+                )
+                .opacity(isHovered ? 1 : (workspace.isPinned ? 0.48 : 0))
+                .allowsHitTesting(isHovered || workspace.isPinned)
                 ZStack {
                     if let dotColor {
                         Circle().fill(dotColor).frame(width: 6, height: 6)
@@ -422,6 +443,14 @@ struct SidebarWorkspaceRow: View {
                     .fill(dotColor)
                     .frame(width: 6, height: 6)
                     .offset(x: 3, y: -3)
+            }
+            // Pinned rows read at a glance in the narrow rail too — the only
+            // other affordance is the right-click menu, invisible off-hover.
+            if workspace.isPinned {
+                Image(systemName: "pin.fill")
+                    .font(.system(size: 8))
+                    .foregroundStyle(Theme.chromeMuted)
+                    .offset(x: -3, y: -1)
             }
         }
         // A 52pt compact rail centres this 20pt mark on the same x = 26pt
@@ -485,7 +514,7 @@ struct SidebarWorkspaceRow: View {
     /// close × slot so the trailing edge doesn't shift when a hover
     /// icon appears.
     private var trailingHoverMinWidth: CGFloat {
-        var width: CGFloat = 20
+        var width: CGFloat = 42
         if disclosure != nil { width += 22 }
         if onCreateWorktree != nil { width += 22 }
         return width
