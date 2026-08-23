@@ -125,13 +125,17 @@ struct SidebarView: View {
                     for engine in sidebarSuspendedEngines { engine.endSizePropagationSuspension() }
                     sidebarSuspendedEngines = []
                 }
+                store.endSidebarResize()
             }
     }
 
     private var resizeGesture: some Gesture {
-        DragGesture(minimumDistance: 0)
+        DragGesture(minimumDistance: 0, coordinateSpace: .global)
             .onChanged { value in
-                if resizeDragStartWidth == nil { resizeDragStartWidth = store.sidebarWidth }
+                if resizeDragStartWidth == nil {
+                    resizeDragStartWidth = store.sidebarWidth
+                    store.beginSidebarResize()
+                }
                 let proposed = (resizeDragStartWidth ?? store.sidebarWidth) + value.translation.width
                 let clamped = Self.clampWidth(proposed)
                 guard abs(clamped - store.sidebarWidth) > .ulpOfOne else { return }
@@ -155,6 +159,7 @@ struct SidebarView: View {
                     }
                     sidebarSuspendedEngines = []
                 }
+                store.endSidebarResize()
                 store.flushPersistence()
             }
     }

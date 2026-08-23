@@ -1311,27 +1311,27 @@ final class WorkspaceStoreTests: XCTestCase {
         XCTAssertNil(persistence.saved?.collapsedInfoSections)
     }
 
-    func testSidebarWidthPersistsAndRestoresClamped() throws {
+    func testRightSidebarWidthPersistsAndRestoresClamped() throws {
         let persistence = InMemoryPersistence()
         let store = WorkspaceStore(persistence: persistence, engineFactory: { TestEngine() })
         store.addWorkspace(workingDirectory: projectA)
-        store.sidebarWidth = 320
+        store.rightSidebarWidth = 320
         store.flushPersistence()
-        XCTAssertEqual(persistence.saved?.sidebarWidth, 320)
+        XCTAssertEqual(persistence.saved?.rightSidebarWidth, 320)
 
         let restored = makeStore(initial: persistence.saved)
-        XCTAssertEqual(restored.sidebarWidth, 320)
+        XCTAssertEqual(restored.rightSidebarWidth, 320)
 
         // A hand-edited / stale width restores clamped to the floor — the
-        // design width is the minimum, the sidebar only grows.
+        // design width is the minimum, the panel only grows.
         var narrow = persistence.saved!
-        narrow.sidebarWidth = 80
-        XCTAssertEqual(makeStore(initial: narrow).sidebarWidth, SidebarView.fullWidth)
+        narrow.rightSidebarWidth = 80
+        XCTAssertEqual(makeStore(initial: narrow).rightSidebarWidth, AgentOverviewSidebar.fullWidth)
 
-        // Pre-resizable-sidebar state files (no key) restore the default.
+        // Pre-resizable-panel state files (no key) restore the default.
         var legacy = persistence.saved!
-        legacy.sidebarWidth = nil
-        XCTAssertEqual(makeStore(initial: legacy).sidebarWidth, SidebarView.fullWidth)
+        legacy.rightSidebarWidth = nil
+        XCTAssertEqual(makeStore(initial: legacy).rightSidebarWidth, AgentOverviewSidebar.fullWidth)
     }
 
     func testRequestRenameActiveWorkspaceLeavesFilesMode() {
