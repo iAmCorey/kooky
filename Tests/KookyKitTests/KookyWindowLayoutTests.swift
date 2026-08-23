@@ -60,7 +60,8 @@ final class KookyWindowLayoutTests: XCTestCase {
             KookyWindowLayout.minimumWindowWidth(
                 leftMode: .hidden,
                 expandedLeftWidth: SidebarView.maxWidth,
-                rightMode: .hidden
+                rightMode: .hidden,
+                expandedRightWidth: AgentOverviewSidebar.maxWidth
             ),
             KookyWindowLayout.minimumChromeWidth
         )
@@ -71,7 +72,8 @@ final class KookyWindowLayoutTests: XCTestCase {
             KookyWindowLayout.minimumWindowWidth(
                 leftMode: .full,
                 expandedLeftWidth: SidebarView.fullWidth,
-                rightMode: .full
+                rightMode: .full,
+                expandedRightWidth: AgentOverviewSidebar.fullWidth
             ),
             SidebarView.fullWidth
                 + KookyWindowLayout.minimumTerminalWidth
@@ -85,11 +87,27 @@ final class KookyWindowLayoutTests: XCTestCase {
             KookyWindowLayout.minimumWindowWidth(
                 leftMode: .full,
                 expandedLeftWidth: SidebarView.maxWidth,
-                rightMode: .full
+                rightMode: .full,
+                expandedRightWidth: AgentOverviewSidebar.fullWidth
             ),
             SidebarView.maxWidth
                 + KookyWindowLayout.minimumTerminalWidth
                 + AgentOverviewSidebar.fullWidth
+                + 2 * KookyWindowLayout.separatorWidth
+        )
+    }
+
+    func testResizableRightSidebarRaisesWindowMinimum() {
+        XCTAssertEqual(
+            KookyWindowLayout.minimumWindowWidth(
+                leftMode: .full,
+                expandedLeftWidth: SidebarView.fullWidth,
+                rightMode: .full,
+                expandedRightWidth: AgentOverviewSidebar.maxWidth
+            ),
+            SidebarView.fullWidth
+                + KookyWindowLayout.minimumTerminalWidth
+                + AgentOverviewSidebar.maxWidth
                 + 2 * KookyWindowLayout.separatorWidth
         )
     }
@@ -99,7 +117,8 @@ final class KookyWindowLayoutTests: XCTestCase {
             KookyWindowLayout.minimumWindowWidth(
                 leftMode: .compact,
                 expandedLeftWidth: SidebarView.maxWidth,
-                rightMode: .compact
+                rightMode: .compact,
+                expandedRightWidth: AgentOverviewSidebar.maxWidth
             ),
             max(
                 KookyWindowLayout.minimumChromeWidth,
@@ -252,6 +271,7 @@ final class KookyWindowLayoutTests: XCTestCase {
             leftMode: store.sidebarMode,
             expandedLeftWidth: store.sidebarWidth,
             rightMode: store.rightSidebarMode,
+            expandedRightWidth: store.rightSidebarWidth,
             terminalWidth: KookyWindowLayout.minimumTerminalTreeWidth(for: workspace.root)
         )
         let expected = KookyWindowLayout.screenBoundMinimumWindowWidth(
@@ -268,6 +288,63 @@ final class KookyWindowLayoutTests: XCTestCase {
             store.terminate()
         }
         XCTAssertEqual(try XCTUnwrap(controller.window).frame.width, expected, accuracy: 1)
+    }
+
+
+    /// The one physical way the terminal could appear to move LEFT during a
+    /// rightward drag is the window itself expanding under `minSize`
+    /// enforcement. Pin down AppKit's actual behaviour: does assigning a
+    /// larger `minSize` immediately expand the window (and which edge does
+    /// the expansion anchor on)?
+    func testMinSizeAssignmentDoesNotMoveWindowDuringDrag() throws {
+        let store = WorkspaceStore(
+            persistence: InMemoryPersistence(),
+            engineFactory: { TestEngine() },
+            optionsProvider: { _ in nil },
+            resumeProvider: { true }
+        )
+        store.setSidebarMode(.full)
+        store.setRightSidebarMode(.full)
+        let controller = KookyWindowController(windowId: UUID(), store: store)
+        defer {
+            controller.close()
+            store.terminate()
+        }
+        let window = try XCTUnwrap(controller.window)
+
+        // Narrow the window below what the widest layout demands, then drive
+        // the full drag sequence: begin → per-frame width growth + minSize
+        // refresh → end. The window must not jump around while dragging.
+        let original = window.frame
+        let narrow = NSRect(
+            x: original.origin.x,
+            y: original.origin.y,
+            width: KookyWindowLayout.minimumChromeWidth + 20,
+            height: original.height
+        )
+        window.setFrame(narrow, display: false)
+        let originBefore = window.frame.origin
+        var maxOriginShift: CGFloat = 0
+        var expanded = false
+
+        store.beginSidebarResize()
+        var width = SidebarView.fullWidth
+        for _ in 0..<20 {
+            width += 4
+            store.sidebarWidth = width
+            controller.updateMinimumWindowSize(expandIfNeeded: false, animate: false)
+            if window.frame.width > narrow.width { expanded = true }
+            maxOriginShift = max(maxOriginShift, abs(window.frame.origin.x - originBefore.x))
+        }
+        store.endSidebarResize()
+
+        // The drag path must never `setFrame` the window — even when the
+        // window is narrower than the growing minimum (the pre-fix code
+        // expanded it every frame here, repainting the whole window per
+        // frame = the terminal jitter the user reported). `minSize` updates
+        // as a constraint; the frame itself stays put until the user resizes.
+        XCTAssertEqual(maxOriginShift, 0, accuracy: 0.5)
+        XCTAssertFalse(expanded, "drag must not expand the window frame")
     }
 
     func testHorizontalSplitAddsBothPaneWidthsAndDivider() {

@@ -18,6 +18,9 @@ struct PersistedState: Codable, Equatable {
     /// Optional so pre-resizable-sidebar state files decode (nil → the
     /// design width). Clamped on restore, not trusted from disk.
     var sidebarWidth: Double?
+    /// Optional so pre-resizable-right-panel state files decode (nil → the
+    /// design width). Clamped on restore, not trusted from disk.
+    var rightSidebarWidth: Double?
     /// Session Info's collapsed section titles. Optional so state files
     /// written before the inspector existed decode (nil → nothing collapsed);
     /// stored sorted so the saved file is byte-stable across saves.

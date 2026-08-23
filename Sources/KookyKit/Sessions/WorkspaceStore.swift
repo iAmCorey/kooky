@@ -143,11 +143,34 @@ final class WorkspaceStore {
         }
         scheduleSave()
     }
+
     /// Full-mode sidebar width, user-draggable from the trailing edge.
     /// `SidebarView.fullWidth` is the floor (the design width — the sidebar
     /// can only grow); compact stays fixed at `compactWidth` and hidden is
     /// hidden, so this only applies while expanded. Persisted per window.
     var sidebarWidth: CGFloat = SidebarView.fullWidth
+
+    /// Full-mode right panel (Agent Panel) width, user-draggable from its
+    /// leading edge. `AgentOverviewSidebar.fullWidth` is the floor (the
+    /// design width — the panel can only grow); compact stays fixed at
+    /// `compactWidth` and hidden is hidden, so this only applies while
+    /// expanded. Persisted per window.
+    var rightSidebarWidth: CGFloat = AgentOverviewSidebar.fullWidth
+
+    /// True while a sidebar resize drag is in flight (either side). The
+    /// terminal engines suspend size propagation until the drag ends, avoiding
+    /// a SIGWINCH storm while SwiftUI updates the live frame.
+    var isSidebarResizing = false
+
+    func beginSidebarResize() {
+        isSidebarResizing = true
+        scheduleSave()
+    }
+
+    func endSidebarResize() {
+        isSidebarResizing = false
+        scheduleSave()
+    }
     /// File-tree state for the sidebar's files mode. Store-owned (not view
     /// `@State`) because it holds kqueue fds needing explicit teardown and
     /// the sidebar unmounts whole while hidden — `terminate()` is the
@@ -1872,6 +1895,9 @@ final class WorkspaceStore {
         sidebarWidth = state.sidebarWidth
             .map { SidebarView.clampWidth(CGFloat($0)) }
             ?? SidebarView.fullWidth
+        rightSidebarWidth = state.rightSidebarWidth
+            .map { AgentOverviewSidebar.clampWidth(CGFloat($0)) }
+            ?? AgentOverviewSidebar.fullWidth
         collapsedInfoSections = Set(state.collapsedInfoSections ?? [])
     }
 
@@ -2560,6 +2586,7 @@ final class WorkspaceStore {
             sidebarContent: sidebarContent,
             rightSidebarContent: rightSidebarContent,
             sidebarWidth: Double(sidebarWidth),
+            rightSidebarWidth: Double(rightSidebarWidth),
             collapsedInfoSections: collapsedInfoSections.isEmpty
                 ? nil
                 : collapsedInfoSections.sorted()

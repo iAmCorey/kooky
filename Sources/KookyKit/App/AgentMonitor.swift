@@ -284,6 +284,26 @@ struct AgentOverviewSidebar: View {
     static let fullWidth: CGFloat = 230
     static let compactWidth: CGFloat = 44
 
+    /// Ceiling for the user-draggable full-mode width (`fullWidth` is the
+    /// floor — the panel only grows from its design width). Mirrors
+    /// `SidebarView.maxWidth`.
+    static let maxWidth: CGFloat = 480
+
+    /// Single source for the width policy — floor `fullWidth`, ceiling
+    /// `maxWidth`, and whole points (mirrors `SidebarView.clampWidth`).
+    static func clampWidth(_ width: CGFloat) -> CGFloat {
+        min(max(width, fullWidth), maxWidth).rounded()
+    }
+
+    // Leading-edge resize drag (full mode only). Mirrors SidebarView's
+    // trailing-edge gesture, mirrored horizontally: the handle sits on the
+    // panel's LEFT edge, so dragging left (negative translation) widens it.
+    // Same suspend pattern — a width drag re-frames every libghostty NSView
+    // per frame → SIGWINCH storm without divider-style suspension.
+    @State private var resizeDragStartWidth: CGFloat?
+    @State private var sidebarResizeSuspended = false
+    @State private var sidebarSuspendedEngines: [any TerminalEngine] = []
+
     let store: WorkspaceStore
     var monitor = AgentMonitor.shared
     /// Reading the model here registers the observation, so flipping the
@@ -298,6 +318,61 @@ struct AgentOverviewSidebar: View {
             if mode == .compact { compactBody } else { fullBody }
         }
         .glassChromeBackground()
+        .overlay(alignment: .leading) {
+            if mode != .compact { resizeHandle }
+        }
+    }
+
+    private var resizeHandle: some View {
+        DividerHandle(orientation: .horizontal)
+            .frame(width: 7)
+            .gesture(resizeGesture)
+            .onDisappear {
+                // Backstop: ⌘⌃S mid-drag unmounts the handle before onEnded
+                // can fire — end the captured engines so the suspension
+                // refcount stays balanced (mirrors the sidebar).
+                if sidebarResizeSuspended {
+                    sidebarResizeSuspended = false
+                    for engine in sidebarSuspendedEngines { engine.endSizePropagationSuspension() }
+                    sidebarSuspendedEngines = []
+                }
+                store.endSidebarResize()
+            }
+    }
+
+    private var resizeGesture: some Gesture {
+        DragGesture(minimumDistance: 0, coordinateSpace: .global)
+            .onChanged { value in
+                if resizeDragStartWidth == nil {
+                    resizeDragStartWidth = store.rightSidebarWidth
+                    store.beginSidebarResize()
+                }
+                let proposed = (resizeDragStartWidth ?? store.rightSidebarWidth) - value.translation.width
+                let clamped = Self.clampWidth(proposed)
+                guard abs(clamped - store.rightSidebarWidth) > .ulpOfOne else { return }
+                if !sidebarResizeSuspended {
+                    sidebarResizeSuspended = true
+                    sidebarSuspendedEngines = store.active?.root.allEngines ?? []
+                    for engine in sidebarSuspendedEngines { engine.beginSizePropagationSuspension() }
+                }
+                store.rightSidebarWidth = clamped
+            }
+            .onEnded { _ in
+                resizeDragStartWidth = nil
+                // End + flush once — only when the engine's refcount hits 0
+                // (a concurrent zoom / status-bar suspension flushes on ITS
+                // own release).
+                if sidebarResizeSuspended {
+                    sidebarResizeSuspended = false
+                    for engine in sidebarSuspendedEngines {
+                        engine.endSizePropagationSuspension()
+                        if !engine.suspendsSizePropagation { engine.flushSize() }
+                    }
+                    sidebarSuspendedEngines = []
+                }
+                store.endSidebarResize()
+                store.flushPersistence()
+            }
     }
 
     // Full: selected page + the footer toggle.
@@ -316,7 +391,7 @@ struct AgentOverviewSidebar: View {
             }
             footer
         }
-        .frame(width: Self.fullWidth)
+        .frame(width: store.rightSidebarWidth)
     }
 
     private var agentsBody: some View {

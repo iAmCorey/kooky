@@ -87,6 +87,7 @@ enum KookyWindowLayout {
         leftMode: SidebarMode,
         expandedLeftWidth: CGFloat,
         rightMode: SidebarMode,
+        expandedRightWidth: CGFloat,
         terminalWidth: CGFloat = minimumTerminalWidth
     ) -> CGFloat {
         let leftWidth: CGFloat
@@ -98,7 +99,7 @@ enum KookyWindowLayout {
 
         let rightWidth: CGFloat
         switch rightMode {
-        case .full: rightWidth = AgentOverviewSidebar.fullWidth
+        case .full: rightWidth = AgentOverviewSidebar.clampWidth(expandedRightWidth)
         case .compact: rightWidth = AgentOverviewSidebar.compactWidth
         case .hidden: rightWidth = 0
         }
@@ -178,8 +179,8 @@ final class KookyWindowController: NSWindowController, NSWindowDelegate {
         super.init(window: Self.makeWindow())
         window?.delegate = self
         window?.contentView = NSHostingView(
-            rootView: ContentView(store: store, paneHost: paneHost) { [weak self] animateExpansion in
-                self?.updateMinimumWindowSize(expandIfNeeded: true, animate: animateExpansion)
+            rootView: ContentView(store: store, paneHost: paneHost) { [weak self] expandIfNeeded, animate in
+                self?.updateMinimumWindowSize(expandIfNeeded: expandIfNeeded, animate: animate)
             }
         )
         alignTrafficLights()
@@ -260,6 +261,7 @@ final class KookyWindowController: NSWindowController, NSWindowDelegate {
             leftMode: store.sidebarMode,
             expandedLeftWidth: store.sidebarWidth,
             rightMode: store.rightSidebarMode,
+            expandedRightWidth: store.rightSidebarWidth,
             terminalWidth: KookyWindowLayout.minimumTerminalTreeWidth(for: store.active?.root)
         )
     }
@@ -297,7 +299,7 @@ final class KookyWindowController: NSWindowController, NSWindowDelegate {
     /// so mirror the current layout policy here. If the required width grows,
     /// expand up to the current screen's visible width; beyond that physical
     /// limit, the balanced split fractions let every pane shrink together.
-    private func updateMinimumWindowSize(expandIfNeeded: Bool, animate: Bool) {
+    func updateMinimumWindowSize(expandIfNeeded: Bool, animate: Bool) {
         guard let window else { return }
         let screen = window.screen ?? NSScreen.main
         let width = minimumWindowWidth(on: screen)
@@ -311,4 +313,5 @@ final class KookyWindowController: NSWindowController, NSWindowDelegate {
         }
         window.setFrame(target, display: true, animate: animate)
     }
+
 }
