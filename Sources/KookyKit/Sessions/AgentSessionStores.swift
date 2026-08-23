@@ -71,7 +71,8 @@ extension AgentSessionScanner {
             conversationId: conversationId,
             title: cleanedTitle(renamedTitle ?? headerTitle ?? firstUserText ?? ""),
             cwd: URL(fileURLWithPath: cwd),
-            lastActivity: mtime
+            lastActivity: mtime,
+            sourceURL: file
         )
     }
 
@@ -115,7 +116,8 @@ extension AgentSessionScanner {
                 conversationId: entry.id,
                 title: cleanedTitle(title),
                 cwd: URL(fileURLWithPath: entry.cwd),
-                lastActivity: mtime
+                lastActivity: mtime,
+                sourceURL: entry.stateURL.deletingLastPathComponent()
             )
         }
     }
@@ -160,7 +162,8 @@ extension AgentSessionScanner {
                 conversationId: id,
                 title: cleanedTitle(title),
                 cwd: URL(fileURLWithPath: directory),
-                lastActivity: Date(timeIntervalSince1970: TimeInterval(updatedMs) / 1000)
+                lastActivity: Date(timeIntervalSince1970: TimeInterval(updatedMs) / 1000),
+                sourceURL: root
             ))
         }
         return records
@@ -203,7 +206,8 @@ extension AgentSessionScanner {
                 conversationId: id,
                 title: cleanedTitle(title),
                 cwd: URL(fileURLWithPath: cwd),
-                lastActivity: mtime
+                lastActivity: mtime,
+                sourceURL: file.deletingLastPathComponent()
             )
         }
     }
@@ -239,7 +243,8 @@ extension AgentSessionScanner {
                 conversationId: id,
                 title: cleanedTitle((object["title"] as? String) ?? ""),
                 cwd: URL(fileURLWithPath: cwd),
-                lastActivity: updatedMs.map { Date(timeIntervalSince1970: $0 / 1000) } ?? mtime
+                lastActivity: updatedMs.map { Date(timeIntervalSince1970: $0 / 1000) } ?? mtime,
+                sourceURL: file.deletingLastPathComponent()
             )
         }
     }
@@ -299,7 +304,8 @@ extension AgentSessionScanner {
                 conversationId: id,
                 title: cleanedTitle(fields["name"] ?? ""),
                 cwd: URL(fileURLWithPath: cwd),
-                lastActivity: mtime
+                lastActivity: mtime,
+                sourceURL: file.deletingLastPathComponent()
             )
         }
     }
@@ -346,7 +352,8 @@ extension AgentSessionScanner {
                 conversationId: id,
                 title: cleanedTitle(displayableUserText(title) ?? ""),
                 cwd: URL(fileURLWithPath: cwd),
-                lastActivity: Date(timeIntervalSince1970: TimeInterval(updatedMs) / 1000)
+                lastActivity: Date(timeIntervalSince1970: TimeInterval(updatedMs) / 1000),
+                sourceURL: root
             ))
         }
         return records
@@ -433,7 +440,8 @@ extension AgentSessionScanner {
             conversationId: sessionId,
             title: cleanedTitle(summary ?? firstUserText ?? ""),
             cwd: URL(fileURLWithPath: cwd),
-            lastActivity: mtime
+            lastActivity: mtime,
+            sourceURL: file
         )
     }
 
@@ -508,7 +516,8 @@ extension AgentSessionScanner {
             conversationId: id,
             title: cleanedTitle(title),
             cwd: URL(fileURLWithPath: cwd),
-            lastActivity: mtime
+            lastActivity: mtime,
+            sourceURL: file
         )
     }
 
@@ -557,7 +566,8 @@ extension AgentSessionScanner {
             conversationId: stem,
             title: cleanedTitle(title ?? ""),
             cwd: URL(fileURLWithPath: cwd),
-            lastActivity: mtime
+            lastActivity: mtime,
+            sourceURL: file
         )
     }
 
@@ -589,5 +599,181 @@ extension AgentSessionScanner {
                 return (file, mtime)
             }
         }
+    }
+
+    /// Deletes the backing store entry for a session and its local companion
+    /// files. The primary record must disappear before returning `true`.
+    static func delete(_ record: AgentSessionRecord) -> Bool {
+        guard record.sourceURL.path != "/dev/null" else { return false }
+        switch record.agentId {
+        case AgentTemplate.claudeCodeID:
+            return deleteClaude(record)
+        case AgentTemplate.codex.id:
+            return deleteCodex(record)
+        case AgentTemplate.kimi.id:
+            return deleteKimi(record)
+        case AgentTemplate.opencode.id:
+            return deleteSQLiteRow(root: record.sourceURL, table: "session", idColumn: "id", id: record.conversationId)
+        case AgentTemplate.kiro.id:
+            return deleteSQLiteRow(
+                root: record.sourceURL,
+                table: "conversations_v2",
+                idColumn: "conversation_id",
+                id: record.conversationId,
+                secondColumn: "key",
+                secondValue: record.cwd.path
+            )
+        case AgentTemplate.droid.id:
+            return deleteFileAndSidecars(record.sourceURL, extensions: ["settings.json"])
+        case AgentTemplate.reasonix.id:
+            return deleteReasonix(record.sourceURL)
+        default:
+            return removePrimary(record.sourceURL)
+        }
+    }
+
+    private static func deleteClaude(_ record: AgentSessionRecord) -> Bool {
+        guard removePrimary(record.sourceURL) else { return false }
+        let project = record.sourceURL.deletingLastPathComponent()
+        if let files = try? FileManager.default.contentsOfDirectory(at: project, includingPropertiesForKeys: nil) {
+            for file in files where file.lastPathComponent.hasPrefix(record.conversationId + ".jsonl.bak.") {
+                try? FileManager.default.removeItem(at: file)
+            }
+        }
+        _ = removeJSONArrayEntry(at: project.appendingPathComponent("sessions-index.json"), id: record.conversationId)
+        return true
+    }
+
+    private static func deleteCodex(_ record: AgentSessionRecord) -> Bool {
+        guard removePrimary(record.sourceURL) else { return false }
+        if let sessions = ancestor(named: "sessions", from: record.sourceURL) {
+            _ = removeJSONLLine(at: sessions.deletingLastPathComponent().appendingPathComponent("history.jsonl"), id: record.conversationId)
+        }
+        return true
+    }
+
+    private static func deleteKimi(_ record: AgentSessionRecord) -> Bool {
+        guard removePrimary(record.sourceURL) else { return false }
+        if let root = ancestor(containing: "session_index.jsonl", from: record.sourceURL) {
+            _ = removeJSONLLine(at: root.appendingPathComponent("session_index.jsonl"), id: record.conversationId)
+        }
+        return true
+    }
+
+    private static func deleteFileAndSidecars(_ file: URL, extensions: [String]) -> Bool {
+        guard removePrimary(file) else { return false }
+        let stem = file.deletingPathExtension()
+        for ext in extensions {
+            try? FileManager.default.removeItem(at: stem.appendingPathExtension(ext))
+        }
+        return true
+    }
+
+    private static func deleteReasonix(_ file: URL) -> Bool {
+        guard removePrimary(file) else { return false }
+        let stem = file.deletingPathExtension()
+        for sidecar in [
+            file.appendingPathExtension("meta"),
+            stem.appendingPathExtension("events.jsonl"),
+            stem.appendingPathExtension("conflicts.jsonl"),
+            stem.appendingPathExtension("guardian.jsonl"),
+            stem.appendingPathExtension("cleanup-pending.json")
+        ] {
+            try? FileManager.default.removeItem(at: sidecar)
+        }
+        return true
+    }
+    private static func removePrimary(_ url: URL) -> Bool {
+        do {
+            try FileManager.default.removeItem(at: url)
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    private static func ancestor(named name: String, from url: URL) -> URL? {
+        var current = url.deletingLastPathComponent()
+        for _ in 0..<12 {
+            if current.lastPathComponent == name { return current }
+            let parent = current.deletingLastPathComponent()
+            if parent == current { return nil }
+            current = parent
+        }
+        return nil
+    }
+
+    private static func ancestor(containing name: String, from url: URL) -> URL? {
+        var current = url.deletingLastPathComponent()
+        for _ in 0..<12 {
+            if FileManager.default.fileExists(atPath: current.appendingPathComponent(name).path) { return current }
+            let parent = current.deletingLastPathComponent()
+            if parent == current { return nil }
+            current = parent
+        }
+        return nil
+    }
+
+    private static func removeJSONLLine(at url: URL, id: String) -> Bool {
+        guard let data = try? Data(contentsOf: url) else { return true }
+        let text = String(decoding: data, as: UTF8.self)
+        let lines = text.split(separator: "\n", omittingEmptySubsequences: false)
+        let kept = lines.filter { line in
+            guard let object = jsonObject(Data(line.utf8)) else { return true }
+            return (object["sessionId"] as? String) != id && (object["session_id"] as? String) != id
+        }
+        guard kept.count != lines.count else { return true }
+        do {
+            let outputText = kept.map(String.init).joined(separator: "\n")
+            guard let output = outputText.data(using: String.Encoding.utf8) else { return false }
+            try output.write(to: url, options: Data.WritingOptions.atomic)
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    private static func removeJSONArrayEntry(at url: URL, id: String) -> Bool {
+        guard let data = try? Data(contentsOf: url) else { return true }
+        guard var entries = (try? JSONSerialization.jsonObject(with: data)) as? [[String: Any]] else { return false }
+        let originalCount = entries.count
+        entries.removeAll { entry in
+            (entry["sessionId"] as? String) == id || (entry["session_id"] as? String) == id || (entry["id"] as? String) == id
+        }
+        guard entries.count != originalCount else { return true }
+        do {
+            let output = try JSONSerialization.data(withJSONObject: entries, options: [.prettyPrinted])
+            try output.write(to: url, options: .atomic)
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    private static func deleteSQLiteRow(
+        root: URL,
+        table: String,
+        idColumn: String,
+        id: String,
+        secondColumn: String? = nil,
+        secondValue: String? = nil
+    ) -> Bool {
+        var db: OpaquePointer?
+        guard sqlite3_open_v2(root.path, &db, SQLITE_OPEN_READWRITE, nil) == SQLITE_OK, let db else {
+            sqlite3_close(db)
+            return false
+        }
+        defer { sqlite3_close(db) }
+        sqlite3_busy_timeout(db, 250)
+        guard sqlite3_exec(db, "PRAGMA foreign_keys = ON", nil, nil, nil) == SQLITE_OK else { return false }
+        var statement: OpaquePointer?
+        let sql = secondColumn == nil
+            ? "DELETE FROM \(table) WHERE \(idColumn) = ?"
+            : "DELETE FROM \(table) WHERE \(idColumn) = ? AND \(secondColumn!) = ?"
+        guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK, let statement else { return false }
+        defer { sqlite3_finalize(statement) }
+        sqlite3_bind_text(statement, 1, id, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self))
+        if let secondValue { sqlite3_bind_text(statement, 2, secondValue, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self)) }
+        return sqlite3_step(statement) == SQLITE_DONE
     }
 }

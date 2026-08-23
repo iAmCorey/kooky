@@ -2,6 +2,22 @@ import SQLite3
 import XCTest
 @testable import KookyKit
 
+
+private final class SessionScanGate: @unchecked Sendable {
+    let started = DispatchSemaphore(value: 0)
+    let release = DispatchSemaphore(value: 0)
+    let result: [AgentSessionRecord]
+
+    init(result: [AgentSessionRecord]) {
+        self.result = result
+    }
+
+    func scan() -> [AgentSessionRecord] {
+        started.signal()
+        release.wait()
+        return result
+    }
+}
 final class AgentSessionScannerTests: XCTestCase {
     private var tempDir: URL!
 
@@ -558,6 +574,252 @@ final class AgentSessionScannerTests: XCTestCase {
         XCTAssertFalse(old.hasSuffix("d"))
         XCTAssertFalse(old.isEmpty)
     }
+
+    func testChineseSessionDeletionStringsRemainLocalized() {
+        let bundle = KookyAppLanguage.simplifiedChinese.previewBundle
+        XCTAssertEqual(String(localized: "Rescan sessions", bundle: bundle), "重新扫描会话")
+        XCTAssertEqual(String(localized: "DELETE-SESSION", bundle: bundle), "删除会话")
+        XCTAssertEqual(String(localized: "deleting…", bundle: bundle), "正在删除…")
+        XCTAssertEqual(String(localized: "couldn't delete session", bundle: bundle), "无法删除会话")
+    }
+
+    // MARK: Deletion
+
+    func testDeleteRemovesFileBackedSession() throws {
+        let root = tempDir.appendingPathComponent("delete-claude")
+        let project = root.appendingPathComponent("proj-hash")
+        let target = try writeFile("11111111-1111-1111-1111-111111111111.jsonl", in: project, lines: [
+            claudeUserLine(text: "delete me", cwd: "/tmp/proj"),
+        ])
+        let sibling = try writeFile("22222222-2222-2222-2222-222222222222.jsonl", in: project, lines: [
+            claudeUserLine(text: "keep me", cwd: "/tmp/proj"),
+        ])
+        let record = try XCTUnwrap(AgentSessionScanner.claudeRecord(file: target, mtime: Date()))
+
+        XCTAssertTrue(AgentSessionScanner.delete(record))
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: target.path),
+                       "the deleted session's transcript must be gone")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: sibling.path),
+                      "unrelated sessions must survive")
+        let remaining = scanIsolated([AgentTemplate.claudeCodeID: root])
+        XCTAssertEqual(remaining.map(\.conversationId), ["22222222-2222-2222-2222-222222222222"])
+    }
+
+    func testDeleteRemovesClaudeIndexAndBackups() throws {
+        let root = tempDir.appendingPathComponent("delete-claude-companions")
+        let project = root.appendingPathComponent("proj-hash")
+        let id = "11111111-1111-1111-1111-111111111111"
+        let target = try writeFile("\(id).jsonl", in: project, lines: [
+            claudeUserLine(text: "delete me", cwd: "/tmp/proj")
+        ])
+        let backup = try writeFile("\(id).jsonl.bak.1", in: project, lines: ["backup"])
+        let index = try writeFile("sessions-index.json", in: project, lines: [
+            #"[{"sessionId":"11111111-1111-1111-1111-111111111111","fullPath":"/tmp/target"},{"sessionId":"22222222-2222-2222-2222-222222222222","fullPath":"/tmp/keep"}]"#
+        ])
+        let record = try XCTUnwrap(AgentSessionScanner.claudeRecord(file: target, mtime: Date()))
+
+        XCTAssertTrue(AgentSessionScanner.delete(record))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: target.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: backup.path))
+        let remaining = try JSONSerialization.jsonObject(with: Data(contentsOf: index)) as? [[String: Any]]
+        XCTAssertEqual(remaining?.compactMap { $0["sessionId"] as? String }, ["22222222-2222-2222-2222-222222222222"])
+    }
+
+    func testDeleteRemovesCodexHistoryEntry() throws {
+        let root = tempDir.appendingPathComponent("delete-codex-companions")
+        let rollout = try writeFile("rollout-2026-07-01T00-00-00-thread-123.jsonl", in: root.appendingPathComponent("sessions/2026/07/01"), lines: [
+            #"{"type":"session_meta","payload":{"id":"thread-123","cwd":"/tmp/proj"}}"#
+        ])
+        let history = try writeFile("history.jsonl", in: root, lines: [
+            #"{"session_id":"thread-123","text":"delete me"}"#,
+            #"{"session_id":"thread-keep","text":"keep me"}"#
+        ])
+        let record = try XCTUnwrap(AgentSessionScanner.codexRecord(file: rollout, mtime: Date()))
+
+        XCTAssertTrue(AgentSessionScanner.delete(record))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: rollout.path))
+        let remaining = String(decoding: try Data(contentsOf: history), as: UTF8.self)
+        XCTAssertFalse(remaining.contains("thread-123"))
+        XCTAssertTrue(remaining.contains("thread-keep"))
+    }
+
+    func testDeleteRemovesKimiDirectoryAndIndexEntry() throws {
+        let root = tempDir.appendingPathComponent("delete-kimi-companions")
+        let sessionDir = root.appendingPathComponent("sessions/wd_proj/session_1111")
+        try writeFile("state.json", in: sessionDir, lines: [
+            #"{"title":"delete me","isCustomTitle":true}"#
+        ])
+        try writeFile("transcript.jsonl", in: sessionDir, lines: ["private transcript"])
+        try writeFile("session_index.jsonl", in: root, lines: [
+            #"{"sessionId":"session_1111","sessionDir":"sessions/wd_proj/session_1111","workDir":"/tmp/proj"}"#,
+            #"{"sessionId":"session_2222","sessionDir":"sessions/wd_proj/session_2222","workDir":"/tmp/proj"}"#
+        ])
+        try writeFile("state.json", in: root.appendingPathComponent("sessions/wd_proj/session_2222"), lines: [
+            #"{"title":"keep","isCustomTitle":true}"#
+        ])
+        let record = try XCTUnwrap(AgentSessionScanner.collectKimi(root: root).first { $0.conversationId == "session_1111" })
+
+        XCTAssertTrue(AgentSessionScanner.delete(record))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: sessionDir.path))
+        let remaining = String(decoding: try Data(contentsOf: root.appendingPathComponent("session_index.jsonl")), as: UTF8.self)
+        XCTAssertFalse(remaining.contains("session_1111"))
+        XCTAssertTrue(remaining.contains("session_2222"))
+    }
+
+    func testDeleteRemovesOpenCodeDependentRows() throws {
+        let dbURL = tempDir.appendingPathComponent("delete-opencode-cascade.db")
+        var db: OpaquePointer?
+        XCTAssertEqual(sqlite3_open(dbURL.path, &db), SQLITE_OK)
+        let setup = """
+        PRAGMA foreign_keys = ON;
+        CREATE TABLE session (id TEXT PRIMARY KEY, parent_id TEXT, directory TEXT, title TEXT, time_updated INTEGER, time_archived INTEGER);
+        CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT REFERENCES session(id) ON DELETE CASCADE, data TEXT);
+        INSERT INTO session VALUES ('ses_a', NULL, '/tmp/proj', 'a', 2000000, NULL);
+        INSERT INTO message VALUES ('msg_a', 'ses_a', 'private message');
+        """
+        XCTAssertEqual(sqlite3_exec(db, setup, nil, nil, nil), SQLITE_OK)
+        sqlite3_close(db)
+        db = nil
+
+        let record = try XCTUnwrap(AgentSessionScanner.collectOpencode(root: dbURL).first)
+        XCTAssertTrue(AgentSessionScanner.delete(record))
+
+        XCTAssertEqual(sqlite3_open(dbURL.path, &db), SQLITE_OK)
+        defer { sqlite3_close(db) }
+        var statement: OpaquePointer?
+        XCTAssertEqual(sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM message", -1, &statement, nil), SQLITE_OK)
+        defer { sqlite3_finalize(statement) }
+        XCTAssertEqual(sqlite3_step(statement), SQLITE_ROW)
+        XCTAssertEqual(sqlite3_column_int(statement, 0), 0)
+    }
+
+    func testDeleteRemovesDroidAndReasonixSidecars() throws {
+        let droid = tempDir.appendingPathComponent("delete-droid")
+        let droidFile = try writeFile("session.jsonl", in: droid, lines: [
+            #"{"type":"session_start","id":"droid-1","cwd":"/tmp/proj"}"#,
+            #"{"type":"message","message":{"role":"user","content":"hi"}}"#
+        ])
+        let droidSidecar = try writeFile("session.settings.json", in: droid, lines: ["{}"])
+        let droidRecord = try XCTUnwrap(AgentSessionScanner.droidRecord(file: droidFile, mtime: Date()))
+        XCTAssertTrue(AgentSessionScanner.delete(droidRecord))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: droidFile.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: droidSidecar.path))
+
+        let reasonix = tempDir.appendingPathComponent("delete-reasonix")
+        let reasonixFile = try writeFile("session-1.jsonl", in: reasonix, lines: ["{}"])
+        try writeFile("session-1.jsonl.meta", in: reasonix, lines: [
+            #"{"schema_version":1,"workspace_root":"/tmp/proj","turns":1}"#
+        ])
+        let events = try writeFile("session-1.events.jsonl", in: reasonix, lines: ["private event"])
+        let reasonixRecord = try XCTUnwrap(AgentSessionScanner.reasonixRecord(file: reasonixFile, mtime: Date()))
+        XCTAssertTrue(AgentSessionScanner.delete(reasonixRecord))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: reasonixFile.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: events.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: reasonixFile.appendingPathExtension("meta").path))
+    }
+
+    func testDeleteRemovesDirectoryBackedSession() throws {
+        // Cursor keeps one dir per chat; deleting must remove the whole
+        // session dir while leaving sibling sessions under the same group.
+        let root = tempDir.appendingPathComponent("delete-cursor")
+        let group = root.appendingPathComponent("md5hash")
+        let doomed = group.appendingPathComponent("33333333-3333-3333-3333-333333333333")
+        let kept = group.appendingPathComponent("44444444-4444-4444-4444-444444444444")
+        try writeFile("meta.json", in: doomed, lines: [
+            #"{"cwd":"/tmp/proj","title":"doomed","hasConversation":true}"#,
+        ])
+        try writeFile("meta.json", in: kept, lines: [
+            #"{"cwd":"/tmp/proj","title":"kept","hasConversation":true}"#,
+        ])
+        let record = try XCTUnwrap(AgentSessionScanner.collectCursor(root: root)
+            .first { $0.conversationId == "33333333-3333-3333-3333-333333333333" })
+
+        XCTAssertTrue(AgentSessionScanner.delete(record))
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: doomed.path),
+                       "the deleted session's whole directory must be gone")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: kept.path),
+                      "sibling sessions must survive")
+        XCTAssertEqual(AgentSessionScanner.collectCursor(root: root).map(\.conversationId),
+                       ["44444444-4444-4444-4444-444444444444"])
+    }
+
+    func testDeleteRemovesOnlyTheTargetSQLiteRow() throws {
+        // OpenCode's store is one shared DB — deletion must remove exactly
+        // the target session row and leave the database + other rows intact.
+        let dbURL = tempDir.appendingPathComponent("delete-opencode.db")
+        var db: OpaquePointer?
+        XCTAssertEqual(sqlite3_open(dbURL.path, &db), SQLITE_OK)
+        defer { sqlite3_close(db) }
+        let setup = """
+        CREATE TABLE session (id TEXT, parent_id TEXT, directory TEXT, title TEXT, time_updated INTEGER, time_archived INTEGER);
+        INSERT INTO session VALUES ('ses_a', NULL, '/tmp/proj', 'a', 2000000, NULL);
+        INSERT INTO session VALUES ('ses_b', NULL, '/tmp/proj', 'b', 1000000, NULL);
+        """
+        XCTAssertEqual(sqlite3_exec(db, setup, nil, nil, nil), SQLITE_OK)
+        sqlite3_close(db)
+        db = nil
+
+        let records = AgentSessionScanner.collectOpencode(root: dbURL)
+        let doomed = try XCTUnwrap(records.first { $0.conversationId == "ses_a" })
+        XCTAssertTrue(AgentSessionScanner.delete(doomed))
+
+        XCTAssertTrue(FileManager.default.fileExists(atPath: dbURL.path),
+                      "the database itself must survive")
+        let remaining = AgentSessionScanner.collectOpencode(root: dbURL)
+        XCTAssertEqual(remaining.map(\.conversationId), ["ses_b"],
+                       "only the target row is deleted")
+    }
+
+    func testDeleteIsNoopForDefaultSentinelSource() throws {
+        // Records built without a backing source (tests, or a store the
+        // scanner doesn't yet map) default to the /dev/null sentinel —
+        // delete must refuse to touch anything, not throw or wipe a path.
+        let root = tempDir.appendingPathComponent("delete-sentinel")
+        let keep = try writeFile("55555555-5555-5555-5555-555555555555.jsonl", in: root, lines: [
+            claudeUserLine(text: "keep", cwd: "/tmp/proj"),
+        ])
+        let record = AgentSessionRecord(
+            agentId: AgentTemplate.claudeCodeID,
+            conversationId: "55555555-5555-5555-5555-555555555555",
+            title: "keep",
+            cwd: URL(fileURLWithPath: "/tmp/proj"),
+            lastActivity: Date()
+        )
+        XCTAssertEqual(record.sourceURL.path, "/dev/null")
+
+        XCTAssertFalse(AgentSessionScanner.delete(record),
+                       "a sentinel record reports failure — nothing was deleted")
+
+        XCTAssertTrue(FileManager.default.fileExists(atPath: keep.path),
+                      "a sentinel record must never delete anything")
+    }
+
+    func testDeleteKiroRowByConversationID() throws {
+        // Kiro keys rows by (cwd, conversation_id); deletion targets the
+        // conversation id column so the right conversation goes even when
+        // multiple rows share a cwd.
+        let dbURL = tempDir.appendingPathComponent("delete-kiro.sqlite3")
+        var db: OpaquePointer?
+        XCTAssertEqual(sqlite3_open(dbURL.path, &db), SQLITE_OK)
+        defer { sqlite3_close(db) }
+        let setup = """
+        CREATE TABLE conversations_v2 (key TEXT, conversation_id TEXT, value TEXT, created_at INTEGER, updated_at INTEGER, PRIMARY KEY (key, conversation_id));
+        INSERT INTO conversations_v2 VALUES ('/tmp/proj', 'kiro-1', '{}', 1000, 2000000);
+        INSERT INTO conversations_v2 VALUES ('/tmp/proj', 'kiro-2', '{}', 1000, 1000000);
+        """
+        XCTAssertEqual(sqlite3_exec(db, setup, nil, nil, nil), SQLITE_OK)
+        sqlite3_close(db)
+        db = nil
+
+        let doomed = try XCTUnwrap(AgentSessionScanner.collectKiro(root: dbURL)
+            .first { $0.conversationId == "kiro-1" })
+        XCTAssertTrue(AgentSessionScanner.delete(doomed))
+
+        let remaining = AgentSessionScanner.collectKiro(root: dbURL)
+        XCTAssertEqual(remaining.map(\.conversationId), ["kiro-2"])
+    }
 }
 
 @MainActor
@@ -677,12 +939,95 @@ final class AgentSessionResumeTests: XCTestCase {
         store.setRightSidebarContent(.info)
         store.flushPersistence()
         XCTAssertEqual(persistence.saved?.rightSidebarContent, .info)
+    }
 
-        let restored = WorkspaceStore(
-            persistence: InMemoryPersistence(initial: persistence.saved),
-            engineFactory: { TestEngine() }
+    // MARK: Model-layer delete cache sync
+
+    func testModelDeleteRemovesRecordFromCacheOnlyOnSuccess() async throws {
+        // Disk delete succeeded → the record leaves the cache immediately.
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("kooky-model-delete-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let file = try SessionStoreFixtures.writeFile("11111111-1111-1111-1111-111111111111.jsonl", in: dir, lines: [
+            #"{"type":"user","cwd":"/tmp/proj","message":{"role":"user","content":"hi"}}"#,
+        ])
+        let doomed = AgentSessionRecord(
+            agentId: AgentTemplate.claudeCodeID,
+            conversationId: "11111111-1111-1111-1111-111111111111",
+            title: "doomed",
+            cwd: URL(fileURLWithPath: "/tmp/proj"),
+            lastActivity: Date(),
+            sourceURL: file
         )
-        XCTAssertEqual(restored.rightSidebarContent, .info)
+        let kept = AgentSessionRecord(
+            agentId: AgentTemplate.codex.id,
+            conversationId: "22222222-2222-2222-2222-222222222222",
+            title: "kept",
+            cwd: URL(fileURLWithPath: "/tmp/proj"),
+            lastActivity: Date(),
+            sourceURL: URL(fileURLWithPath: "/dev/null")
+        )
+        let history = AgentSessionHistory(records: [doomed, kept])
+
+        let succeeded = await history.delete(doomed)
+
+        XCTAssertTrue(succeeded)
+        XCTAssertEqual(history.records.map(\.id), [kept.id],
+                       "the deleted record leaves the cache, the sibling stays")
+        XCTAssertEqual(history.presentAgentIds, [kept.agentId])
+        XCTAssertFalse(FileManager.default.fileExists(atPath: file.path))
+    }
+
+    func testModelDeleteKeepsCacheWhenDiskDeleteFails() async {
+        // A record whose backing file is already gone (or unwritable) must
+        // NOT leave the cache — otherwise the row vanishes then reappears on
+        // the next scan, and the sheet would claim success.
+        let missing = AgentSessionRecord(
+            agentId: AgentTemplate.claudeCodeID,
+            conversationId: "33333333-3333-3333-3333-333333333333",
+            title: "missing",
+            cwd: URL(fileURLWithPath: "/tmp/proj"),
+            lastActivity: Date(),
+            sourceURL: FileManager.default.temporaryDirectory
+                .appendingPathComponent("definitely-missing-\(UUID().uuidString).jsonl")
+        )
+        let history = AgentSessionHistory(records: [missing])
+
+        let succeeded = await history.delete(missing)
+
+        XCTAssertFalse(succeeded)
+        XCTAssertEqual(history.records.map(\.id), [missing.id],
+                       "a failed disk delete must keep the cached record")
+        XCTAssertEqual(history.presentAgentIds, [missing.agentId])
+    }
+
+    func testDeleteInvalidatesInFlightRefreshSnapshot() async throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("kooky-refresh-delete-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let file = try SessionStoreFixtures.writeFile("44444444-4444-4444-4444-444444444444.jsonl", in: dir, lines: [
+            #"{"type":"user","cwd":"/tmp/proj","message":{"role":"user","content":"hi"}}"#
+        ])
+        let record = AgentSessionRecord(
+            agentId: AgentTemplate.claudeCodeID,
+            conversationId: "44444444-4444-4444-4444-444444444444",
+            title: "stale",
+            cwd: URL(fileURLWithPath: "/tmp/proj"),
+            lastActivity: Date(),
+            sourceURL: file
+        )
+        let gate = SessionScanGate(result: [record])
+        let history = AgentSessionHistory(records: [record], scanProvider: gate.scan)
+        history.refresh(force: true)
+        await Task.yield()
+        XCTAssertEqual(gate.started.wait(timeout: .now() + 1), .success)
+
+        let deletion = Task { await history.delete(record) }
+        gate.release.signal()
+        let deleted = await deletion.value
+        XCTAssertTrue(deleted)
+        try await Task.sleep(for: .milliseconds(20))
+        XCTAssertFalse(history.records.contains { $0.id == record.id })
     }
 }
 

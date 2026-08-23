@@ -258,6 +258,10 @@
 "Session History" = "会话历史";
 "Session Info" = "会话信息";
 "Rescan sessions" = "重新扫描会话";
+"DELETE-SESSION" = "删除会话";
+"delete session" = "删除会话";
+"deleting…" = "正在删除…";
+"couldn't delete session" = "无法删除会话";
 "Compose (⌘L)" = "编写（⌘L）";
 "Open" = "打开";
 "Copy Path" = "复制路径";
