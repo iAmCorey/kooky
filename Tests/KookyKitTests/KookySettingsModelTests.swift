@@ -108,6 +108,15 @@ final class KookySettingsModelTests: XCTestCase {
             "标签页 3"
         )
         XCTAssertEqual(
+            String(localized: "restore-window-size", bundle: bundle),
+            "重启后恢复窗口大小"
+        )
+        XCTAssertEqual(
+            String(localized: "Restore each window's size after restarting Kooky.", bundle: bundle),
+            "重启 Kooky 后恢复每个窗口的大小。"
+        )
+
+        XCTAssertEqual(
             String(localized: "Untranslated test key", bundle: bundle),
             "Untranslated test key"
         )
@@ -118,6 +127,10 @@ final class KookySettingsModelTests: XCTestCase {
         XCTAssertEqual(
             String(localized: "General", bundle: bundle),
             "General"
+        )
+        XCTAssertEqual(
+            String(localized: "restore-window-size", bundle: bundle),
+            "Restore window size"
         )
     }
 
@@ -198,6 +211,23 @@ final class KookySettingsModelTests: XCTestCase {
             )
         )
     }
+    func testRestoreWindowSizeDefaultsToOff() {
+        XCTAssertFalse(KookySettingsModel.resolvedRestoreWindowSize(general: [:]))
+    }
+
+    func testRestoreWindowSizeReadsGeneralSetting() {
+        XCTAssertTrue(
+            KookySettingsModel.resolvedRestoreWindowSize(
+                general: ["restoreWindowSize": true]
+            )
+        )
+        XCTAssertFalse(
+            KookySettingsModel.resolvedRestoreWindowSize(
+                general: ["restoreWindowSize": false]
+            )
+        )
+    }
+
 
     func testAgentMenuBarTextIsCappedAtThirtyCharacters() {
         let exact = String(repeating: "a", count: 30)

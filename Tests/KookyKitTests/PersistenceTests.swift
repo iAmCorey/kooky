@@ -86,6 +86,36 @@ final class PersistenceTests: XCTestCase {
         XCTAssertEqual(reloaded.windowIds, [id])
         XCTAssertEqual(reloaded.state(for: id), state)
     }
+    func testWindowFrameSizePersistsAcrossAppPersistenceReload() {
+        let url = tempURL()
+        let app = AppPersistence(fileURL: url)
+        let id = UUID()
+        let size = PersistedWindowSize(width: 1440, height: 900)
+        app.setWindow(id, state: makeState())
+        app.setFrameSize(size, for: id)
+
+        let reloaded = AppPersistence(fileURL: url)
+        XCTAssertEqual(reloaded.frameSize(for: id), size)
+    }
+    func testWindowFrameSizesStayIsolatedAcrossTwoWindows() {
+        let url = tempURL()
+        let app = AppPersistence(fileURL: url)
+        let first = UUID()
+        let second = UUID()
+        app.setWindow(first, state: makeState(dir: "/first"))
+        app.setWindow(second, state: makeState(dir: "/second"))
+
+        let firstSize = PersistedWindowSize(width: 1200, height: 800)
+        let secondSize = PersistedWindowSize(width: 1600, height: 1000)
+        app.setFrameSize(firstSize, for: first)
+        app.setFrameSize(secondSize, for: second)
+
+        let reloaded = AppPersistence(fileURL: url)
+        XCTAssertEqual(reloaded.frameSize(for: first), firstSize)
+        XCTAssertEqual(reloaded.frameSize(for: second), secondSize)
+    }
+
+
 
     // MARK: - WindowPersistence
 

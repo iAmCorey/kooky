@@ -10,6 +10,28 @@ final class KookyWindowLayoutTests: XCTestCase {
             SidebarView.compactWidth / 2
         )
     }
+    func testWindowControllerStartsWithPersistedFrameSize() throws {
+        let store = WorkspaceStore(
+            persistence: InMemoryPersistence(),
+            engineFactory: { TestEngine() },
+            optionsProvider: { _ in nil },
+            resumeProvider: { true }
+        )
+        let controller = KookyWindowController(
+            windowId: UUID(),
+            store: store,
+            frameSize: PersistedWindowSize(width: 1440, height: 900)
+        )
+        defer {
+            controller.close()
+            store.terminate()
+        }
+
+        let window = try XCTUnwrap(controller.window)
+        XCTAssertEqual(window.frame.size.width, 1440, accuracy: 0.5)
+        XCTAssertEqual(window.frame.size.height, 900, accuracy: 0.5)
+    }
+
 
     func testWindowCloseButtonAlignsWithSidebarLeadingAxis() throws {
         let store = WorkspaceStore(

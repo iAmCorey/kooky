@@ -172,11 +172,11 @@ final class KookyWindowController: NSWindowController, NSWindowDelegate {
     /// Settings / Update panel is the key window instead.
     var onDidBecomeKey: ((KookyWindowController) -> Void)?
 
-    init(windowId: UUID, store: WorkspaceStore) {
+    init(windowId: UUID, store: WorkspaceStore, frameSize: PersistedWindowSize? = nil) {
         self.windowId = windowId
         self.store = store
         self.paneHost = PaneTreeHostView(store: store)
-        super.init(window: Self.makeWindow())
+        super.init(window: Self.makeWindow(frameSize: frameSize))
         window?.delegate = self
         window?.contentView = NSHostingView(
             rootView: ContentView(store: store, paneHost: paneHost) { [weak self] expandIfNeeded, animate in
@@ -197,9 +197,18 @@ final class KookyWindowController: NSWindowController, NSWindowDelegate {
 
     /// Builds a kooky main window with the standard chrome. Mirrors the
     /// config that used to live inline in `applicationDidFinishLaunching`.
-    private static func makeWindow() -> NSWindow {
+    private static func makeWindow(frameSize: PersistedWindowSize?) -> NSWindow {
+        let size = if let frameSize,
+                      frameSize.width.isFinite,
+                      frameSize.width > 0,
+                      frameSize.height.isFinite,
+                      frameSize.height > 0 {
+            NSSize(width: CGFloat(frameSize.width), height: CGFloat(frameSize.height))
+        } else {
+            NSSize(width: 1100, height: 720)
+        }
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 1100, height: 720),
+            contentRect: NSRect(origin: .zero, size: size),
             styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
             backing: .buffered,
             defer: false

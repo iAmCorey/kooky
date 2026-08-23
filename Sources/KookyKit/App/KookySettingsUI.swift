@@ -266,6 +266,10 @@ final class KookySettingsModel {
     /// non-default. The old `appearance.showAgentMenuBarItem` key is read once
     /// for migration.
     var showInMenuBar: Bool = true
+    /// Restores each window's saved size on launch and saves size changes on
+    /// close/quit. Disabled by default; persisted under `general.restoreWindowSize`.
+    var restoreWindowSize: Bool = false
+
 
     /// Whether the agent panel repeats each session's workspace tag as a stripe
     /// (and a `#name` hover line). Persisted under
@@ -417,6 +421,7 @@ final class KookySettingsModel {
             legacyGeneral: general
         )
         awakeMode = (general["awakeMode"] as? String).flatMap(AwakeMode.init) ?? .auto
+        restoreWindowSize = Self.resolvedRestoreWindowSize(general: general)
 
         let notifications = parsed["notifications"] as? [String: Any] ?? [:]
         notificationsEnabled = (notifications["enabled"] as? Bool) ?? true
@@ -632,8 +637,10 @@ final class KookySettingsModel {
         // only write each setting's current namespace from now on.
         general.removeValue(forKey: "showSearchPill")
         general.removeValue(forKey: "language")
+        general["restoreWindowSize"] = restoreWindowSize ? true : nil
         general["showInMenuBar"] = showInMenuBar ? nil : false
         general["awakeMode"] = awakeMode == .auto ? nil : awakeMode.rawValue
+
         if general.isEmpty {
             parsed.removeValue(forKey: "general")
         } else {
@@ -825,6 +832,10 @@ final class KookySettingsModel {
         (general["showInMenuBar"] as? Bool)
             ?? (legacyAppearance["showAgentMenuBarItem"] as? Bool)
             ?? true
+    }
+
+    static func resolvedRestoreWindowSize(general: [String: Any]) -> Bool {
+        (general["restoreWindowSize"] as? Bool) ?? false
     }
 
     var selectedTerminalTheme: KookyTerminalTheme? {
@@ -1401,6 +1412,22 @@ struct KookySettingsView: View {
                     .pickerStyle(.menu)
                     .frame(minWidth: 180, alignment: .trailing)
                 }
+            }
+            .padding(.top, 22)
+
+            SettingsSection(title: "Window") {
+                SettingsRow(label: "restore-window-size") {
+                    Toggle("", isOn: Binding(
+                        get: { model.restoreWindowSize },
+                        set: {
+                            model.restoreWindowSize = $0
+                            model.scheduleSave()
+                        }
+                    ))
+                        .labelsHidden()
+                        .toggleStyle(.switch)
+                }
+                SettingsCaption("Restore each window's size after restarting Kooky.")
             }
             .padding(.top, 22)
 

@@ -18,6 +18,8 @@
 "Clipboard" = "剪贴板";
 "Menu Bar" = "菜单栏";
 "System" = "系统";
+"restore-window-size" = "重启后恢复窗口大小";
+"Restore each window's size after restarting Kooky." = "重启 Kooky 后恢复每个窗口的大小。";
 "Terminal" = "终端";
 "Window Chrome" = "窗口界面";
 "Presets" = "预设";

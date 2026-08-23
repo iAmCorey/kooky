@@ -262,7 +262,13 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
             onSessionAlert: { [weak self] id, kind in self?.handleSessionAlert(id, kind) },
             noteRecentFolder: { RecentFolders.shared.note($0) }
         )
-        let controller = KookyWindowController(windowId: windowId, store: store)
+        let controller = KookyWindowController(
+            windowId: windowId,
+            store: store,
+            frameSize: KookySettingsModel.shared.restoreWindowSize
+                ? appPersistence.frameSize(for: windowId)
+                : nil
+        )
         controller.onWillClose = { [weak self] in self?.handleWindowWillClose($0) }
         controller.onDidBecomeKey = { [weak self] in self?.lastKeyController = $0 }
         windowControllers.append(controller)
@@ -276,6 +282,20 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
             window.makeKeyAndOrderFront(nil)
         }
         return controller
+    }
+
+    private func persistWindowFrameSize(_ controller: KookyWindowController) {
+        guard KookySettingsModel.shared.restoreWindowSize,
+              let size = controller.window?.frame.size,
+              size.width.isFinite,
+              size.width > 0,
+              size.height.isFinite,
+              size.height > 0
+        else { return }
+        appPersistence.setFrameSize(
+            PersistedWindowSize(width: Double(size.width), height: Double(size.height)),
+            for: controller.windowId
+        )
     }
 
     /// Right-click → "Move to New Window": creates a fresh window and pulls
@@ -306,9 +326,11 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
         // that one. `contains` is evaluated synchronously against the live
         // array, so it's correct regardless of the deferred removal below
         // and doesn't depend on `isTerminating` having been set yet.
+        // Flush state first so the slot exists before its geometry is updated.
         let isLastWindow = !windowControllers.contains { $0 !== controller }
         if isTerminating || isLastWindow {
             controller.store.flushPersistence()
+            persistWindowFrameSize(controller)
         } else {
             appPersistence.removeWindow(controller.windowId)
         }
@@ -971,6 +993,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
         isTerminating = true
         for controller in windowControllers {
             controller.store.flushPersistence()
+            persistWindowFrameSize(controller)
             controller.store.terminate()
         }
         guard !SurfaceTeardownCoordinator.shared.isDrained else { return .terminateNow }
@@ -1002,11 +1025,12 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
         terminationFallback = nil
         systemAppearanceObservation = nil
         // `windowWillClose` is not reliably delivered to every window during
-        // app termination, so flush each live window's store here — the 1s
-        // `scheduleSave` debounce would otherwise drop changes made in the
-        // final second before ⌘Q.
+        // app termination, so flush each live window's store and geometry
+        // here — the 1s `scheduleSave` debounce would otherwise drop changes
+        // made in the final second before ⌘Q.
         for controller in windowControllers {
             controller.store.flushPersistence()
+            persistWindowFrameSize(controller)
         }
         // If closed-lid mode is engaged, re-enable lid sleep before dying —
         // a system-wide pmset flag outlives the process, unlike assertions.

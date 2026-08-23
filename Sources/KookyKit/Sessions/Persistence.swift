@@ -33,11 +33,17 @@ struct PersistedApp: Codable, Equatable {
     var windows: [PersistedWindow]
 }
 
-/// Window frame (size / position) is intentionally not persisted — kooky
-/// has never restored window geometry; restored windows just cascade.
+/// Window frame size restored on launch. Position remains AppKit-managed so
+/// restored windows can still cascade onto the current screen layout.
+struct PersistedWindowSize: Codable, Equatable {
+    var width: Double
+    var height: Double
+}
+
 struct PersistedWindow: Codable, Equatable {
     var id: UUID
     var state: PersistedState
+    var frameSize: PersistedWindowSize?
 }
 
 struct PersistedWorkspace: Codable, Equatable {
@@ -304,15 +310,24 @@ final class AppPersistence {
         windows.first { $0.id == id }?.state
     }
 
-    /// Upserts a window's state — a new id appends (so a `⌘⇧N` window
-    /// restores last) — and writes the file. The write is synchronous:
-    /// `WorkspaceStore.scheduleSave` already debounces upstream, and a
-    /// closing window must reach disk before the process can exit.
+    func frameSize(for id: UUID) -> PersistedWindowSize? {
+        windows.first { $0.id == id }?.frameSize
+    }
+
+    func setFrameSize(_ frameSize: PersistedWindowSize, for id: UUID) {
+        guard let idx = windows.firstIndex(where: { $0.id == id }) else { return }
+        windows[idx].frameSize = frameSize
+        writeToDisk()
+    }
+
+    /// Upserts a window's state — a new id appends so a `⌘⇧N` window
+    /// restores last — without changing its persisted frame size. The write
+    /// is synchronous because closing must reach disk before process exit.
     func setWindow(_ id: UUID, state: PersistedState) {
         if let idx = windows.firstIndex(where: { $0.id == id }) {
             windows[idx].state = state
         } else {
-            windows.append(PersistedWindow(id: id, state: state))
+            windows.append(PersistedWindow(id: id, state: state, frameSize: nil))
         }
         writeToDisk()
     }

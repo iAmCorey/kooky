@@ -2,3 +2,6 @@
 "Restart Kooky" = "Restart Kooky";
 "Follow System" = "System";
 "Clear Glass" = "Clear";
+"Window" = "Window";
+"restore-window-size" = "Restore window size";
+"Restore each window's size after restarting Kooky." = "Restore each window's size after restarting Kooky.";
