@@ -28,20 +28,17 @@ struct TabBarView: View {
                 }
                 .padding(.horizontal, 10)
             }
-            // Double-click on tab bar empty area triggers macOS Zoom (filled
-            // screen, dock/menu kept) — same gesture as the system title-bar
-            // double-click. SwiftUI arbitrates count: 2 alongside children's
-            // count: 1 taps so tab activation still fires on single click.
-            .contentShape(Rectangle())
-            .onTapGesture(count: 2) {
-                NSApplication.shared.keyWindow?.performZoom(nil)
-            }
 
             // Split controls pinned to the trailing edge — outside the
             // ScrollView so they stay put while the tabs scroll.
             splitButtons
         }
         .frame(height: Theme.contentHeaderHeight)
+        .background {
+            TabBarDoubleClickHandler {
+                NSApplication.shared.keyWindow?.performZoom(nil)
+            }
+        }
     }
 
     /// Split-right / split-down buttons. Mirror ⌘D / ⌘⇧D exactly: Split
@@ -77,6 +74,75 @@ struct TabBarView: View {
             store: store,
             isMenuOpen: $isAddMenuOpen
         )
+    }
+}
+
+/// Double-clicking the tab bar triggers macOS Zoom (filled screen, dock and
+/// menu kept) — the same behavior as double-clicking the system title bar.
+/// Capture it at the AppKit event boundary: a gesture recognizer attached to
+/// SwiftUI's background host is not guaranteed to sit on the event-hit view,
+/// so it can silently miss clicks from tab rows.
+private struct TabBarDoubleClickHandler: NSViewRepresentable {
+    let action: () -> Void
+
+    func makeCoordinator() -> Coordinator { Coordinator(action: action) }
+
+    func makeNSView(context: Context) -> AnchorView {
+        AnchorView(coordinator: context.coordinator)
+    }
+
+    func updateNSView(_ nsView: AnchorView, context: Context) {
+        context.coordinator.action = action
+    }
+
+    @MainActor
+    final class Coordinator: NSObject {
+        var action: () -> Void
+
+        init(action: @escaping () -> Void) {
+            self.action = action
+        }
+    }
+
+    @MainActor
+    final class AnchorView: NSView {
+        private let coordinator: Coordinator
+        private var monitor: Any?
+
+        init(coordinator: Coordinator) {
+            self.coordinator = coordinator
+            super.init(frame: .zero)
+        }
+
+        @available(*, unavailable)
+        required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            removeMonitor()
+            guard window != nil else { return }
+            monitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseUp) { [weak self] event in
+                guard let self,
+                      event.clickCount == 2,
+                      event.window === self.window,
+                      bounds.contains(convert(event.locationInWindow, from: nil))
+                else { return event }
+                coordinator.action()
+                return event
+            }
+        }
+
+        override func viewWillMove(toWindow newWindow: NSWindow?) {
+            if newWindow == nil { removeMonitor() }
+            super.viewWillMove(toWindow: newWindow)
+        }
+
+        private func removeMonitor() {
+            if let monitor { NSEvent.removeMonitor(monitor) }
+            monitor = nil
+        }
+
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
     }
 }
 

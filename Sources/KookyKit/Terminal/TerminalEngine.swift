@@ -46,6 +46,7 @@ struct TerminalSessionConfig {
 @MainActor
 protocol TerminalEngine: AnyObject {
     var view: NSView { get }
+    func renderNowIfNeeded()
     var backgroundColor: NSColor { get }
     /// Called when the engine observes a working-directory change (libghostty's
     /// `GHOSTTY_ACTION_PWD`, fired when the shell emits OSC 7). Lets the
@@ -132,13 +133,11 @@ protocol TerminalEngine: AnyObject {
     /// frame. Used when un-suspending after an animation.
     func flushSize()
     /// Gates whether the engine's view grabs keyboard first-responder when it
-    /// mounts into a window. `TerminalView` sets it from the pane's active
-    /// state so the mounts that still happen — tab switches within a pane,
-    /// fresh splits/tabs, cross-pane and cross-window tab moves — land focus
-    /// only when the pane is the active one (issue #24). Workspace switches
-    /// no longer re-mount anything (persistent containers); those are
-    /// `PaneTreeHostView.syncFocus`'s job. Default true: a single pane or a
-    /// fresh split/tab still grabs focus on mount.
+    /// mounts into a window. `TerminalTabHost` sets it from the pane's active
+    /// state so first visits land focus only when the pane is active (issue #24).
+    /// Workspace switches no longer re-mount anything (persistent containers);
+    /// those are `PaneTreeHostView.syncFocus`'s job. Default true: a single pane
+    /// or a fresh split/tab still grabs focus on mount.
     var grabsFocusOnMount: Bool { get set }
     /// Exempts THIS engine from the lazy spawn-on-reveal gate: its surface
     /// (and shell) comes up even while the view is hidden. Set for tabs the
