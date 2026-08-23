@@ -142,6 +142,10 @@ final class Session: Identifiable {
         terminalTitle = value
         lastTerminalTitleApply = ContinuousClock.now
     }
+    /// Agent id to persist for the next automatic restore. Kept after an
+    /// agent's `.ended` event even though `agent` returns to `.terminal` for
+    /// the live tab UI.
+    var restoreAgentId: String?
     /// Last resumable conversation id this tab's agent reported. Persisted
     /// via `PersistedTab.conversationId` so the next kooky launch can resume
     /// where the user left off. Per-Session because each tab owns its own
@@ -419,6 +423,7 @@ final class Session: Identifiable {
         self.engine = engine
         self.currentDirectory = currentDirectory
         self.agent = agent
+        self.restoreAgentId = agent.supportsResume ? agent.id : nil
         self.customTitle = customTitle
         self.conversationId = conversationId
     }

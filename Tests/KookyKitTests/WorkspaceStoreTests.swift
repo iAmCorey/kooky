@@ -1609,6 +1609,43 @@ final class WorkspaceStoreTests: XCTestCase {
         XCTAssertEqual(persistedTab?.conversationId, "convo-roundtrip")
     }
 
+    func testEndedResumableAgentDoesNotRemainPersistedAfterNormalExit() throws {
+        let persistence = InMemoryPersistence()
+        let store = makeStore(persistence: persistence)
+        let ws = store.addWorkspace(workingDirectory: projectA)
+        let tab = store.addTab(in: ws, template: .terminal)
+
+        store.applyHookEvent(agent: .ohMyPi, event: .running, sessionId: tab.id)
+        store.applyConversationId(conversationId: "omp-session", sessionId: tab.id)
+        store.applyHookEvent(agent: .ohMyPi, event: .ended, sessionId: tab.id)
+        store.flushPersistence()
+
+        let persistedTab = try XCTUnwrap(
+            persistence.saved?.workspaces.flatMap(\.root.allTabs).first { $0.id == tab.id }
+        )
+        XCTAssertEqual(persistedTab.agentId, AgentTemplate.terminal.id)
+        XCTAssertEqual(persistedTab.conversationId, "omp-session")
+    }
+
+    func testEndedResumableAgentRemainsPersistedDuringTermination() throws {
+        let persistence = InMemoryPersistence()
+        let store = makeStore(persistence: persistence)
+        let ws = store.addWorkspace(workingDirectory: projectA)
+        let tab = store.addTab(in: ws, template: .terminal)
+
+        store.applyHookEvent(agent: .ohMyPi, event: .running, sessionId: tab.id)
+        store.applyConversationId(conversationId: "omp-session", sessionId: tab.id)
+        store.prepareForTermination()
+        store.applyHookEvent(agent: .ohMyPi, event: .ended, sessionId: tab.id)
+        store.flushPersistence()
+
+        let persistedTab = try XCTUnwrap(
+            persistence.saved?.workspaces.flatMap(\.root.allTabs).first { $0.id == tab.id }
+        )
+        XCTAssertEqual(persistedTab.agentId, AgentTemplate.ohMyPi.id)
+        XCTAssertEqual(persistedTab.conversationId, "omp-session")
+    }
+
     func testClaudeNoSessionPersistenceDropsResumeIdWithoutDisablingFutureCapture() {
         let store = WorkspaceStore(
             persistence: InMemoryPersistence(),

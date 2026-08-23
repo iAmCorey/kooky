@@ -146,11 +146,9 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
         AgentIconStore.wireForApp()
         AgentIconStore.prune(keeping: settings.customAgents)
 
-        restoreWindows()
-
-        NSApp.setActivationPolicy(.regular)
-        NSApp.activate(ignoringOtherApps: true)
-        installMainMenu()
+        // Agents may report their conversation id during startup. Start the
+        // socket before restoring agent tabs so a one-shot payload cannot be
+        // lost before HookServer is listening.
         // Wire the CLI verb executor before the socket opens so the first
         // request can't race an unset handler. The isTerminating guard is
         // the same discipline as the deep-link path: during the ⌘Q drain a
@@ -168,6 +166,12 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
             )
         }
         hookServer.start()
+
+        restoreWindows()
+
+        NSApp.setActivationPolicy(.regular)
+        NSApp.activate(ignoringOtherApps: true)
+        installMainMenu()
         // Mirror kooky-cli into Application Support (same Gatekeeper story
         // as KookyHook: /Applications exec-assessment kills fresh-cdhash
         // adhoc binaries run from inside the bundle). Launch-time so the
@@ -970,6 +974,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
         // surface before waiting: one slow agent must not strand another tab.
         isTerminating = true
         for controller in windowControllers {
+            controller.store.prepareForTermination()
             controller.store.flushPersistence()
             controller.store.terminate()
         }
@@ -1006,6 +1011,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
         // `scheduleSave` debounce would otherwise drop changes made in the
         // final second before ⌘Q.
         for controller in windowControllers {
+            controller.store.prepareForTermination()
             controller.store.flushPersistence()
         }
         // If closed-lid mode is engaged, re-enable lid sleep before dying —

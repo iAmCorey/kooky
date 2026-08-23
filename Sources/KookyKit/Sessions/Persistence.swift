@@ -254,7 +254,7 @@ struct PersistedTab: Codable, Equatable {
     @MainActor
     init(_ session: Session) {
         self.id = session.id
-        self.agentId = session.agent.id
+        self.agentId = session.restoreAgentId ?? session.agent.id
         self.currentDirectoryPath = session.currentDirectory.path
         self.customTitle = session.customTitle
         self.conversationId = session.conversationId

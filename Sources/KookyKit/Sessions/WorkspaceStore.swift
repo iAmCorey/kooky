@@ -396,6 +396,8 @@ final class WorkspaceStore {
     /// a store from outside the UI (the CLI) must skip it, or it lands a tab
     /// in a store that is about to be dropped and reports success.
     private(set) var isTerminated = false
+    private var preserveResumableAgentsForTermination = false
+
     private static let saveDebounce: UInt64 = 1_000_000_000
 
     var active: Workspace? {
@@ -1685,12 +1687,18 @@ final class WorkspaceStore {
                 // (handleSessionAlert reads displayAgent synchronously).
                 onSessionAlert(session.id, .completed)
                 session.agent = .terminal
+                if !preserveResumableAgentsForTermination {
+                    session.restoreAgentId = nil
+                }
             }
         } else if session.agent.isShell {
             // Includes the default Terminal *and* any TerminalPreset — a
             // user starting Claude inside a preset terminal should get
             // the same icon-upgrade the default Terminal does.
             session.agent = agent
+        }
+        if event != .ended, session.agent.supportsResume {
+            session.restoreAgentId = session.agent.id
         }
         // SessionStart → UserPromptSubmit on Claude (and BeforeAgent on Gemini)
         // re-fires `.running` per turn; the @Observable setter notifies every
@@ -1801,6 +1809,10 @@ final class WorkspaceStore {
                 }
             }
         }
+    }
+
+    func prepareForTermination() {
+        preserveResumableAgentsForTermination = true
     }
 
     func flushPersistence() {
@@ -1957,7 +1969,8 @@ final class WorkspaceStore {
         var normalizedConversationId = persistsConversation
             ? template.normalizedConversationId(conversationId)
             : nil
-        let resumeId = (forceResume || resumeProvider()) ? normalizedConversationId : nil
+        let shouldResume = forceResume || resumeProvider()
+        let resumeId = shouldResume ? normalizedConversationId : nil
         // Grok accepts a caller-assigned UUID for a fresh session. Generate it
         // before launch and persist the same value immediately, eliminating
         // the hook/file-discovery race every other agent has to solve. When
