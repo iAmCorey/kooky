@@ -46,6 +46,7 @@ struct TabBarItem: View {
         .animation(.easeOut(duration: 0.14), value: isActive)
         .animation(.easeOut(duration: 0.12), value: isHovered)
         .overlay(RightClickCatcher { _ in isContextMenuOpen = true })
+        .overlay(MiddleClickCatcher { onClose() })
         .popover(isPresented: $isContextMenuOpen, arrowEdge: .bottom) {
             VStack(alignment: .leading, spacing: 0) {
                 KookyMenuRow(title: "Close Tab", shortcut: "⌘W") {
