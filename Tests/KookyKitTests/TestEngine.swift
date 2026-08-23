@@ -12,6 +12,7 @@ final class TestEngine: TerminalEngine {
     }
 
     let view: NSView = FocusableView()
+    func renderNowIfNeeded() {}
     var backgroundColor: NSColor { .black }
     var onPwdChange: ((String) -> Void)?
     var onTitleChange: ((String) -> Void)?

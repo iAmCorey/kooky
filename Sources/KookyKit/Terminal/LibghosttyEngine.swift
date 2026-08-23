@@ -548,6 +548,9 @@ final class LibghosttyEngine: TerminalEngine {
     private let surfaceView: GhosttySurfaceView
 
     var view: NSView { surfaceView }
+    func renderNowIfNeeded() {
+        surfaceView.renderNowIfNeeded()
+    }
     var backgroundColor: NSColor { Theme.terminalSurface }
     var onPwdChange: ((String) -> Void)? {
         get { surfaceView.onPwdChange }
@@ -746,8 +749,9 @@ final class GhosttySurfaceView: NSView {
     private var keyWindowObservers: [NSObjectProtocol] = []
 
     /// Read in `viewDidMoveToWindow` to gate the mount-time first-responder
-    /// grab; set by `TerminalView` from the pane's active state. See
-    /// `TerminalEngine.grabsFocusOnMount` for the why (issue #24).
+    /// grab; set by `TerminalTabHost` from the pane's active state. See
+    /// `TerminalEngine.grabsFocusOnMount` for why this remains a mount-time
+    /// gate (issue #24).
     var grabsFocusOnMount = true
 
     /// `TerminalEngine.spawnsWhileHidden` — exempts createSurfaceIfReady's
@@ -1011,12 +1015,19 @@ final class GhosttySurfaceView: NSView {
     }
 
     /// Mark the surface dirty and wake the render link so the next vsync presents
-    /// the new frame. Idempotent + cheap — call it from `GHOSTTY_ACTION_RENDER`
+    /// the new frame. Idempotent and cheap — call it from `GHOSTTY_ACTION_RENDER`
     /// and after any surface mutation we initiate, so a frame is never stranded
     /// waiting for an action that may have already fired before the link ran.
     func setNeedsRender() {
         needsRender = true
         renderLink?.isPaused = false
+    }
+
+    /// Present the active surface immediately instead of waiting for the next vsync.
+    func renderNowIfNeeded() {
+        guard let surface, !isHiddenOrHasHiddenAncestor else { return }
+        needsRender = false
+        ghostty_surface_render_now(surface)
     }
 
     /// Render link runs only when the surface exists, the view is in a window,
@@ -1048,6 +1059,10 @@ final class GhosttySurfaceView: NSView {
         // CLI background tabs — those views arrive here with the surface
         // already created, so this call no-ops.)
         createSurfaceIfReady()
+        // A hidden tab may have missed geometry changes. Re-sync only when it
+        // becomes visible, avoiding background SIGWINCH while preserving the
+        // first visible frame's dimensions.
+        if surface != nil { propagateSizeToSurface(force: true) }
         updateRenderLink()
     }
 
@@ -2097,7 +2112,7 @@ final class GhosttySurfaceView: NSView {
         // overflowed and stuck until the next resize (issue #8 follow-up — only
         // on the 1x monitor, never on the 2x laptop where the fallback matched).
         // viewDidMoveToWindow re-syncs on reattach.
-        guard let surface, let window else { return }
+        guard let surface, let window, force || !isHiddenOrHasHiddenAncestor else { return }
         let scale = window.backingScaleFactor
         let widthPx = UInt32(bounds.size.width * scale)
         let heightPx = UInt32(bounds.size.height * scale)

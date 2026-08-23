@@ -176,4 +176,29 @@ final class PaneTreeHostTests: XCTestCase {
             "the SwiftUI split tree should mount the terminal view inside the workspace's persistent container"
         )
     }
+
+    func testTerminalTabHostRetainsVisitedViews() throws {
+        let store = makeStore()
+        let workspace = try XCTUnwrap(store.active)
+        let first = try XCTUnwrap(workspace.activeSession)
+        let second = store.addTab(in: workspace)
+        let host = TerminalTabHostView()
+        host.frame = NSRect(x: 0, y: 0, width: 800, height: 600)
+
+        host.update(tabs: workspace.activePane?.tabs ?? [], activeTabId: second.id, grabsFocusOnMount: true)
+        XCTAssertTrue(second.engine.view.superview === host)
+        XCTAssertNil(first.engine.view.superview, "unvisited tabs stay lazy")
+
+        host.update(tabs: workspace.activePane?.tabs ?? [], activeTabId: first.id, grabsFocusOnMount: true)
+        XCTAssertTrue(first.engine.view.superview === host)
+        XCTAssertTrue(second.engine.view.superview === host)
+        XCTAssertTrue(second.engine.view.isHidden)
+        let firstView = first.engine.view
+
+        host.update(tabs: workspace.activePane?.tabs ?? [], activeTabId: second.id, grabsFocusOnMount: true)
+        XCTAssertTrue(first.engine.view === firstView, "switching back must reuse the mounted NSView")
+        XCTAssertTrue(first.engine.view.isHidden)
+        XCTAssertFalse(second.engine.view.isHidden)
+    }
+
 }
