@@ -115,14 +115,16 @@ kooky-cli open --cwd ~/Github/vibex -e "npx @deepseek-ai/dsh web"   # 新 tab：
 kooky-cli open --cwd ~/Github/vibex --agent claude-code             # 新 tab 里启动一个 agent 模板
 kooky-cli open --agent claude-code                                  # 不给 --cwd：开在当前 workspace 所在目录
 kooky-cli open --agent preset-1                                     # Terminal 预设自带目录，可以不给 --cwd
+kooky-cli open -e "npm run dev" --title "dev server" --no-focus     # 命名 tab 并后台打开
 kooky-cli resume --agent codex --id <会话id>                        # 与 kooky://resume 深层链接同语义
 kooky-cli list --json                                               # 窗口 → workspace → tab 树，带 id
 kooky-cli focus --tab <session-uuid>                                # 把某个 tab 带到最前
 kooky-cli close --tab <session-uuid>                                # 遵循应用内的关闭确认规则
+kooky-cli rename --tab <session-uuid> --title <标题>                # 设置 tab 标题
 kooky-cli status                                                    # 版本与健康状态；未运行时退出码 1
 ```
 
-除 `status` 外，每个命令都会在 kooky 未运行时先把它拉起。退出码 0 表示请求已受理；任何失败都在 stderr 打印一行原因。`--agent` 接受与 Settings → Agents 相同的模板 id（内置、自定义和 Terminal 预设）。`--cwd` 是必填的，只有指定 Terminal 预设时可以省略——预设自带固定目录；仍然可以传 `--cwd` 覆盖它。
+除 `status` 外，每个命令都会在 kooky 未运行时先把它拉起。退出码 0 表示请求已受理；任何失败都在 stderr 打印一行原因。`--agent` 接受与 Settings → Agents 相同的模板 id（内置、自定义和 Terminal 预设）。`--cwd` 是可选的：不给时 tab 开在当前 workspace 所在目录，Terminal 预设则用它自带的固定目录——两种情况都可以传 `--cwd` 覆盖。`--title` 的优先级高于自动标题，效果与手动重命名 tab 完全一致；`--no-focus` 后台打开：kooky 不会被带到前台（包括由 CLI 拉起 kooky 的场景），你正在看的内容也不会被切走——和 kooky 重启恢复的后台 tab 一样，它在第一次被显示时才开始运行。
 
 二进制随 app 打包在 `Kooky.app/Contents/MacOS/kooky-cli`，kooky 每次启动还会把它刷新到稳定路径 `~/Library/Application Support/kooky/bin/kooky-cli` —— 外部工具建议指向后者：这个路径跨版本更新不变，而且 macOS Gatekeeper 会杀掉从 `/Applications` 内部 exec 的未公证辅助二进制，Application Support 的拷贝不受影响。想加进 PATH？做个 symlink：
 

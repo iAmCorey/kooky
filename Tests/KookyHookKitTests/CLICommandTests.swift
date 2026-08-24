@@ -18,20 +18,20 @@ final class CLICommandTests: XCTestCase {
     // MARK: parse — happy paths
 
     func testParseOpenPlainTerminal() {
-        XCTAssertEqual(parsed(["open", "--cwd", "/tmp"]), .open(cwd: "/tmp", command: nil, agent: nil))
+        XCTAssertEqual(parsed(["open", "--cwd", "/tmp"]), .open(cwd: "/tmp", command: nil, agent: nil, title: nil, noFocus: false))
     }
 
     func testParseOpenWithCommand() {
         XCTAssertEqual(
             parsed(["open", "--cwd", "/tmp", "-e", "npx @deepseek-ai/dsh web"]),
-            .open(cwd: "/tmp", command: "npx @deepseek-ai/dsh web", agent: nil)
+            .open(cwd: "/tmp", command: "npx @deepseek-ai/dsh web", agent: nil, title: nil, noFocus: false)
         )
     }
 
     func testParseOpenWithAgent() {
         XCTAssertEqual(
             parsed(["open", "--cwd", "/tmp", "--agent", "claude-code"]),
-            .open(cwd: "/tmp", command: nil, agent: "claude-code")
+            .open(cwd: "/tmp", command: nil, agent: "claude-code", title: nil, noFocus: false)
         )
     }
 
@@ -40,7 +40,7 @@ final class CLICommandTests: XCTestCase {
         // starts with a dash must not read as an unknown flag.
         XCTAssertEqual(
             parsed(["open", "--cwd", "/tmp", "-e", "--version"]),
-            .open(cwd: "/tmp", command: "--version", agent: nil)
+            .open(cwd: "/tmp", command: "--version", agent: nil, title: nil, noFocus: false)
         )
     }
 
@@ -50,7 +50,7 @@ final class CLICommandTests: XCTestCase {
     func testParseOpenAcceptsNoCwdWhenATemplateIsNamed() {
         XCTAssertEqual(
             parsed(["open", "--agent", "preset-1"]),
-            .open(cwd: nil, command: nil, agent: "preset-1")
+            .open(cwd: nil, command: nil, agent: "preset-1", title: nil, noFocus: false)
         )
     }
 
@@ -59,7 +59,7 @@ final class CLICommandTests: XCTestCase {
     /// "give me a new tab", and `open -e` means "run this here".
     func testParseOpenWithoutCwdIsAllowed() {
         switch KookyHookKit.parseCLICommand(["open"]) {
-        case .success(.open(let cwd, let command, let agent)):
+        case .success(.open(let cwd, let command, let agent, _, _)):
             XCTAssertNil(cwd)
             XCTAssertNil(command)
             XCTAssertNil(agent)
@@ -67,7 +67,7 @@ final class CLICommandTests: XCTestCase {
         case .failure(let error): XCTFail("bare open should parse: \(error.message)")
         }
         switch KookyHookKit.parseCLICommand(["open", "-e", "ls"]) {
-        case .success(.open(let cwd, let command, _)):
+        case .success(.open(let cwd, let command, _, _, _)):
             XCTAssertNil(cwd)
             XCTAssertEqual(command, "ls")
         case .success(let other): XCTFail("unexpected \(other)")
@@ -115,9 +115,34 @@ final class CLICommandTests: XCTestCase {
         // silently turning into the help screen.
         XCTAssertEqual(
             parsed(["open", "--cwd", "/tmp", "-e", "--help"]),
-            .open(cwd: "/tmp", command: "--help", agent: nil)
+            .open(cwd: "/tmp", command: "--help", agent: nil, title: nil, noFocus: false)
         )
         XCTAssertNotNil(parseError(["focus", "--tab", "help"]))
+    }
+
+    func testParseOpenTitleAndNoFocus() {
+        XCTAssertEqual(
+            parsed(["open", "--cwd", "/tmp", "--title", "build watcher", "--no-focus"]),
+            .open(cwd: "/tmp", command: nil, agent: nil, title: "build watcher", noFocus: true)
+        )
+        XCTAssertEqual(
+            parsed(["open", "-e", "make", "--title", "Build"]),
+            .open(cwd: nil, command: "make", agent: nil, title: "Build", noFocus: false)
+        )
+    }
+
+    func testParseRename() {
+        let uuid = "6BA7B810-9DAD-11D1-80B4-00C04FD430C8"
+        XCTAssertEqual(
+            parsed(["rename", "--tab", uuid, "--title", "deploy log"]),
+            .rename(tab: uuid, title: "deploy log")
+        )
+        XCTAssertNotNil(parseError(["rename", "--tab", uuid]), "missing --title")
+        XCTAssertNotNil(parseError(["rename", "--title", "x"]), "missing --tab")
+        XCTAssertNotNil(parseError(["rename", "--tab", "not-a-uuid", "--title", "x"]))
+        // Blank title collapses to "not passed" (the shared value-flag rule),
+        // so rename can never CLEAR a title by accident.
+        XCTAssertNotNil(parseError(["rename", "--tab", uuid, "--title", "  "]))
     }
 
     // MARK: parse — failures
@@ -158,7 +183,7 @@ final class CLICommandTests: XCTestCase {
     // MARK: command → request mapping
 
     func testRequestMappingCarriesEveryField() {
-        let open = KookyHookKit.cliRequest(for: .open(cwd: "/x", command: "make", agent: nil))
+        let open = KookyHookKit.cliRequest(for: .open(cwd: "/x", command: "make", agent: nil, title: nil, noFocus: false))
         XCTAssertEqual(open?.verb, "open")
         XCTAssertEqual(open?.cwd, "/x")
         XCTAssertEqual(open?.command, "make")
@@ -180,6 +205,24 @@ final class CLICommandTests: XCTestCase {
         XCTAssertEqual(KookyHookKit.cliRequest(for: .close(tab: "ID"))?.verb, "close")
         XCTAssertEqual(KookyHookKit.cliRequest(for: .status(json: false))?.verb, "status")
         XCTAssertNil(KookyHookKit.cliRequest(for: .help))
+    }
+
+    func testRequestMappingForTitleNoFocusAndRename() {
+        let open = KookyHookKit.cliRequest(for: .open(cwd: "/x", command: nil, agent: nil, title: "T", noFocus: true))
+        XCTAssertEqual(open?.title, "T")
+        XCTAssertEqual(open?.noFocus, true)
+
+        // A focused open ships NO noFocus field at all — the request line
+        // stays byte-compatible with what a v0.51.0 CLI sends, so an older
+        // app's decoder never meets the key.
+        let focused = KookyHookKit.cliRequest(for: .open(cwd: "/x", command: nil, agent: nil, title: nil, noFocus: false))
+        XCTAssertNil(focused?.noFocus)
+        XCTAssertNil(focused?.title)
+
+        let rename = KookyHookKit.cliRequest(for: .rename(tab: "ID", title: "new name"))
+        XCTAssertEqual(rename?.verb, "rename")
+        XCTAssertEqual(rename?.tab, "ID")
+        XCTAssertEqual(rename?.title, "new name")
     }
 
     // MARK: wire round-trip
@@ -223,12 +266,12 @@ final class CLICommandTests: XCTestCase {
         // the CLI happens to be running in (which is what path
         // normalization would otherwise turn "" into).
         switch KookyHookKit.parseCLICommand(["open", "--cwd", ""]) {
-        case .success(.open(let cwd, _, _)): XCTAssertNil(cwd)
+        case .success(.open(let cwd, _, _, _, _)): XCTAssertNil(cwd)
         case .success(let other): XCTFail("unexpected \(other)")
         case .failure(let error): XCTFail("blank --cwd should fold, not fail: \(error.message)")
         }
         switch KookyHookKit.parseCLICommand(["open", "--cwd", "   "]) {
-        case .success(.open(let cwd, _, _)): XCTAssertNil(cwd, "whitespace is blank too")
+        case .success(.open(let cwd, _, _, _, _)): XCTAssertNil(cwd, "whitespace is blank too")
         case .success(let other): XCTFail("unexpected \(other)")
         case .failure(let error): XCTFail("blank --cwd should fold, not fail: \(error.message)")
         }
@@ -251,7 +294,7 @@ final class CLICommandTests: XCTestCase {
     /// command out of history).
     func testLeadingWhitespaceInACommandIsPreserved() {
         switch KookyHookKit.parseCLICommand(["open", "--cwd", "/tmp", "-e", " secret-cmd"]) {
-        case .success(.open(_, let command, _)): XCTAssertEqual(command, " secret-cmd")
+        case .success(.open(_, let command, _, _, _)): XCTAssertEqual(command, " secret-cmd")
         case .success(let other): XCTFail("unexpected \(other)")
         case .failure(let error): XCTFail(error.message)
         }

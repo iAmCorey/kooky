@@ -188,6 +188,8 @@ final class KookyCLIController {
             completion(handleFocus(request))
         case .close:
             completion(handleClose(request))
+        case .rename:
+            completion(handleRename(request))
         case .open:
             handleOpen(request, isCallerWaiting: isCallerWaiting, completion: completion)
         case .resume:
@@ -259,6 +261,26 @@ final class KookyCLIController {
         }
     }
 
+    /// Pure metadata: never activates the app or fronts a window. Uses the
+    /// same store entry the in-app rename popover commits through, so
+    /// normalize/dedup/persist semantics can't fork. `--title` is required
+    /// non-empty at the parser; the guard here keeps a direct caller's
+    /// blank title from CLEARING the tab's name (renameTab's blank = clear
+    /// is the popover's affordance, not this verb's).
+    private func handleRename(_ request: KookyCLIRequest) -> KookyCLIResponse {
+        guard let id = sessionUUID(request) else {
+            return refuse("rename needs --tab <session-uuid>")
+        }
+        guard let title = request.title.flatMap(normalizedTitle) else {
+            return refuse("rename needs --title <title>")
+        }
+        guard let hit = locate(id) else {
+            return refuse("no tab with id \(id.uuidString) — run `kooky-cli list`")
+        }
+        hit.context.store.renameTab(hit.session, to: title)
+        return ok(note: "renamed")
+    }
+
     private func handleOpen(
         _ request: KookyCLIRequest,
         isCallerWaiting: @escaping @MainActor () -> Bool,
@@ -312,6 +334,11 @@ final class KookyCLIController {
         // falls through to the placement ladder, which is the right answer
         // for a workspace that didn't exist when the request arrived.
         let deadline = RequestDeadline(Self.asyncVerbDeadline)
+        // Blank collapses to nil (`normalizedTitle`) so a scripted
+        // `--title "$MAYBE"` with an empty variable opens an untitled tab
+        // instead of one titled with whitespace.
+        let title = request.title.flatMap(normalizedTitle)
+        let noFocus = request.noFocus == true
         // Nothing to stat, nothing to match against: land in the active
         // workspace and let it supply the directory.
         guard let cwdPath else {
@@ -320,7 +347,9 @@ final class KookyCLIController {
                 cwd: nil,
                 canonicalCwd: nil,
                 canonicalPaths: [:],
-                command: request.command
+                command: request.command,
+                title: title,
+                noFocus: noFocus
             ))
             return
         }
@@ -393,7 +422,9 @@ final class KookyCLIController {
                 cwd: cwd,
                 canonicalCwd: canonical,
                 canonicalPaths: canonicalPaths,
-                command: request.command
+                command: request.command,
+                title: title,
+                noFocus: noFocus
             ))
         }
     }
@@ -435,7 +466,9 @@ final class KookyCLIController {
         cwd: URL?,
         canonicalCwd: String?,
         canonicalPaths: [UUID: String],
-        command: String?
+        command: String?,
+        title: String?,
+        noFocus: Bool
     ) -> KookyCLIResponse {
         let allWindows = windows()
         let landed: (context: WindowContext, workspace: Workspace, session: Session)
@@ -445,7 +478,9 @@ final class KookyCLIController {
                 in: match.workspace,
                 template: template,
                 initialCwd: cwd,
-                rawLaunchCommand: command
+                rawLaunchCommand: command,
+                customTitle: title,
+                activate: !noFocus
             )
             landed = (match.context, match.workspace, session)
         } else {
@@ -454,6 +489,15 @@ final class KookyCLIController {
             if let existing = allWindows.first(where: { $0.isKey }) ?? allWindows.first {
                 host = existing
                 builtWindow = false
+            } else if noFocus {
+                // Zero terminal windows (Settings/About keeping the app
+                // alive): the fallback would BUILD one, and addWindow
+                // fronts what it builds — a promise --no-focus exists to
+                // not break. Refuse before the side effect instead of
+                // presenting a "background" tab in a brand-new key window
+                // (the close verb's windowBusy precedent: refuse loudly
+                // over silently doing something else).
+                return refuse("no terminal window to land a background tab in — drop --no-focus or open a kooky window first")
             } else if let fallback = fallbackWindow() {
                 host = fallback.context
                 builtWindow = fallback.builtWindow
@@ -472,7 +516,9 @@ final class KookyCLIController {
                 template: template,
                 cwd: cwd,
                 cwdIsConfirmed: true,
-                rawLaunchCommand: command
+                rawLaunchCommand: command,
+                customTitle: title,
+                activate: !noFocus
             )
             // A whole WINDOW built for this call arrives with a seed tab of
             // its own, which `localSpawn` lands beside rather than replaces
@@ -493,6 +539,20 @@ final class KookyCLIController {
                 host.store.discardSeedTab(keeping: spawned.session)
             }
             landed = (host, spawned.workspace, spawned.session)
+        }
+        // --no-focus is the whole point of the flag: no app activation, no
+        // window fronting, and (via `activate: false` above) the tab isn't
+        // even its pane's active tab — so a user looking at that workspace
+        // keeps seeing what they were seeing. `focus --tab` upgrades later.
+        // The note states the visibility-driven PTY consequence out loud
+        // (v0.50.0 laziness: a never-shown tab hasn't spawned its shell) —
+        // same behavior as restored background tabs, but a CLI caller
+        // running `-e` deserves to hear it rather than discover it.
+        if noFocus {
+            return ok(
+                tabId: landed.session.id.uuidString,
+                note: "starts when the tab is first shown"
+            )
         }
         activateApp()
         landed.context.reveal(landed.session, landed.workspace)

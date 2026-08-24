@@ -2,6 +2,10 @@
 
 Notable changes per release. Tagged commits use `vX.Y.Z` shortform.
 
+## v0.51.3 — 2026-08-24
+
+- New: `kooky-cli open` takes `--title <title>` to name the tab from the start (it outranks the automatic title, exactly like renaming the tab by hand), and `--no-focus` to open it in the background — kooky isn't brought to the front (including when the CLI has to launch it first) and the tab doesn't replace what you're looking at; like kooky's own restored background tabs, it starts running when first shown, and `kooky-cli focus` brings it forward. A new `rename --tab <uuid> --title <title>` command retitles an existing tab. Requires this version of the app; an older kooky ignores the new options. (#57)
+
 ## v0.51.1 — 2026-08-21
 
 - Improved: `kooky-cli open` no longer needs `--cwd`. Without it the tab opens where the active workspace already is, so `kooky-cli open` on its own means "give me a new tab" and `--agent` alone starts an agent right there. (#56)

@@ -13,11 +13,14 @@ public enum KookyCLICommand: Equatable, Sendable {
     /// `cwd` is optional ONLY because a Terminal preset carries its own
     /// directory; every other template still needs one, which the app
     /// enforces (it is the side that knows what a template id resolves to).
-    case open(cwd: String?, command: String?, agent: String?)
+    /// `title` seeds the tab's user override (same field tab rename writes);
+    /// `noFocus` lands the tab in the background (issue #57).
+    case open(cwd: String?, command: String?, agent: String?, title: String?, noFocus: Bool)
     case resume(agent: String, id: String, cwd: String?)
     case list(json: Bool)
     case focus(tab: String)
     case close(tab: String)
+    case rename(tab: String, title: String)
     case status(json: Bool)
     case help
 }
@@ -39,9 +42,9 @@ extension KookyHookKit {
 
     private static let verbSpecs: [String: VerbSpec] = [
         "open": VerbSpec(
-            valueFlags: ["--cwd", "-e", "--agent"],
-            boolFlags: [],
-            usage: "usage: kooky-cli open [--cwd <dir>] [-e <command> | --agent <template-id>]"
+            valueFlags: ["--cwd", "-e", "--agent", "--title"],
+            boolFlags: ["--no-focus"],
+            usage: "usage: kooky-cli open [--cwd <dir>] [-e <command> | --agent <template-id>] [--title <title>] [--no-focus]"
         ),
         "resume": VerbSpec(
             valueFlags: ["--agent", "--id", "--cwd"],
@@ -63,6 +66,11 @@ extension KookyHookKit {
             boolFlags: [],
             usage: "usage: kooky-cli close --tab <session-uuid>"
         ),
+        "rename": VerbSpec(
+            valueFlags: ["--tab", "--title"],
+            boolFlags: [],
+            usage: "usage: kooky-cli rename --tab <session-uuid> --title <title>"
+        ),
         "status": VerbSpec(
             valueFlags: [],
             boolFlags: ["--json"],
@@ -72,7 +80,7 @@ extension KookyHookKit {
 
     private static func unknownVerbFailure(_ verb: String) -> KookyCLIParseFailure {
         KookyCLIParseFailure(
-            "unknown command '\(verb)' — one of: open, resume, list, focus, close, status. Run `kooky-cli --help`."
+            "unknown command '\(verb)' — one of: open, resume, list, focus, close, rename, status. Run `kooky-cli --help`."
         )
     }
 
@@ -157,7 +165,13 @@ extension KookyHookKit {
             // own directory, and with no directory named at all the tab
             // opens wherever the active workspace already is. Bare
             // `kooky-cli open` is therefore "give me a new tab".
-            return .success(.open(cwd: values["--cwd"], command: command, agent: agent))
+            return .success(.open(
+                cwd: values["--cwd"],
+                command: command,
+                agent: agent,
+                title: values["--title"],
+                noFocus: bools.contains("--no-focus")
+            ))
         case "resume":
             return require("--agent").flatMap { agent in
                 require("--id").map { id in
@@ -170,6 +184,12 @@ extension KookyHookKit {
             return requireTab().map { .focus(tab: $0) }
         case "close":
             return requireTab().map { .close(tab: $0) }
+        case "rename":
+            return requireTab().flatMap { tab in
+                require("--title").map { title in
+                    .rename(tab: tab, title: title)
+                }
+            }
         case "status":
             return .success(.status(json: bools.contains("--json")))
         default:
@@ -184,8 +204,18 @@ extension KookyHookKit {
     /// Path normalization is the caller's job — this maps fields verbatim.
     public static func cliRequest(for command: KookyCLICommand) -> KookyCLIRequest? {
         switch command {
-        case .open(let cwd, let cmd, let agent):
-            return KookyCLIRequest(verb: .open, cwd: cwd, command: cmd, agent: agent)
+        case .open(let cwd, let cmd, let agent, let title, let noFocus):
+            // `noFocus` ships only when set: an absent optional keeps the
+            // request line byte-identical to what a v0.51.0 CLI sends, so
+            // an older app's decoder never sees the field at all.
+            return KookyCLIRequest(
+                verb: .open,
+                cwd: cwd,
+                command: cmd,
+                agent: agent,
+                title: title,
+                noFocus: noFocus ? true : nil
+            )
         case .resume(let agent, let id, let cwd):
             return KookyCLIRequest(verb: .resume, cwd: cwd, agent: agent, conversationId: id)
         case .list:
@@ -194,6 +224,8 @@ extension KookyHookKit {
             return KookyCLIRequest(verb: .focus, tab: tab)
         case .close(let tab):
             return KookyCLIRequest(verb: .close, tab: tab)
+        case .rename(let tab, let title):
+            return KookyCLIRequest(verb: .rename, tab: tab, title: title)
         case .status:
             return KookyCLIRequest(verb: .status)
         case .help:
@@ -221,18 +253,25 @@ extension KookyHookKit {
         usage: kooky-cli <command> [options]
 
           open [--cwd <dir>] [-e <command> | --agent <template-id>]
+               [--title <title>] [--no-focus]
                                   open a new tab at <dir>; -e runs a shell
                                   command there, --agent starts an agent
                                   (built-in, Settings → Agents custom, or a
                                   Terminal preset). Without --cwd the tab
                                   opens where the active workspace already
-                                  is — a Terminal preset uses its own path
+                                  is — a Terminal preset uses its own path.
+                                  --title names the tab (outranks the
+                                  automatic title, like a manual rename);
+                                  --no-focus lands it in the background —
+                                  the tab starts when first shown
           resume --agent <agent-id> --id <conversation-id> [--cwd <dir>]
                                   reopen an agent conversation (same
                                   semantics as kooky://resume deep links)
           list [--json]           windows → workspaces → tabs, with ids
           focus --tab <uuid>      bring a tab to the front
           close --tab <uuid>      close a tab (in-app confirmation rules apply)
+          rename --tab <uuid> --title <title>
+                                  set a tab's title (clear it in-app)
           status [--json]         app version + protocol; exits 1 when
                                   kooky isn't running
 

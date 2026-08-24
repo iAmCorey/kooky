@@ -115,14 +115,16 @@ kooky-cli open --cwd ~/Github/vibex -e "npx @deepseek-ai/dsh web"   # new tab: c
 kooky-cli open --cwd ~/Github/vibex --agent claude-code             # new tab running an agent template
 kooky-cli open --agent claude-code                                  # no --cwd: opens where the active workspace already is
 kooky-cli open --agent preset-1                                     # a Terminal preset brings its own directory
+kooky-cli open -e "npm run dev" --title "dev server" --no-focus     # named tab, opened in the background
 kooky-cli resume --agent codex --id <conversation-id>               # same semantics as kooky://resume
 kooky-cli list --json                                               # windows → workspaces → tabs, with ids
 kooky-cli focus --tab <session-uuid>                                # bring a tab to the front
 kooky-cli close --tab <session-uuid>                                # in-app confirmation rules apply
+kooky-cli rename --tab <session-uuid> --title <title>               # set a tab's title
 kooky-cli status                                                    # version + health; exit 1 when not running
 ```
 
-Every command except `status` launches kooky first when it isn't running. Exit code 0 means the request was accepted; any failure prints one reason line on stderr. `--agent` takes the same template ids as Settings → Agents (built-ins, customs, and Terminal presets). `--cwd` is required except when the named template is a Terminal preset, which pins its own directory — pass `--cwd` anyway to override it.
+Every command except `status` launches kooky first when it isn't running. Exit code 0 means the request was accepted; any failure prints one reason line on stderr. `--agent` takes the same template ids as Settings → Agents (built-ins, customs, and Terminal presets). `--cwd` is optional: without it the tab opens where the active workspace already is, and a Terminal preset uses its own pinned directory — pass `--cwd` to override either. `--title` outranks the tab's automatic title, exactly like renaming it by hand; `--no-focus` opens the tab without bringing kooky forward (even when the CLI launches kooky first) or switching what you're looking at — like kooky's own restored background tabs, it starts running when first shown.
 
 The binary ships inside the app at `Kooky.app/Contents/MacOS/kooky-cli`, and kooky refreshes a stable copy at `~/Library/Application Support/kooky/bin/kooky-cli` on every launch — point external tools at that one: the path survives app updates, and macOS Gatekeeper kills unnotarized helper binaries exec'd from inside `/Applications`, which the Application Support copy sidesteps. Want it on your PATH? Symlink it:
 

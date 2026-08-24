@@ -415,7 +415,9 @@ final class WorkspaceStore {
         sshRemoteHost: String? = nil,
         conversationId: String? = nil,
         forceResume: Bool = false,
-        rawLaunchCommand: String? = nil
+        rawLaunchCommand: String? = nil,
+        customTitle: String? = nil,
+        activate: Bool = true
     ) -> Workspace {
         // NB: the home fallback (fresh window's seed workspace) reaching
         // `noteRecentFolder` below is caught by `RecentFolders.note()`'s own
@@ -451,7 +453,8 @@ final class WorkspaceStore {
             conversationId: conversationId,
             forceResume: forceResume,
             sshRemoteHost: workspace.sshRemoteHost,
-            rawLaunchCommand: rawLaunchCommand
+            rawLaunchCommand: rawLaunchCommand,
+            customTitle: customTitle
         )
         wireSessionCallbacks(engine: session.engine, session: session, workspace: workspace, codexRolloutId: session.resumedConversationId)
         pane.tabs.append(session)
@@ -470,7 +473,9 @@ final class WorkspaceStore {
         } else {
             workspaces.append(workspace)
         }
-        activeWorkspaceId = workspace.id
+        if activate {
+            activeWorkspaceId = workspace.id
+        }
         // Remember the project folder for Open Recent / ⌘P (issue #28) —
         // except worktree children (their dir dies with the worktree) and
         // SSH workspaces (the local cwd is not where the project lives).
@@ -947,7 +952,9 @@ final class WorkspaceStore {
         conversationId: String? = nil,
         forceResume: Bool = false,
         initialPrompt: String? = nil,
-        rawLaunchCommand: String? = nil
+        rawLaunchCommand: String? = nil,
+        customTitle: String? = nil,
+        activate: Bool = true
     ) -> Session {
         // The raw channel replaces the template's own launch command inside
         // makeSessionConfig, but everything else (Session.agent identity,
@@ -967,14 +974,20 @@ final class WorkspaceStore {
         let cwd = initialCwd
             ?? template.extraCwd.map { resolvedSpawnCwd(($0 as NSString).expandingTildeInPath) }
             ?? workspace.workingDirectory
-        let session = spawnSession(template: template, initialCwd: cwd, conversationId: conversationId, forceResume: forceResume, initialPrompt: initialPrompt, sshRemoteHost: workspace.sshRemoteHost, rawLaunchCommand: rawLaunchCommand)
+        let session = spawnSession(template: template, initialCwd: cwd, conversationId: conversationId, forceResume: forceResume, initialPrompt: initialPrompt, sshRemoteHost: workspace.sshRemoteHost, rawLaunchCommand: rawLaunchCommand, customTitle: customTitle)
         wireSessionCallbacks(engine: session.engine, session: session, workspace: workspace, codexRolloutId: session.resumedConversationId)
         target.tabs.append(session)
-        target.activeTabId = session.id
-        if workspace.activePaneId != target.id {
-            workspace.activePaneId = target.id
+        // `activate: false` (CLI --no-focus) appends WITHOUT touching the
+        // active-tab/pane identity — the browser's background-tab shape. The
+        // file-tree override invalidation is identity-coupled, so it stays
+        // inside the gate too (nothing active changed).
+        if activate {
+            target.activeTabId = session.id
+            if workspace.activePaneId != target.id {
+                workspace.activePaneId = target.id
+            }
+            invalidateStaleFileTreeRootOverride()
         }
-        invalidateStaleFileTreeRootOverride()
         scheduleSave()
         return session
     }
@@ -1107,7 +1120,9 @@ final class WorkspaceStore {
         cwdIsConfirmed: Bool = false,
         conversationId: String? = nil,
         forceResume: Bool = false,
-        rawLaunchCommand: String? = nil
+        rawLaunchCommand: String? = nil,
+        customTitle: String? = nil,
+        activate: Bool = true
     ) -> (workspace: Workspace, session: Session) {
         let dir = cwd.map { cwdIsConfirmed ? $0 : resolvedSpawnCwd($0.path) }
         if let existing = (active?.sshRemoteHost == nil ? active : nil)
@@ -1118,19 +1133,25 @@ final class WorkspaceStore {
                 initialCwd: dir,
                 conversationId: conversationId,
                 forceResume: forceResume,
-                rawLaunchCommand: rawLaunchCommand
+                rawLaunchCommand: rawLaunchCommand,
+                customTitle: customTitle,
+                activate: activate
             )
             return (existing, session)
         }
         // Nothing local to land in. The fresh workspace's own seed tab IS
         // the launch — adding a tab beside it would leave a blank shell and
-        // a second PTY behind every such call.
+        // a second PTY behind every such call. A background spawn keeps the
+        // new workspace out of the way too: it appears in the sidebar but
+        // the one the user is looking at stays active.
         let workspace = addWorkspace(
             workingDirectory: dir,
             template: template,
             conversationId: conversationId,
             forceResume: forceResume,
-            rawLaunchCommand: rawLaunchCommand
+            rawLaunchCommand: rawLaunchCommand,
+            customTitle: customTitle,
+            activate: activate
         )
         // `addWorkspace` always seeds one tab; the fallback keeps the return
         // total rather than force-unwrapping an invariant held elsewhere.
@@ -1140,7 +1161,9 @@ final class WorkspaceStore {
             initialCwd: dir,
             conversationId: conversationId,
             forceResume: forceResume,
-            rawLaunchCommand: rawLaunchCommand
+            rawLaunchCommand: rawLaunchCommand,
+            customTitle: customTitle,
+            activate: activate
         )
         return (workspace, session)
     }
@@ -1868,7 +1891,7 @@ final class WorkspaceStore {
     /// Spawns the engine + Session. Caller wires `onPwdChange` / `onFocus`
     /// after a workspace ref is available — `restore` builds sessions before
     /// the workspace exists, so callbacks can't capture it here.
-    private func spawnSession(template: AgentTemplate, initialCwd: URL, sessionId: UUID = UUID(), conversationId: String? = nil, forceResume: Bool = false, initialPrompt: String? = nil, sshRemoteHost: String? = nil, rawLaunchCommand: String? = nil) -> Session {
+    private func spawnSession(template: AgentTemplate, initialCwd: URL, sessionId: UUID = UUID(), conversationId: String? = nil, forceResume: Bool = false, initialPrompt: String? = nil, sshRemoteHost: String? = nil, rawLaunchCommand: String? = nil, customTitle: String? = nil) -> Session {
         let engine = engineFactory()
         let extraOptions = optionsProvider(template.id)
         let persistsConversation = template.persistsConversation(extraOptions: extraOptions)
@@ -1925,6 +1948,7 @@ final class WorkspaceStore {
             engine: engine,
             currentDirectory: initialCwd,
             agent: template,
+            customTitle: customTitle,
             conversationId: normalizedConversationId
         )
         // Mirror the drops `makeSessionConfig` applies downstream, so the

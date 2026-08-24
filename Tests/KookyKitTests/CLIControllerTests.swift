@@ -564,6 +564,85 @@ final class CLIControllerTests: XCTestCase {
         XCTAssertEqual(revealed.last?.workspace, created.id)
     }
 
+    func testOpenWithTitleSeedsTheUserOverrideFromTheFirstFrame() async throws {
+        let store = makeStore()
+        let controller = makeController(stores: [store])
+        let response = await respond(
+            controller,
+            KookyCLIRequest(verb: .open, cwd: dirA, title: "  build watcher  ")
+        )
+        XCTAssertTrue(response.ok)
+        let session = try XCTUnwrap(store.active?.activeSession)
+        XCTAssertEqual(session.customTitle, "build watcher", "title normalizes like the rename popover's")
+        XCTAssertEqual(session.title, "build watcher", "the override outranks the cwd-derived title")
+    }
+
+    func testOpenNoFocusLandsTheTabInTheBackground() async throws {
+        let store = makeStore()
+        let workspace = store.workspaces[0]
+        let visible = try XCTUnwrap(workspace.activeSession)
+        var request = KookyCLIRequest(verb: .open, cwd: dirA)
+        request.noFocus = true
+        let controller = makeController(stores: [store])
+        let response = await respond(controller, request)
+        XCTAssertTrue(response.ok)
+        let tabs = workspace.root.allPanes.flatMap(\.tabs)
+        XCTAssertEqual(tabs.count, 2)
+        let opened = try XCTUnwrap(tabs.first { $0.id.uuidString == response.tabId })
+        XCTAssertEqual(engine(opened).startedConfigs.first?.workingDirectory, dirA)
+        XCTAssertEqual(
+            workspace.activeSession?.id, visible.id,
+            "a background tab must not replace what the user is looking at"
+        )
+        XCTAssertTrue(revealed.isEmpty, "no window fronting")
+        XCTAssertEqual(activations, 0, "no app activation")
+        XCTAssertTrue(
+            response.note?.contains("first shown") == true,
+            "the visibility-driven spawn delay must be said out loud, not discovered"
+        )
+    }
+
+    func testOpenNoFocusWithZeroTerminalWindowsIsRefusedBeforeBuildingOne() async {
+        // The window-building fallback fronts what it builds — exactly the
+        // promise --no-focus makes. Refusing must come BEFORE the side
+        // effect: a fallback invocation here is itself the failure.
+        let controller = KookyCLIController(
+            appVersion: "9.9.9-test",
+            windows: { [] },
+            fallbackWindow: {
+                XCTFail("--no-focus must never build (and front) a window")
+                return nil
+            },
+            activateApp: { [weak self] in self?.activations += 1 },
+            templates: { [.terminal] },
+            resume: { _, _, _, _, completion in completion(.opened) }
+        )
+        var request = KookyCLIRequest(verb: .open, cwd: dirA)
+        request.noFocus = true
+        let response = await respond(controller, request)
+        XCTAssertFalse(response.ok)
+        XCTAssertTrue(response.error?.contains("no terminal window") == true)
+        XCTAssertEqual(activations, 0)
+    }
+
+    func testOpenNoFocusIntoAFreshWorkspaceKeepsTheActiveWorkspace() async throws {
+        let store = makeStore()
+        store.workspaces[0].sshRemoteHost = "devbox"
+        let sshWorkspace = store.workspaces[0]
+        var request = KookyCLIRequest(verb: .open, cwd: dirA)
+        request.noFocus = true
+        let controller = makeController(stores: [store])
+        let response = await respond(controller, request)
+        XCTAssertTrue(response.ok)
+        XCTAssertEqual(store.workspaces.count, 2)
+        XCTAssertEqual(
+            store.activeWorkspaceId, sshWorkspace.id,
+            "the fresh workspace appears in the sidebar without stealing the active one"
+        )
+        XCTAssertTrue(revealed.isEmpty)
+        XCTAssertEqual(activations, 0)
+    }
+
     // MARK: focus
 
     func testFocusRevealsTheTab() async throws {
@@ -680,6 +759,46 @@ final class CLIControllerTests: XCTestCase {
         let response = await respond(controller, KookyCLIRequest(verb: .close, tab: UUID().uuidString))
         XCTAssertFalse(response.ok)
         XCTAssertTrue(response.error?.contains("no tab with id") == true)
+    }
+
+    // MARK: rename
+
+    func testRenameSetsTheTitleWithoutStealingFocus() async throws {
+        let store = makeStore()
+        let session = try XCTUnwrap(store.active?.activeSession)
+        let controller = makeController(stores: [store])
+        let response = await respond(
+            controller,
+            KookyCLIRequest(verb: .rename, tab: session.id.uuidString, title: "deploy log")
+        )
+        XCTAssertTrue(response.ok)
+        XCTAssertEqual(response.note, "renamed")
+        XCTAssertEqual(session.customTitle, "deploy log")
+        XCTAssertTrue(revealed.isEmpty, "rename is pure metadata — it must not front anything")
+        XCTAssertEqual(activations, 0)
+    }
+
+    func testRenameRefusesUnknownTabAndBlankTitle() async throws {
+        let store = makeStore()
+        let session = try XCTUnwrap(store.active?.activeSession)
+        session.customTitle = "keep me"
+        let controller = makeController(stores: [store])
+
+        let unknown = await respond(
+            controller,
+            KookyCLIRequest(verb: .rename, tab: UUID().uuidString, title: "x")
+        )
+        XCTAssertFalse(unknown.ok)
+        XCTAssertTrue(unknown.error?.contains("no tab with id") == true)
+
+        // A direct caller's blank title must refuse, never CLEAR the name
+        // (renameTab's blank-clears is the in-app popover's affordance).
+        let blank = await respond(
+            controller,
+            KookyCLIRequest(verb: .rename, tab: session.id.uuidString, title: "   ")
+        )
+        XCTAssertFalse(blank.ok)
+        XCTAssertEqual(session.customTitle, "keep me")
     }
 
     // MARK: resume

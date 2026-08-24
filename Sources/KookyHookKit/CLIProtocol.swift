@@ -70,6 +70,7 @@ public enum KookyCLIVerb: String, Sendable {
     case focus
     case close
     case status
+    case rename
 }
 
 public struct KookyCLIRequest: Codable, Equatable, Sendable {
@@ -86,8 +87,18 @@ public struct KookyCLIRequest: Codable, Equatable, Sendable {
     public var agent: String?
     /// `resume --id`.
     public var conversationId: String?
-    /// `focus` / `close`: session UUID string from `list`.
+    /// `focus` / `close` / `rename`: session UUID string from `list`.
     public var tab: String?
+    /// `open --title` / `rename --title`: the user override that outranks
+    /// the tab's automatic (OSC / cwd-derived) title — the same field tab
+    /// rename writes. OPTIONAL on the wire (like `noFocus`) so a v1 request
+    /// without it still decodes: additive fields must never force a
+    /// protocol bump.
+    public var title: String?
+    /// `open --no-focus`: land the tab in the background — no app
+    /// activation, no window fronting, and the tab is not made its pane's
+    /// active tab.
+    public var noFocus: Bool?
 
     public init(
         verb: KookyCLIVerb,
@@ -95,7 +106,9 @@ public struct KookyCLIRequest: Codable, Equatable, Sendable {
         command: String? = nil,
         agent: String? = nil,
         conversationId: String? = nil,
-        tab: String? = nil
+        tab: String? = nil,
+        title: String? = nil,
+        noFocus: Bool? = nil
     ) {
         self.kind = KookyCLIProtocol.kind
         self.protocolVersion = KookyCLIProtocol.version
@@ -105,6 +118,8 @@ public struct KookyCLIRequest: Codable, Equatable, Sendable {
         self.agent = agent
         self.conversationId = conversationId
         self.tab = tab
+        self.title = title
+        self.noFocus = noFocus
     }
 }
 

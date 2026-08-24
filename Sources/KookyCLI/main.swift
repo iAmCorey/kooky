@@ -30,7 +30,13 @@ func warn(_ message: String) {
 /// Launch the app this CLI shipped with. Walking up from the (symlink-
 /// resolved) executable finds the .app for in-bundle installs; the
 /// Application Support mirror copy falls back to LaunchServices by name.
-func launchKooky() -> Bool {
+///
+/// `background` (open --no-focus on a cold start) adds `-g` so Launch
+/// Services doesn't activate kooky. Necessary but possibly not sufficient:
+/// the app's own launch sequence calls NSApp.activate itself, which
+/// macOS 14's cooperative activation MAY refuse without an activation
+/// token — verified on hardware, not guaranteed by contract.
+func launchKooky(background: Bool) -> Bool {
     let exePath = Bundle.main.executablePath ?? CommandLine.arguments[0]
     let bundle = URL(fileURLWithPath: exePath).resolvingSymlinksInPath()
         .deletingLastPathComponent()  // MacOS
@@ -38,7 +44,9 @@ func launchKooky() -> Bool {
         .deletingLastPathComponent()  // Kooky.app
     let process = Process()
     process.executableURL = URL(fileURLWithPath: "/usr/bin/open")
-    process.arguments = bundle.pathExtension == "app" ? [bundle.path] : ["-a", "Kooky"]
+    var arguments = bundle.pathExtension == "app" ? [bundle.path] : ["-a", "Kooky"]
+    if background { arguments.insert("-g", at: 0) }
+    process.arguments = arguments
     // `open` writes its own diagnostics (app missing, LaunchServices errors)
     // to the stderr it inherits from us. We report the failure ourselves in
     // one line, which is the contract this CLI states — so its output would
@@ -72,8 +80,10 @@ func printSuccess(_ response: KookyCLIResponse, for command: KookyCLICommand) {
             print("kooky \(KookyHookKit.plain(version)) is running (protocol \(proto))")
         }
     case .open:
-        print(response.tabId.map { "opened tab \(KookyHookKit.plain($0))" } ?? "opened")
-    case .resume, .focus, .close:
+        // One line either way; the id stays the third word for scripts.
+        let head = response.tabId.map { "opened tab \(KookyHookKit.plain($0))" } ?? "opened"
+        print(response.note.map { "\(head) — \(KookyHookKit.plain($0))" } ?? head)
+    case .resume, .focus, .close, .rename:
         print(KookyHookKit.plain(response.note ?? "ok"))
     case .help:
         break
@@ -100,11 +110,13 @@ if parsed == .help {
 let processCwd = FileManager.default.currentDirectoryPath
 let command: KookyCLICommand
 switch parsed {
-case .open(let cwd, let cmd, let agent):
+case .open(let cwd, let cmd, let agent, let title, let noFocus):
     command = .open(
         cwd: cwd.map { KookyHookKit.normalizeCLIPath($0, relativeTo: processCwd) },
         command: cmd,
-        agent: agent
+        agent: agent,
+        title: title,
+        noFocus: noFocus
     )
 case .resume(let agent, let id, let cwd):
     command = .resume(
@@ -149,7 +161,11 @@ if case .failure(.connectFailed) = result {
         }
         exit(1)
     }
-    guard launchKooky() else {
+    let backgroundLaunch: Bool = {
+        if case .open(_, _, _, _, let noFocus) = command { return noFocus }
+        return false
+    }()
+    guard launchKooky(background: backgroundLaunch) else {
         fail("kooky is not running and couldn't be launched")
     }
     let deadline = DispatchTime.now() + launchTimeout
