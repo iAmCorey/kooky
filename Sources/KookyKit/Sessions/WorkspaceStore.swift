@@ -417,7 +417,8 @@ final class WorkspaceStore {
         forceResume: Bool = false,
         rawLaunchCommand: String? = nil,
         customTitle: String? = nil,
-        activate: Bool = true
+        activate: Bool = true,
+        spawnInBackground: Bool = false
     ) -> Workspace {
         // NB: the home fallback (fresh window's seed workspace) reaching
         // `noteRecentFolder` below is caught by `RecentFolders.note()`'s own
@@ -454,7 +455,8 @@ final class WorkspaceStore {
             forceResume: forceResume,
             sshRemoteHost: workspace.sshRemoteHost,
             rawLaunchCommand: rawLaunchCommand,
-            customTitle: customTitle
+            customTitle: customTitle,
+            spawnInBackground: spawnInBackground
         )
         wireSessionCallbacks(engine: session.engine, session: session, workspace: workspace, codexRolloutId: session.resumedConversationId)
         pane.tabs.append(session)
@@ -943,6 +945,10 @@ final class WorkspaceStore {
     /// `rawLaunchCommand` (the CLI's `open -e`) rides KOOKY_AGENT verbatim —
     /// see `makeSessionConfig(rawLaunchCommand:)`. Only meaningful with the
     /// plain `.terminal` template; the CLI controller is its one caller.
+    /// `activate` and `spawnInBackground` travel as an inverse PAIR from the
+    /// CLI's --no-focus; passing `activate: false` alone gets a tab on the
+    /// lazy spawn-on-reveal path (restore semantics), which for a `-e`
+    /// command is exactly the dead-tab shape issue #59 was about.
     @discardableResult
     func addTab(
         in workspace: Workspace,
@@ -954,7 +960,8 @@ final class WorkspaceStore {
         initialPrompt: String? = nil,
         rawLaunchCommand: String? = nil,
         customTitle: String? = nil,
-        activate: Bool = true
+        activate: Bool = true,
+        spawnInBackground: Bool = false
     ) -> Session {
         // The raw channel replaces the template's own launch command inside
         // makeSessionConfig, but everything else (Session.agent identity,
@@ -974,7 +981,7 @@ final class WorkspaceStore {
         let cwd = initialCwd
             ?? template.extraCwd.map { resolvedSpawnCwd(($0 as NSString).expandingTildeInPath) }
             ?? workspace.workingDirectory
-        let session = spawnSession(template: template, initialCwd: cwd, conversationId: conversationId, forceResume: forceResume, initialPrompt: initialPrompt, sshRemoteHost: workspace.sshRemoteHost, rawLaunchCommand: rawLaunchCommand, customTitle: customTitle)
+        let session = spawnSession(template: template, initialCwd: cwd, conversationId: conversationId, forceResume: forceResume, initialPrompt: initialPrompt, sshRemoteHost: workspace.sshRemoteHost, rawLaunchCommand: rawLaunchCommand, customTitle: customTitle, spawnInBackground: spawnInBackground)
         wireSessionCallbacks(engine: session.engine, session: session, workspace: workspace, codexRolloutId: session.resumedConversationId)
         target.tabs.append(session)
         // `activate: false` (CLI --no-focus) appends WITHOUT touching the
@@ -1122,7 +1129,8 @@ final class WorkspaceStore {
         forceResume: Bool = false,
         rawLaunchCommand: String? = nil,
         customTitle: String? = nil,
-        activate: Bool = true
+        activate: Bool = true,
+        spawnInBackground: Bool = false
     ) -> (workspace: Workspace, session: Session) {
         let dir = cwd.map { cwdIsConfirmed ? $0 : resolvedSpawnCwd($0.path) }
         if let existing = (active?.sshRemoteHost == nil ? active : nil)
@@ -1135,7 +1143,8 @@ final class WorkspaceStore {
                 forceResume: forceResume,
                 rawLaunchCommand: rawLaunchCommand,
                 customTitle: customTitle,
-                activate: activate
+                activate: activate,
+                spawnInBackground: spawnInBackground
             )
             return (existing, session)
         }
@@ -1143,7 +1152,11 @@ final class WorkspaceStore {
         // the launch — adding a tab beside it would leave a blank shell and
         // a second PTY behind every such call. A background spawn keeps the
         // new workspace out of the way too: it appears in the sidebar but
-        // the one the user is looking at stays active.
+        // the one the user is looking at stays active. In that case the
+        // seed tab is its pane's ACTIVE tab inside a hidden workspace
+        // container, so what makes it run is the engine's
+        // `spawnsWhileHidden` exemption alone — PaneView's offscreen mount
+        // only serves non-active tabs in existing panes.
         let workspace = addWorkspace(
             workingDirectory: dir,
             template: template,
@@ -1151,7 +1164,8 @@ final class WorkspaceStore {
             forceResume: forceResume,
             rawLaunchCommand: rawLaunchCommand,
             customTitle: customTitle,
-            activate: activate
+            activate: activate,
+            spawnInBackground: spawnInBackground
         )
         // `addWorkspace` always seeds one tab; the fallback keeps the return
         // total rather than force-unwrapping an invariant held elsewhere.
@@ -1163,7 +1177,8 @@ final class WorkspaceStore {
             forceResume: forceResume,
             rawLaunchCommand: rawLaunchCommand,
             customTitle: customTitle,
-            activate: activate
+            activate: activate,
+            spawnInBackground: spawnInBackground
         )
         return (workspace, session)
     }
@@ -1454,6 +1469,13 @@ final class WorkspaceStore {
         // Switching to a tab counts as reading any notification that pointed at
         // it — clears the inbox entry + the bell dot without an explicit click.
         NotificationInbox.shared.markRead(forSession: session.id)
+        // `spawnsInBackground` is deliberately NOT cleared here (or anywhere):
+        // activation is a model write, the offscreen mount is a NEXT-FRAME
+        // view effect — an activate-then-switch-away landing inside one
+        // render commit would clear the only thing that keeps the hidden
+        // mount coming back, stranding a never-spawned tab (Codex P2). The
+        // flag is lifelong; PaneView's active-tab exclusion is the one
+        // consumer gate, so the structure closes the race with no timing.
         guard let pane = pane(containing: session, in: workspace) else { return }
         var changed = false
         if pane.activeTabId != session.id {
@@ -1891,8 +1913,11 @@ final class WorkspaceStore {
     /// Spawns the engine + Session. Caller wires `onPwdChange` / `onFocus`
     /// after a workspace ref is available — `restore` builds sessions before
     /// the workspace exists, so callbacks can't capture it here.
-    private func spawnSession(template: AgentTemplate, initialCwd: URL, sessionId: UUID = UUID(), conversationId: String? = nil, forceResume: Bool = false, initialPrompt: String? = nil, sshRemoteHost: String? = nil, rawLaunchCommand: String? = nil, customTitle: String? = nil) -> Session {
+    private func spawnSession(template: AgentTemplate, initialCwd: URL, sessionId: UUID = UUID(), conversationId: String? = nil, forceResume: Bool = false, initialPrompt: String? = nil, sshRemoteHost: String? = nil, rawLaunchCommand: String? = nil, customTitle: String? = nil, spawnInBackground: Bool = false) -> Session {
         let engine = engineFactory()
+        // Before `engine.start` (and before any view mounts): the flag is
+        // what lets the surface come up under a hidden mount (issue #59).
+        engine.spawnsWhileHidden = spawnInBackground
         let extraOptions = optionsProvider(template.id)
         let persistsConversation = template.persistsConversation(extraOptions: extraOptions)
         // Resume gated by user setting — `resumeConversations` flips this off
@@ -1959,6 +1984,7 @@ final class WorkspaceStore {
         let promptSuppressesResume = !(initialPrompt?.isEmpty ?? true)
         session.resumedConversationId = (sshHost == nil && !promptSuppressesResume && template.supportsResume)
             ? resumeId : nil
+        session.spawnsInBackground = spawnInBackground
         if let sshHost {
             session.sshWorkspaceHost = sshHost
             // Optimistic: the remote shim's `running` marker confirms once

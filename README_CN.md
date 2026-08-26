@@ -124,7 +124,7 @@ kooky-cli rename --tab <session-uuid> --title <标题>                # 设置 t
 kooky-cli status                                                    # 版本与健康状态；未运行时退出码 1
 ```
 
-除 `status` 外，每个命令都会在 kooky 未运行时先把它拉起。退出码 0 表示请求已受理；任何失败都在 stderr 打印一行原因。`--agent` 接受与 Settings → Agents 相同的模板 id（内置、自定义和 Terminal 预设）。`--cwd` 是可选的：不给时 tab 开在当前 workspace 所在目录，Terminal 预设则用它自带的固定目录——两种情况都可以传 `--cwd` 覆盖。`--title` 的优先级高于自动标题，效果与手动重命名 tab 完全一致；`--no-focus` 后台打开：kooky 不会被带到前台（包括由 CLI 拉起 kooky 的场景），你正在看的内容也不会被切走——和 kooky 重启恢复的后台 tab 一样，它在第一次被显示时才开始运行。
+除 `status` 外，每个命令都会在 kooky 未运行时先把它拉起。退出码 0 表示请求已受理；任何失败都在 stderr 打印一行原因。`--agent` 接受与 Settings → Agents 相同的模板 id（内置、自定义和 Terminal 预设）。`--cwd` 是可选的：不给时 tab 开在当前 workspace 所在目录，Terminal 预设则用它自带的固定目录——两种情况都可以传 `--cwd` 覆盖。`--title` 的优先级高于自动标题，效果与手动重命名 tab 完全一致；`--no-focus` 后台打开：kooky 不会被带到前台（包括由 CLI 拉起 kooky 的场景），你正在看的内容也不会被切走——tab 已经在后台跑起来了，想看的时候用 `focus` 把它带到前面。
 
 二进制随 app 打包在 `Kooky.app/Contents/MacOS/kooky-cli`，kooky 每次启动还会把它刷新到稳定路径 `~/Library/Application Support/kooky/bin/kooky-cli` —— 外部工具建议指向后者：这个路径跨版本更新不变，而且 macOS Gatekeeper 会杀掉从 `/Applications` 内部 exec 的未公证辅助二进制，Application Support 的拷贝不受影响。想加进 PATH？做个 symlink：
 

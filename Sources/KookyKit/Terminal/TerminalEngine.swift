@@ -140,6 +140,13 @@ protocol TerminalEngine: AnyObject {
     /// `PaneTreeHostView.syncFocus`'s job. Default true: a single pane or a
     /// fresh split/tab still grabs focus on mount.
     var grabsFocusOnMount: Bool { get set }
+    /// Exempts THIS engine from the lazy spawn-on-reveal gate: its surface
+    /// (and shell) comes up even while the view is hidden. Set for tabs the
+    /// CLI opens with --no-focus — "background" means the command RUNS
+    /// (issue #59), not "loads when you look at it". Spawn-only: rendering
+    /// stays visibility-gated, so a hidden streaming terminal still costs
+    /// zero GPU.
+    var spawnsWhileHidden: Bool { get set }
     /// Trigger a libghostty named action (e.g. `increase_font_size:1`,
     /// `decrease_font_size:1`, `reset_font_size`, `clear_screen`). Returns
     /// `true` when the engine recognised and dispatched the action.

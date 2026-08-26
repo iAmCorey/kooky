@@ -124,7 +124,7 @@ kooky-cli rename --tab <session-uuid> --title <タイトル>            # tab �
 kooky-cli status                                                    # バージョンと状態。未起動なら終了コード 1
 ```
 
-`status` 以外のコマンドは、kooky が起動していなければ先に起動します。終了コード 0 はリクエスト受理を意味し、失敗時は stderr に理由を 1 行出力します。`--agent` は Settings → Agents と同じテンプレート id(ビルトイン、カスタム、Terminal preset)を受け付けます。`--cwd` は省略可能です: 省略するとアクティブな workspace のディレクトリで開き、Terminal preset は自身の固定ディレクトリを使います —— どちらの場合も `--cwd` を渡せばそちらが優先されます。`--title` は自動タイトルより優先され、手動リネームと同じ扱いです。`--no-focus` はバックグラウンドで開きます: kooky は前面に出ず(CLI が kooky を起動する場合も含む)、いま見ている内容も切り替わりません —— 再起動で復元されたバックグラウンド tab と同じく、最初に表示されたときに実行を開始します。
+`status` 以外のコマンドは、kooky が起動していなければ先に起動します。終了コード 0 はリクエスト受理を意味し、失敗時は stderr に理由を 1 行出力します。`--agent` は Settings → Agents と同じテンプレート id(ビルトイン、カスタム、Terminal preset)を受け付けます。`--cwd` は省略可能です: 省略するとアクティブな workspace のディレクトリで開き、Terminal preset は自身の固定ディレクトリを使います —— どちらの場合も `--cwd` を渡せばそちらが優先されます。`--title` は自動タイトルより優先され、手動リネームと同じ扱いです。`--no-focus` はバックグラウンドで開きます: kooky は前面に出ず(CLI が kooky を起動する場合も含む)、いま見ている内容も切り替わりません —— tab はバックグラウンドですでに動いています。見たくなったら `focus` で前面に呼び出せます。
 
 バイナリは app 内の `Kooky.app/Contents/MacOS/kooky-cli` に同梱され、kooky は起動のたびに安定パス `~/Library/Application Support/kooky/bin/kooky-cli` へコピーを更新します。外部ツールからはこちらを呼んでください: このパスはアップデートをまたいで不変で、macOS Gatekeeper が `/Applications` 内から exec される未公証ヘルパーを kill する問題も回避できます。PATH に入れたい場合は symlink を:
 

@@ -2,6 +2,10 @@
 
 Notable changes per release. Tagged commits use `vX.Y.Z` shortform.
 
+## v0.51.5 — 2026-08-26
+
+- Fixed: a tab opened with `kooky-cli open --no-focus` now actually starts working in the background — the shell (and any `-e` command or agent) runs immediately instead of waiting for the tab to be clicked, while everything the flag promised still holds: kooky stays in the background and what you're looking at doesn't change. Rendering stays paused for hidden tabs, so a busy background tab costs no GPU. (#59)
+
 ## v0.51.3 — 2026-08-24
 
 - New: `kooky-cli open` takes `--title <title>` to name the tab from the start (it outranks the automatic title, exactly like renaming the tab by hand), and `--no-focus` to open it in the background — kooky isn't brought to the front (including when the CLI has to launch it first) and the tab doesn't replace what you're looking at; like kooky's own restored background tabs, it starts running when first shown, and `kooky-cli focus` brings it forward. A new `rename --tab <uuid> --title <title>` command retitles an existing tab. Requires this version of the app; an older kooky ignores the new options. (#57)

@@ -215,6 +215,24 @@ final class Session: Identifiable {
     /// opens its rename popover, and resets the flag. Runtime-only.
     var renameRequested = false
 
+    /// CLI `open --no-focus` (issue #59): this tab's shell must spawn while
+    /// hidden — "background" means the command runs. Two topologies consume
+    /// it: PaneView's offscreen engine mount (a non-active tab in an
+    /// existing pane), and the engine's `spawnsWhileHidden` exemption alone
+    /// (the seed tab of a fresh hidden workspace — it IS its pane's active
+    /// tab, so no offscreen mount exists). LIFELONG — never cleared:
+    /// clearing on activation raced the next-frame mount (an
+    /// activate-then-switch-away inside one render commit stranded a
+    /// never-spawned tab), so the one consumer gate is PaneView's
+    /// active-tab exclusion, and the flag's meaning is "this tab was born
+    /// in the background", not "hasn't been seen yet". The residual cost is
+    /// one hidden, render-parked mount while such a tab is inactive.
+    /// Runtime-only, deliberately NOT persisted: after a restart the tab is
+    /// an ordinary restored background tab, back on the lazy
+    /// spawn-on-reveal path (the `-e` command isn't persisted either — an
+    /// eager respawn couldn't run it anyway).
+    var spawnsInBackground = false
+
     /// Latest git status for the session's cwd. `branch == nil` when the cwd
     /// isn't inside a git repo (or git isn't installed). Refreshed by
     /// `WorkspaceStore` on cwd-change + command-finished hooks. Runtime-only;

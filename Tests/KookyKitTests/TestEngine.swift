@@ -46,6 +46,7 @@ final class TestEngine: TerminalEngine {
     func beginSizePropagationSuspension() { sizeSuspendCount += 1 }
     func endSizePropagationSuspension() { sizeSuspendCount = max(0, sizeSuspendCount - 1) }
     var grabsFocusOnMount: Bool = true
+    var spawnsWhileHidden: Bool = false
     private(set) var flushSizeCount: Int = 0
     func flushSize() { flushSizeCount += 1 }
 

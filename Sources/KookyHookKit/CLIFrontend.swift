@@ -262,8 +262,9 @@ extension KookyHookKit {
                                   is — a Terminal preset uses its own path.
                                   --title names the tab (outranks the
                                   automatic title, like a manual rename);
-                                  --no-focus lands it in the background —
-                                  the tab starts when first shown
+                                  --no-focus lands it in the background,
+                                  already running — bring it forward
+                                  later with focus
           resume --agent <agent-id> --id <conversation-id> [--cwd <dir>]
                                   reopen an agent conversation (same
                                   semantics as kooky://resume deep links)

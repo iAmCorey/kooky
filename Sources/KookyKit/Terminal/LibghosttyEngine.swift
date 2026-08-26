@@ -628,6 +628,11 @@ final class LibghosttyEngine: TerminalEngine {
         set { surfaceView.grabsFocusOnMount = newValue }
     }
 
+    var spawnsWhileHidden: Bool {
+        get { surfaceView.spawnsWhileHidden }
+        set { surfaceView.spawnsWhileHidden = newValue }
+    }
+
     var suspendsSizePropagation: Bool { surfaceView.suspendsSizePropagation }
     func beginSizePropagationSuspension() { surfaceView.beginSizePropagationSuspension() }
     func endSizePropagationSuspension() { surfaceView.endSizePropagationSuspension() }
@@ -744,6 +749,13 @@ final class GhosttySurfaceView: NSView {
     /// grab; set by `TerminalView` from the pane's active state. See
     /// `TerminalEngine.grabsFocusOnMount` for the why (issue #24).
     var grabsFocusOnMount = true
+
+    /// `TerminalEngine.spawnsWhileHidden` — exempts createSurfaceIfReady's
+    /// hidden gate so a CLI background tab's shell starts without ever being
+    /// shown (issue #59). Render gating (`updateRenderLink`) deliberately
+    /// does NOT consult this: the surface exists and streams, but a hidden
+    /// view still draws nothing.
+    var spawnsWhileHidden = false
 
     private(set) var surface: ghostty_surface_t? {
         didSet {
@@ -1032,7 +1044,9 @@ final class GhosttySurfaceView: NSView {
         // Surfaces are created lazily on first *reveal* (not first mount):
         // a restored background tab must not spawn its shell + Metal surface
         // until the user actually switches to it — the same laziness the old
-        // detached-view world provided.
+        // detached-view world provided. (One exemption: `spawnsWhileHidden`,
+        // CLI background tabs — those views arrive here with the surface
+        // already created, so this call no-ops.)
         createSurfaceIfReady()
         updateRenderLink()
     }
@@ -1040,7 +1054,7 @@ final class GhosttySurfaceView: NSView {
     func createSurfaceIfReady() {
         guard surface == nil,
               let window,
-              !isHiddenOrHasHiddenAncestor,
+              !isHiddenOrHasHiddenAncestor || spawnsWhileHidden,
               let config = pendingConfig,
               let app = LibghosttyApp.shared.app
         else { return }

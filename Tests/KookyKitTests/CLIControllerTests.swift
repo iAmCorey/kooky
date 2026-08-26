@@ -597,8 +597,39 @@ final class CLIControllerTests: XCTestCase {
         XCTAssertTrue(revealed.isEmpty, "no window fronting")
         XCTAssertEqual(activations, 0, "no app activation")
         XCTAssertTrue(
-            response.note?.contains("first shown") == true,
-            "the visibility-driven spawn delay must be said out loud, not discovered"
+            response.note?.contains("background") == true,
+            "the answer states the tab is running, not waiting to be shown"
+        )
+        // "Background" means the command RUNS (issue #59): the whole spawn
+        // chain must be armed — the engine exempted from the hidden gate,
+        // and the session flagged so PaneView keeps an offscreen mount up.
+        XCTAssertTrue(opened.spawnsInBackground)
+        XCTAssertTrue(engine(opened).spawnsWhileHidden)
+    }
+
+    func testBackgroundSpawnFlagSurvivesActivateThenSwitchAway() async throws {
+        // Activation is a model write; the offscreen mount is a NEXT-FRAME
+        // view effect. Clearing the flag on activation raced the two: an
+        // activate-then-switch-away landing inside one render commit
+        // stranded a never-spawned tab (Codex P2). The flag is lifelong —
+        // after switching away it must still be set, so PaneView's filter
+        // brings the hidden mount back and the shell still spawns.
+        let store = makeStore()
+        let workspace = store.workspaces[0]
+        let original = try XCTUnwrap(workspace.activeSession)
+        var request = KookyCLIRequest(verb: .open, cwd: dirA)
+        request.noFocus = true
+        let controller = makeController(stores: [store])
+        let response = await respond(controller, request)
+        let opened = try XCTUnwrap(
+            workspace.root.allPanes.flatMap(\.tabs).first { $0.id.uuidString == response.tabId }
+        )
+        XCTAssertTrue(opened.spawnsInBackground)
+        store.activateTab(opened, in: workspace)
+        store.activateTab(original, in: workspace)
+        XCTAssertTrue(
+            opened.spawnsInBackground,
+            "the flag must survive an activate-then-switch-away so the offscreen mount returns"
         )
     }
 

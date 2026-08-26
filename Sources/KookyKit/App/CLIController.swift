@@ -480,7 +480,8 @@ final class KookyCLIController {
                 initialCwd: cwd,
                 rawLaunchCommand: command,
                 customTitle: title,
-                activate: !noFocus
+                activate: !noFocus,
+                spawnInBackground: noFocus
             )
             landed = (match.context, match.workspace, session)
         } else {
@@ -518,7 +519,8 @@ final class KookyCLIController {
                 cwdIsConfirmed: true,
                 rawLaunchCommand: command,
                 customTitle: title,
-                activate: !noFocus
+                activate: !noFocus,
+                spawnInBackground: noFocus
             )
             // A whole WINDOW built for this call arrives with a seed tab of
             // its own, which `localSpawn` lands beside rather than replaces
@@ -544,14 +546,13 @@ final class KookyCLIController {
         // window fronting, and (via `activate: false` above) the tab isn't
         // even its pane's active tab — so a user looking at that workspace
         // keeps seeing what they were seeing. `focus --tab` upgrades later.
-        // The note states the visibility-driven PTY consequence out loud
-        // (v0.50.0 laziness: a never-shown tab hasn't spawned its shell) —
-        // same behavior as restored background tabs, but a CLI caller
-        // running `-e` deserves to hear it rather than discover it.
+        // The note confirms the running-in-background contract (issue #59:
+        // the shell spawns through the hidden mount, it does not wait to
+        // be shown).
         if noFocus {
             return ok(
                 tabId: landed.session.id.uuidString,
-                note: "starts when the tab is first shown"
+                note: "running in the background"
             )
         }
         activateApp()

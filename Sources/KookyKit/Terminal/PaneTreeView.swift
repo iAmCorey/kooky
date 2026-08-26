@@ -66,6 +66,15 @@ private struct PaneView: View {
     @State private var contextMenuOpen = false
     @State private var contextMenuAnchor: UnitPoint = .center
 
+    /// CLI background tabs (`open --no-focus`, issue #59) whose shell must
+    /// run WITHOUT ever being shown. Each gets an offscreen, hidden engine
+    /// mount below so the surface can spawn; the active tab is excluded —
+    /// its mount is the visible one, and `engine.view` is a single NSView
+    /// that can only have one parent.
+    private var backgroundSpawningTabs: [Session] {
+        pane.tabs.filter { $0.spawnsInBackground && $0.id != pane.activeTabId }
+    }
+
     var body: some View {
         let paneOpacity = isFocused ? 1.0 : Self.inactivePaneOpacity
         VStack(spacing: 0) {
@@ -83,6 +92,21 @@ private struct PaneView: View {
                     grabsFocusOnMount: isFocused && store.activeWorkspaceId == workspace.id
                 )
                     .id(active.id)
+                    // Offscreen engine mounts for CLI background tabs
+                    // (issue #59): surface creation needs the engine view
+                    // in a real window with real bounds. A background layer
+                    // of the pane's primary terminal gives each one the
+                    // same frame — the same cell grid — so promoting it
+                    // later is resize-free, and it is attached AFTER `.id`
+                    // so tab switches must not remount these. Hidden via
+                    // real `isHidden` (render link parks), focus-grab off.
+                    .background {
+                        ForEach(backgroundSpawningTabs) { tab in
+                            TerminalView(engine: tab.engine, grabsFocusOnMount: false, visible: false)
+                                .allowsHitTesting(false)
+                                .accessibilityHidden(true)
+                        }
+                    }
                     .padding(8)
                     .overlay(RightClickCatcher { unit in
                         // Promote this pane to the workspace's active one —
