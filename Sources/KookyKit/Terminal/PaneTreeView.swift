@@ -1472,14 +1472,56 @@ private struct PaneSearchBar: View {
     }
 }
 
+/// The newline combo is configurable (`general.composerNewlineModifier`);
+/// plain Return always sends.
+/// Which modifier key + Return inserts a newline in the composer instead of
+/// sending. Plain Return always sends; the combo newlines. Mirrors chat-app
+enum ComposerNewlineModifier: String, CaseIterable {
+    case shift
+    case option
+    case control
+    case command
+
+    /// The AppKit modifier flag to match in `doCommandBy`.
+    var flag: NSEvent.ModifierFlags {
+        switch self {
+        case .shift: return .shift
+        case .option: return .option
+        case .control: return .control
+        case .command: return .command
+        }
+    }
+
+    /// Settings-picker label.
+    var label: String {
+        switch self {
+        case .shift: return String(localized: "Shift+Enter", bundle: .kookyResources)
+        case .option: return String(localized: "Option+Enter", bundle: .kookyResources)
+        case .control: return String(localized: "Ctrl+Enter", bundle: .kookyResources)
+        case .command: return String(localized: "Cmd+Enter", bundle: .kookyResources)
+        }
+    }
+
+    /// Compact keycap shown in the composer's hint row.
+    var hint: String {
+        switch self {
+        case .shift: return "⇧⏎"
+        case .option: return "⌥⏎"
+        case .control: return "⌃⏎"
+        case .command: return "⌘⏎"
+        }
+    }
+}
+
 /// Multiline prompt composer (⌘L) — a chat-style box that rises from the
 /// bottom of the pane for writing prompts. Return sends the draft to the agent
-/// (pasted whole, newlines intact, then a carriage return to submit);
-/// Shift+Return inserts a newline; Esc cancels but keeps the draft on the
-/// session. The body is an `NSTextView` (`ComposerTextView`) rather than a
-/// SwiftUI `TextEditor`: only `doCommandBy` can intercept Return *before* a
-/// newline is inserted, which is what the chat convention needs (Return =
-/// send, Shift+Return = newline — same as ChatGPT / Claude.ai / Slack).
+/// (pasted whole, newlines intact, then a carriage return to submit); the
+/// configured modifier+Return combo inserts a newline; Esc cancels but keeps
+/// the draft on the session. The body is an `NSTextView` (`ComposerTextView`)
+/// rather than a SwiftUI `TextEditor`: only `doCommandBy` can intercept Return
+/// *before* a newline is inserted, which is what the chat convention needs
+/// (Return = send, modifier+Return = newline). The newline combo is
+/// configurable (`general.composerNewlineModifier`).
 private struct PaneComposerBar: View {
     @Bindable var session: Session
     let pane: Pane
@@ -1490,6 +1532,11 @@ private struct PaneComposerBar: View {
     /// token tells the text view to re-claim the caret (Codex P1). The host's
     /// `syncFocus` yields to open editors for the same reason.
     @State private var workspaceRefocus = UUID()
+    /// Rendered keycap for the configured newline combo. Cached here rather
+    /// than read from `@Observable` settings in `body` (that makes SwiftUI's
+    /// type-checker blow up on this ViewBuilder); refreshed on appear.
+    @State private var newlineHint = ComposerNewlineModifier.shift.hint
+
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -1524,7 +1571,7 @@ private struct PaneComposerBar: View {
             HStack(spacing: 12) {
                 Spacer(minLength: 0)
                 hint("⏎", "send")
-                hint("⇧⏎", "newline")
+                hint(newlineHint, "newline")
             }
         }
         .padding(12)
@@ -1542,7 +1589,10 @@ private struct PaneComposerBar: View {
         .simultaneousGesture(TapGesture().onEnded {
             store.focusPane(pane, in: workspace)
         })
-        .onAppear { store.focusPane(pane, in: workspace) }
+        .onAppear {
+            newlineHint = KookySettingsModel.shared.composerNewlineModifier.hint
+            store.focusPane(pane, in: workspace)
+        }
         .onChange(of: store.activeWorkspaceId) { _, active in
             if active == workspace.id { workspaceRefocus = UUID() }
         }
@@ -1593,6 +1643,17 @@ private struct PaneComposerBar: View {
 private final class ComposerNSTextView: NSTextView {
     var onFocusGained: (() -> Void)?
 
+    /// Modifier flags of the most recent keyDown. The coordinator's
+    /// `doCommandBy` reads this to decide send-vs-newline: `NSApp.currentEvent`
+    /// is unreliable there (nil / missing flags for some Return events), which
+    /// is why the original `.contains(.shift)` check never fired. Capturing at
+    /// keyDown time is exact — Return is always dispatched through `keyDown`.
+    var lastKeyModifierFlags: NSEvent.ModifierFlags = []
+
+    override func keyDown(with event: NSEvent) {
+        lastKeyModifierFlags = event.modifierFlags
+        super.keyDown(with: event)
+    }
     /// Session's spawn-pinned SSH host — same paste routing signal the
     /// surface's ⌘V uses (see `TerminalEngine.pasteUploadHostProvider`).
     /// A plain value, set once at construction: it never changes for a
@@ -1634,7 +1695,7 @@ private final class ComposerNSTextView: NSTextView {
 
 /// AppKit-backed multiline editor for the composer. A SwiftUI `TextEditor`
 /// inserts a newline on Return before `onKeyPress` can see it, so it can't do
-/// "Return sends, Shift+Return newlines." An `NSTextView` via `doCommandBy`
+/// "Return sends, modifier+Return newlines." An `NSTextView` via `doCommandBy`
 /// intercepts the Return command itself, before any newline is inserted.
 private struct ComposerTextView: NSViewRepresentable {
     @Binding var text: String
@@ -1715,6 +1776,7 @@ private struct ComposerTextView: NSViewRepresentable {
         textView.insertionPointColor = NSColor(Theme.chromeForeground)
     }
 
+    @MainActor
     final class Coordinator: NSObject, NSTextViewDelegate {
         var parent: ComposerTextView
         var lastRefocusToken: UUID?
@@ -1733,9 +1795,11 @@ private struct ComposerTextView: NSViewRepresentable {
         func textView(_ textView: NSTextView, doCommandBy selector: Selector) -> Bool {
             switch selector {
             case #selector(NSResponder.insertNewline(_:)):
-                // Shift+Return → newline (let the text view handle it);
-                // plain Return → send.
-                if NSApp.currentEvent?.modifierFlags.contains(.shift) == true {
+                // configured modifier+Return → newline (let the text view
+                // handle it); plain Return → send. Flags come from the last
+                // keyDown, not NSApp.currentEvent (unreliable here).
+                if let tv = textView as? ComposerNSTextView,
+                   tv.lastKeyModifierFlags.contains(KookySettingsModel.shared.composerNewlineModifier.flag) {
                     return false
                 }
                 parent.onSend()

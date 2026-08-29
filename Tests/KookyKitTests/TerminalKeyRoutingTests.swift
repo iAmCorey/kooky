@@ -371,6 +371,70 @@ final class TerminalKeyRoutingTests: XCTestCase {
         )
     }
 
+    /// For kitty-protocol TUIs (cmux / omp) kooky must NOT intercept Return as
+    /// `\`+CR — that would replace the CSI-u shift+Enter the TUI needs. With
+    /// `interceptReturn: false` the Return case returns nil so the key falls
+    /// through to `ghostty_surface_key`. The newline modifier is still honored
+    /// for the Claude-Code-style path.
+    /// For kitty-protocol TUIs (omp / cmux) kooky remaps the configured newline
+    /// combo onto Shift+Enter's CSI-u (`ESC[27;2;13~`), the only form omp
+    /// recognizes as "newline instead of send". Other combos fall through to
+    /// `ghostty_surface_key` (nil → real modifier encoded → send). Non-kitty
+    /// paths keep the `\`+CR trick.
+    func testReturnNewlineForKittyProtocolAgents() {
+        // omp + Shift configured: Shift+Enter → Shift+Enter CSI-u (newline)
+        XCTAssertEqual(
+            GhosttySurfaceView.handWrittenEscapeSequence(
+                forKeyCode: 36, modifierFlags: [.shift], newlineModifier: .shift, kittyProtocol: true
+            ),
+            "\u{1B}[27;2;13~"
+        )
+        // omp + Option configured: Shift+Enter is NOT the newline combo → `\r` (send)
+        XCTAssertEqual(
+            GhosttySurfaceView.handWrittenEscapeSequence(
+                forKeyCode: 36, modifierFlags: [.shift], newlineModifier: .option, kittyProtocol: true
+            ),
+            "\r"
+        )
+        // omp + Option configured: Option+Enter → Shift+Enter CSI-u (newline)
+        XCTAssertEqual(
+            GhosttySurfaceView.handWrittenEscapeSequence(
+                forKeyCode: 36, modifierFlags: [.option], newlineModifier: .option, kittyProtocol: true
+            ),
+            "\u{1B}[27;2;13~"
+        )
+        // plain Enter in omp: no modifier → `\r` (send), NOT nil (nil would
+        // fall through to the IME branch and leave Enter dead)
+        XCTAssertEqual(
+            GhosttySurfaceView.handWrittenEscapeSequence(
+                forKeyCode: 36, modifierFlags: [], newlineModifier: .shift, kittyProtocol: true
+            ),
+            "\r"
+        )
+        // Non-kitty (claude-code/zsh): `\`+CR trick, configurable modifier.
+        XCTAssertEqual(
+            GhosttySurfaceView.handWrittenEscapeSequence(
+                forKeyCode: 36, modifierFlags: [.shift], newlineModifier: .shift, kittyProtocol: false
+            ),
+            "\\\r"
+        )
+        XCTAssertEqual(
+            GhosttySurfaceView.handWrittenEscapeSequence(
+                forKeyCode: 36, modifierFlags: [.shift],
+                newlineModifier: .option, kittyProtocol: false
+            ),
+            "\r",
+            "with Option configured as the newline combo, Shift+Return sends"
+        )
+        // Non-Return functional keys keep their sequences regardless of mode.
+        XCTAssertEqual(
+            GhosttySurfaceView.handWrittenEscapeSequence(
+                forKeyCode: 48, modifierFlags: [.shift], kittyProtocol: true
+            ),
+            "\u{1B}[Z"
+        )
+    }
+
     func testMapModifiersCarriesSidedOptionBits() {
         // Device-dependent NSEvent bits: left Option = NX_DEVICELALTKEYMASK
         // (0x20), right Option = NX_DEVICERALTKEYMASK (0x40). libghostty's

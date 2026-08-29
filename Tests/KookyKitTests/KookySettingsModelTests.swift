@@ -198,6 +198,26 @@ final class KookySettingsModelTests: XCTestCase {
             )
         )
     }
+    func testComposerNewlineModifierDefaultsToShift() {
+        XCTAssertEqual(
+            KookySettingsModel.resolvedComposerNewlineModifier([:]),
+            .shift
+        )
+        XCTAssertEqual(
+            KookySettingsModel.resolvedComposerNewlineModifier(
+                ["composerNewlineModifier": "bogus"]
+            ),
+            .shift,
+            "an unknown raw value must fall back to the default"
+        )
+    }
+
+    func testComposerNewlineModifierFlagMapsToAppKitModifier() {
+        XCTAssertEqual(ComposerNewlineModifier.shift.flag, .shift)
+        XCTAssertEqual(ComposerNewlineModifier.option.flag, .option)
+        XCTAssertEqual(ComposerNewlineModifier.control.flag, .control)
+        XCTAssertEqual(ComposerNewlineModifier.command.flag, .command)
+    }
 
     func testAgentMenuBarTextIsCappedAtThirtyCharacters() {
         let exact = String(repeating: "a", count: 30)
@@ -271,18 +291,38 @@ final class KookySettingsModelTests: XCTestCase {
 
         XCTAssertEqual(menu.items.count, 6)
         XCTAssertFalse(menu.items.contains(where: \.isSectionHeader))
-        XCTAssertEqual(menu.items[0].title, "No agents running")
+        XCTAssertEqual(
+            menu.items[0].title,
+            String(localized: "No agents running", bundle: .kookyResources)
+        )
         XCTAssertTrue(menu.items[1].isSeparatorItem)
-        XCTAssertEqual(menu.items[2].title, "Open Kooky")
-        XCTAssertEqual(menu.items[3].title, "Settings…")
-        XCTAssertEqual(menu.items[4].title, "Keep Awake")
-        XCTAssertEqual(menu.items[5].title, "Quit Kooky")
+        XCTAssertEqual(
+            menu.items[2].title,
+            String(localized: "Open Kooky", bundle: .kookyResources)
+        )
+        XCTAssertEqual(
+            menu.items[3].title,
+            String(localized: "Settings…", bundle: .kookyResources)
+        )
+        XCTAssertEqual(
+            menu.items[4].title,
+            String(localized: "Keep Awake", bundle: .kookyResources)
+        )
+        XCTAssertEqual(
+            menu.items[5].title,
+            String(localized: "Quit Kooky", bundle: .kookyResources)
+        )
         for item in menu.items where !item.isSeparatorItem {
             XCTAssertNil(item.image, "\(item.title) must remain text-only")
         }
 
         let awakeItems = try XCTUnwrap(menu.items[4].submenu).items
-        XCTAssertEqual(awakeItems.map(\.title), ["Off", "Auto", "Always"])
+        XCTAssertEqual(
+            awakeItems.map(\.title),
+            ["Off", "Auto", "Always"].map {
+                String(localized: $0, bundle: .kookyResources)
+            }
+        )
         XCTAssertEqual(awakeItems.map(\.state), [.off, .on, .off])
         XCTAssertTrue(awakeItems.allSatisfy { $0.image == nil })
     }

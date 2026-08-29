@@ -288,6 +288,12 @@ final class KookySettingsModel {
     /// mount: a launch restore, a new window, or any SwiftUI rebuild leaves
     /// it untouched, so the light only pulses for a change the user just made.
     var awakeDialPulse: Int = 0
+    /// The modifier key that, combined with Return, inserts a newline in the
+    /// composer instead of sending. Plain Return always sends; the chosen
+    /// combo newlines (Shift+Return by default, like ChatGPT / Claude).
+    /// Persisted under `general.composerNewlineModifier` (non-default only).
+    var composerNewlineModifier: ComposerNewlineModifier = .shift
+
     /// Master switch for macOS notifications about a non-visible tab. When
     /// off, nothing is posted. The first post triggers the OS permission
     /// prompt. Persisted under `notifications.enabled` (only when non-default).
@@ -417,6 +423,8 @@ final class KookySettingsModel {
             legacyGeneral: general
         )
         awakeMode = (general["awakeMode"] as? String).flatMap(AwakeMode.init) ?? .auto
+        composerNewlineModifier = Self.resolvedComposerNewlineModifier(general: general)
+
 
         let notifications = parsed["notifications"] as? [String: Any] ?? [:]
         notificationsEnabled = (notifications["enabled"] as? Bool) ?? true
@@ -634,6 +642,10 @@ final class KookySettingsModel {
         general.removeValue(forKey: "language")
         general["showInMenuBar"] = showInMenuBar ? nil : false
         general["awakeMode"] = awakeMode == .auto ? nil : awakeMode.rawValue
+        general["composerNewlineModifier"] = composerNewlineModifier == .shift
+            ? nil
+            : composerNewlineModifier.rawValue
+
         if general.isEmpty {
             parsed.removeValue(forKey: "general")
         } else {
@@ -825,6 +837,17 @@ final class KookySettingsModel {
         (general["showInMenuBar"] as? Bool)
             ?? (legacyAppearance["showAgentMenuBarItem"] as? Bool)
             ?? true
+    }
+
+    static func resolvedComposerNewlineModifier(general: [String: Any]) -> ComposerNewlineModifier {
+        guard let raw = general["composerNewlineModifier"] as? String,
+              let m = ComposerNewlineModifier(rawValue: raw) else { return .shift }
+        return m
+    }
+    static func resolvedComposerNewlineModifier(_ general: [String: Any]) -> ComposerNewlineModifier {
+        guard let raw = general["composerNewlineModifier"] as? String,
+              let m = ComposerNewlineModifier(rawValue: raw) else { return .shift }
+        return m
     }
 
     var selectedTerminalTheme: KookyTerminalTheme? {
@@ -1120,7 +1143,7 @@ struct KookySettingsView: View {
         .onChange(of: model.fileLinkAppId) { _, _ in model.scheduleSave() }
         .onChange(of: model.webLinkAppId) { _, _ in model.scheduleSave() }
 
-        return core
+        let secondary = core
             .onChange(of: model.customAgents) { _, _ in model.scheduleSave() }
             .onChange(of: model.resumeConversations) { _, _ in model.scheduleSave() }
             .onChange(of: model.sshRemoteAgentDetection) { _, _ in model.scheduleSave() }
@@ -1128,6 +1151,9 @@ struct KookySettingsView: View {
             .onChange(of: model.copyOnSelect) { _, _ in model.scheduleSave() }
             .onChange(of: model.showInMenuBar) { _, _ in model.scheduleSave() }
             .onChange(of: model.showAgentPanelTag) { _, _ in model.scheduleSave() }
+            .onChange(of: model.composerNewlineModifier) { _, _ in model.scheduleSave() }
+
+        return secondary
             .onChange(of: model.terminalPresets) { _, _ in model.scheduleSave() }
             .onChange(of: model.hiddenPresets) { _, _ in model.scheduleSave() }
             .onChange(of: model.statusBarItems) { _, _ in model.scheduleSave() }
@@ -1411,6 +1437,21 @@ struct KookySettingsView: View {
                         .toggleStyle(.switch)
                 }
                 SettingsCaption("Selecting text copies it to the clipboard immediately.")
+            }
+            .padding(.top, 22)
+
+            SettingsSection(title: "Composer") {
+                SettingsRow(label: "newline-shortcut") {
+                    Picker("", selection: $model.composerNewlineModifier) {
+                        ForEach(ComposerNewlineModifier.allCases, id: \.self) { m in
+                            Text(m.label).tag(m)
+                        }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.menu)
+                    .frame(minWidth: 180, alignment: .trailing)
+                }
+                SettingsCaption("In the prompt composer (⌘L), Return sends. The chosen combo inserts a newline instead.")
             }
             .padding(.top, 22)
 

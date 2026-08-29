@@ -5,6 +5,13 @@ struct TerminalSessionConfig {
     var arguments: [String]
     var workingDirectory: String?
     var environment: [String: String]
+    /// Whether this session speaks the kitty keyboard protocol, where the
+    /// core's own CSI-u Shift+Enter encoding is the recognized "newline
+    /// instead of send". True only for agent TUIs built on it (omp, codex,
+    /// pi, …); false for plain shells (zsh) and Claude Code, which both use
+    /// the `\`+CR trick. Set by `AgentTemplate.makeSessionConfig`; plain
+    /// shell configs leave it false.
+    var kittyProtocol: Bool = false
 
     static func defaultShell() -> TerminalSessionConfig {
         let shell = ProcessInfo.processInfo.environment["SHELL"] ?? KookyShellIntegration.zshPath

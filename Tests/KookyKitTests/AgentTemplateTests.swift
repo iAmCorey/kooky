@@ -7,6 +7,26 @@ final class AgentTemplateTests: XCTestCase {
         XCTAssertNil(AgentTemplate.terminal.makeSessionConfig().environment["KOOKY_AGENT"])
     }
 
+    /// Plain shell tabs (no launch command) and Claude Code keep the `\`+CR
+    /// newline trick (kittyProtocol=false); every agent that actually
+    /// launches a non-Claude TUI speaks CSI-u (kittyProtocol=true).
+    func testKittyProtocolFlagPerSessionKind() {
+        XCTAssertFalse(
+            AgentTemplate.terminal.makeSessionConfig().kittyProtocol,
+            "plain shell tab must keep the backslash-CR newline trick"
+        )
+        XCTAssertFalse(
+            AgentTemplate.claudeCode.makeSessionConfig().kittyProtocol,
+            "Claude Code must keep the backslash-CR trick"
+        )
+        for template in AgentTemplate.all where template.id != "terminal" && template.id != AgentTemplate.claudeCodeID {
+            XCTAssertTrue(
+                template.makeSessionConfig().kittyProtocol,
+                "agent template \(template.id) must speak CSI-u"
+            )
+        }
+    }
+
     func testAgentTemplatesPublishKookyAgentEnv() {
         for template in AgentTemplate.all where template.id != "terminal" {
             XCTAssertEqual(

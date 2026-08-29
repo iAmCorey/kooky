@@ -18,6 +18,13 @@
 "Clipboard" = "剪贴板";
 "Menu Bar" = "菜单栏";
 "System" = "系统";
+"Composer" = "撰写器";
+"newline-shortcut" = "换行快捷键";
+"In the prompt composer (⌘L), Return sends. The chosen combo inserts a newline instead." = "在提示输入框（⌘L）中，回车发送，选中的组合键插入换行。";
+"Shift+Enter" = "Shift+回车";
+"Option+Enter" = "Option+回车";
+"Ctrl+Enter" = "Ctrl+回车";
+"Cmd+Enter" = "Cmd+回车";
 "Terminal" = "终端";
 "Window Chrome" = "窗口界面";
 "Presets" = "预设";

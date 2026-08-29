@@ -287,6 +287,11 @@ struct AgentTemplate: Identifiable, Hashable {
         case (.other, true):
             config = .zshShell()
         }
+        // CSI-u (kitty protocol) is the "newline instead of send" encoding
+        // for agent TUIs (omp, codex, pi, …). Plain shell tabs launch no
+        // agent and keep the `\`+CR trick, as does Claude Code. Only
+        // sessions that actually launch something non-Claude speak kitty.
+        config.kittyProtocol = needsLaunch && !(id == Self.claudeCodeID || baseAgentId == Self.claudeCodeID)
         if let sshHost {
             // SSH workspace tab: the local shell's one-shot launch is the
             // kooky-ssh connection; the template's own launch command rides

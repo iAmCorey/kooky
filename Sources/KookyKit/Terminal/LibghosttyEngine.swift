@@ -723,6 +723,11 @@ final class GhosttySurfaceView: NSView {
     private var lastPushedSizePx: (UInt32, UInt32)?
 
     var pendingConfig: TerminalSessionConfig?
+    /// Whether this session speaks the kitty keyboard protocol (CSI-u), the
+    /// standard modern-TUI "newline instead of send". True for agent TUIs
+    /// (omp, …); false for plain shells and Claude Code, which use the
+    /// `\`+CR trick. Copied from the config at surface creation.
+    var kittyProtocol = false
     var onPwdChange: ((String) -> Void)?
     var onTitleChange: ((String) -> Void)?
     var onFocus: (() -> Void)?
@@ -1136,6 +1141,7 @@ final class GhosttySurfaceView: NSView {
         }
         surface = new
         pendingConfig = nil
+        kittyProtocol = config.kittyProtocol
         // A fresh surface's conditional state defaults to LIGHT — seed it with
         // kooky's active theme so the 996 query / mode 2031 / conditional
         // themes are right from the first prompt, and register for the
@@ -1370,7 +1376,8 @@ final class GhosttySurfaceView: NSView {
         if !hasMarkedText(),
            Self.shouldForwardModeAwareKeyToLibghostty(keyCode: event.keyCode, modifierFlags: mods) {
             if !sendKey(event: event, action: GHOSTTY_ACTION_PRESS, surface: surface),
-               let bytes = Self.handWrittenEscapeSequence(forKeyCode: event.keyCode, modifierFlags: mods) {
+               let bytes = Self.handWrittenEscapeSequence(forKeyCode: event.keyCode, modifierFlags: mods, newlineModifier: KookySettingsModel.shared.composerNewlineModifier.flag,
+                          kittyProtocol: kittyProtocol) {
                 sendInputBytes(bytes, to: surface)
             }
             return
@@ -1380,7 +1387,8 @@ final class GhosttySurfaceView: NSView {
         // while IME is composing so Enter / Esc / arrows can dismiss / accept
         // the candidate window without leaking through to the PTY.
         if !hasMarkedText(),
-           let bytes = Self.handWrittenEscapeSequence(forKeyCode: event.keyCode, modifierFlags: mods) {
+           let bytes = Self.handWrittenEscapeSequence(forKeyCode: event.keyCode, modifierFlags: mods, newlineModifier: KookySettingsModel.shared.composerNewlineModifier.flag,
+                          kittyProtocol: kittyProtocol) {
             sendInputBytes(bytes, to: surface)
             return
         }
@@ -1561,25 +1569,39 @@ final class GhosttySurfaceView: NSView {
         }
     }
 
-    /// Map kooky's own functional-key policy to bytes. Returns `nil` for
-    /// normal text and mode-aware physical keys that must go through
-    /// `ghostty_surface_key`.
-    nonisolated static func handWrittenEscapeSequence(
-        forKeyCode code: UInt16,
-        modifierFlags mods: NSEvent.ModifierFlags
-    ) -> String? {
-        let modDigit = csiModifierDigit(shift: mods.contains(.shift),
-                                        alt: mods.contains(.option),
-                                        ctrl: mods.contains(.control))
+/// Map kooky's own functional-key policy to bytes. Returns `nil` for
+/// normal text and mode-aware physical keys that must go through
+/// `ghostty_surface_key`.
+nonisolated static func handWrittenEscapeSequence(
+    forKeyCode code: UInt16,
+    modifierFlags mods: NSEvent.ModifierFlags,
+    newlineModifier: NSEvent.ModifierFlags = .shift,
+    kittyProtocol: Bool = false
+) -> String? {
+    let modDigit = csiModifierDigit(shift: mods.contains(.shift),
+                                    alt: mods.contains(.option),
+                                    ctrl: mods.contains(.control))
 
-        switch code {
-        // Functional
-        case 36, 76:
-            // Return / keypad Return (76): Shift+Enter sends `\` then CR —
-            // zsh line-continuation and Claude Code's documented `\` +
-            // Enter → newline trick both honor this. `\n` alone is useless:
-            // ZLE binds it to accept-line.
-            return mods.contains(.shift) ? "\\\r" : "\r"
+    switch code {
+    // Functional
+    case 36, 76:
+        // Return / keypad Return (76).
+        //
+        // kitty-protocol TUIs (omp, cmux) recognize "newline instead of send"
+        // ONLY as Shift+Enter's CSI-u (`ESC[27;2;13~`) — omp doesn't honor a
+        // different modifier's CSI-u. So the user's configured newline combo
+        // is remapped onto that sequence: whatever combo they picked sends
+        // `ESC[27;2;13~` and omp newlines. Every OTHER Return — plain Enter,
+        // or a different modifier combo — just sends `\r` (the "send" key).
+        // It must NOT return nil here: a nil falls through to the IME/text
+        // branch below, which swallows the key and leaves Enter dead.
+        if kittyProtocol {
+            return mods.contains(newlineModifier) ? "\u{1B}[27;2;13~" : "\r"
+        }
+        // Otherwise (zsh line-continuation, Claude Code's documented `\` +
+        // Enter trick) the configured newline combo sends `\` then CR;
+        // `\n` alone is useless: ZLE binds it to accept-line.
+        return mods.contains(newlineModifier) ? "\\\r" : "\r"
         case 48:  return mods.contains(.shift) ? "\u{1B}[Z" : "\t"  // Tab / Shift+Tab
         case 51:  return "\u{7F}"                          // Backspace (DEL)
         case 53:  return "\u{1B}"                          // Escape
