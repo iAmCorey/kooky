@@ -343,6 +343,14 @@ final class TerminalKeyRoutingTests: XCTestCase {
             "\\\r"
         )
         XCTAssertEqual(
+            GhosttySurfaceView.handWrittenEscapeSequence(forKeyCode: 76, modifierFlags: []),
+            "\r"
+        )
+        XCTAssertEqual(
+            GhosttySurfaceView.handWrittenEscapeSequence(forKeyCode: 76, modifierFlags: [.shift]),
+            "\\\r"
+        )
+        XCTAssertEqual(
             GhosttySurfaceView.handWrittenEscapeSequence(forKeyCode: 48, modifierFlags: [.shift]),
             "\u{1B}[Z"
         )
