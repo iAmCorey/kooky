@@ -501,6 +501,7 @@ struct SessionHistoryView: View {
             RightPanelHeader(title: "session history", count: history.records.count) {
                 refreshButton
             }
+            workspaceFilter
             searchField
             filterChips
             resumeErrorBanner
@@ -588,6 +589,17 @@ struct SessionHistoryView: View {
         }
     }
 
+    private var workspaceFilter: some View {
+        Toggle(isOn: $store.historyFilterCurrentWorkspace) {
+            Text(String(localized: "only current workspace", bundle: .kookyResources))
+                .font(Theme.mono(10))
+                .foregroundStyle(Theme.chromeMuted)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 12)
+        .padding(.top, 6)
+    }
+
     private var searchField: some View {
         HStack(spacing: 6) {
             Image(systemName: "magnifyingglass")
@@ -647,8 +659,15 @@ struct SessionHistoryView: View {
     private var filteredRecords: [AgentSessionRecord] {
         let query = store.historySearchQuery
         let agentFilter = store.historyFilterAgentId
+        let workspaceRoot = store.historyFilterCurrentWorkspace
+            ? store.active?.workingDirectory.standardizedFileURL.path
+            : nil
         return history.records.filter { record in
             if let agentFilter, record.agentId != agentFilter { return false }
+            if let workspaceRoot {
+                let cwd = record.cwd.standardizedFileURL.path
+                guard cwd == workspaceRoot || cwd.hasPrefix(workspaceRoot + "/") else { return false }
+            }
             guard !query.isEmpty else { return true }
             return record.title.localizedCaseInsensitiveContains(query)
                 || record.cwd.path.localizedCaseInsensitiveContains(query)

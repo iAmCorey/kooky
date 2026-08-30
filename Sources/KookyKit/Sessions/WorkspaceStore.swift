@@ -125,6 +125,9 @@ final class WorkspaceStore {
     /// defaults on every reopen.
     var historyFilterAgentId: String?
     var historySearchQuery = ""
+    /// When set, the history pane shows only sessions whose cwd lives inside
+    /// the current workspace's directory.
+    var historyFilterCurrentWorkspace = true
     /// Session Info's collapsed sections, keyed by section title. Owned by the
     /// store for exactly the reason above — the page unmounts whenever the
     /// panel switches, so `@State` in the view would forget every collapse the

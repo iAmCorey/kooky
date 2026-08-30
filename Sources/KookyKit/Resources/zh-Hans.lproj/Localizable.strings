@@ -290,9 +290,10 @@
 "session info" = "会话信息";
 "no agents running" = "没有正在运行的智能体";
 "no active session" = "没有活动会话";
-"scanning…" = "正在扫描…";
 "no sessions found" = "未找到会话";
+"scanning…" = "正在扫描…";
 "search sessions" = "搜索会话";
+"only current workspace" = "仅显示当前工作区";
 "all" = "全部";
 "untitled" = "未命名";
 "color" = "颜色";
