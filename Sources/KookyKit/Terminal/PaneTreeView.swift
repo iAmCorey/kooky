@@ -72,15 +72,6 @@ private struct PaneView: View {
     @State private var contextMenuOpen = false
     @State private var contextMenuAnchor: UnitPoint = .center
 
-    /// CLI background tabs (`open --no-focus`, issue #59) whose shell must
-    /// run WITHOUT ever being shown. Each gets an offscreen, hidden engine
-    /// mount below so the surface can spawn; the active tab is excluded —
-    /// its mount is the visible one, and `engine.view` is a single NSView
-    /// that can only have one parent.
-    private var backgroundSpawningTabs: [Session] {
-        pane.tabs.filter { $0.spawnsInBackground && $0.id != pane.activeTabId }
-    }
-
     var body: some View {
         let paneOpacity = isFocused ? 1.0 : Self.inactivePaneOpacity
         VStack(spacing: 0) {
