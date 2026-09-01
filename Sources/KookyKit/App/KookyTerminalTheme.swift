@@ -20,8 +20,25 @@ struct KookyTerminalTheme: Identifiable, Hashable {
     let foregroundHex: String
     let lines: [String]
     let source: Source
+    /// Absolute source path for scanned Ghostty user themes. Passing this to
+    /// libghostty as the config source keeps relative path options anchored to
+    /// the theme file instead of kooky's process working directory.
+    let userThemeURL: URL?
 
     var isBundled: Bool { source == .bundled }
+
+    /// Ghostty theme files may contain every regular config key except
+    /// `theme` and `config-file`. Native theme loading ignores those two; when
+    /// kooky applies a selected user theme after Ghostty's default config, it
+    /// must preserve the same boundary rather than promoting them into the
+    /// main config.
+    var loadableLines: [String] {
+        guard !isBundled else { return lines }
+        return lines.filter { line in
+            guard let key = Self.configKey(in: line) else { return true }
+            return key != "theme" && key != "config-file"
+        }
+    }
 
     /// Light/dark split for the picker's section grouping. Uses the same
     /// luminance threshold `Theme.Resolved` applies when deciding chrome
@@ -740,7 +757,8 @@ struct KookyTerminalTheme: Identifiable, Hashable {
                 userThemeName: url.lastPathComponent,
                 background: values["background"],
                 foreground: values["foreground"],
-                lines: text.split(whereSeparator: \.isNewline).map(String.init)
+                lines: text.split(whereSeparator: \.isNewline).map(String.init),
+                url: url
             )
         }
     }
@@ -765,6 +783,7 @@ struct KookyTerminalTheme: Identifiable, Hashable {
         self.backgroundHex = background
         self.foregroundHex = foreground
         self.source = .bundled
+        self.userThemeURL = nil
         self.lines = [
             "background = \(background)",
             "foreground = \(foreground)",
@@ -776,7 +795,13 @@ struct KookyTerminalTheme: Identifiable, Hashable {
         }
     }
 
-    private init(userThemeName: String, background: String?, foreground: String?, lines: [String]) {
+    private init(
+        userThemeName: String,
+        background: String?,
+        foreground: String?,
+        lines: [String],
+        url: URL
+    ) {
         self.id = "ghostty-user:\(userThemeName)"
         self.title = userThemeName
         self.storedValue = userThemeName
@@ -784,6 +809,15 @@ struct KookyTerminalTheme: Identifiable, Hashable {
         self.foregroundHex = foreground ?? "#EFEFF1"
         self.lines = lines
         self.source = .ghosttyUser
+        self.userThemeURL = url.standardizedFileURL
+    }
+
+    private static func configKey(in line: String) -> String? {
+        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty,
+              !trimmed.hasPrefix("#"),
+              let equals = trimmed.firstIndex(of: "=") else { return nil }
+        return trimmed[..<equals].trimmingCharacters(in: .whitespaces)
     }
 
     private static func parseGhosttyConfigLines(_ text: String) -> [String: String] {

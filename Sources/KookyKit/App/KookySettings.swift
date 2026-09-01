@@ -78,7 +78,11 @@ enum KookySettings {
     /// user-set `terminal.cursor-color` / `background` / `palette` override
     /// per ghostty last-write-wins.
     @MainActor
-    static func apply(parsed: [String: Any]?, to config: ghostty_config_t?) {
+    static func apply(
+        parsed: [String: Any]?,
+        to config: ghostty_config_t?,
+        themes: [KookyTerminalTheme] = KookyTerminalTheme.availableThemes()
+    ) {
         guard let config,
               let parsed else { return }
         let terminal = parsed["terminal"] as? [String: Any] ?? [:]
@@ -89,13 +93,20 @@ enum KookySettings {
         ) {
             if let theme = KookyTerminalTheme.theme(
                 for: rawTheme,
-                in: KookyTerminalTheme.availableThemes()
+                in: themes
             ) {
-                // Scanned user themes keep their original lines so selection colors and
-                // other theme settings are applied directly; unknown names stay delegated
-                // to Ghostty's own theme lookup below.
-                if theme.isBundled || !theme.lines.isEmpty {
+                if theme.isBundled {
                     lines.append(contentsOf: theme.lines)
+                } else if let sourceURL = theme.userThemeURL {
+                    // Apply a selected user theme after Ghostty's own config so
+                    // the picker behaves like bundled themes. Keep the actual
+                    // file path as the parser source: relative path options and
+                    // diagnostics must resolve against the theme file.
+                    loadGhosttyLines(
+                        theme.loadableLines,
+                        sourceName: sourceURL.path,
+                        into: config
+                    )
                 } else {
                     lines.append(contentsOf: formatGhosttyLines(key: "theme", value: theme.storedValue))
                 }
@@ -125,11 +136,19 @@ enum KookySettings {
             }
             // A ghostty-native numeric blur — leave opacity alone.
         }
+        loadGhosttyLines(lines, sourceName: "kooky-settings", into: config)
+    }
+
+    private static func loadGhosttyLines(
+        _ lines: [String],
+        sourceName: String,
+        into config: ghostty_config_t
+    ) {
         let text = lines.joined(separator: "\n")
         guard !text.isEmpty else { return }
         text.withCString { cstr in
-            "kooky-settings".withCString { sourceName in
-                ghostty_config_load_string(config, cstr, UInt(strlen(cstr)), sourceName)
+            sourceName.withCString { source in
+                ghostty_config_load_string(config, cstr, UInt(strlen(cstr)), source)
             }
         }
     }
