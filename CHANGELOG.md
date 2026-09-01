@@ -2,6 +2,14 @@
 
 Notable changes per release. Tagged commits use `vX.Y.Z` shortform.
 
+## v0.51.6 — 2026-09-01
+
+- Fixed: the numeric keypad Enter key now sends Return instead of being ignored. (#67)
+- New: middle-click a tab to close it. (#66)
+- Fixed: resizing the left sidebar no longer makes the terminal jitter, and the right sidebar can be dragged again. (#65)
+- Faster: clicking between tabs now switches immediately, without waiting on the double-click-to-zoom gesture. (#64)
+- Fixed: Ghostty user theme files now load their complete configuration, so settings such as selection and cursor colors take effect. (#68)
+
 ## v0.51.5 — 2026-08-26
 
 - Fixed: a tab opened with `kooky-cli open --no-focus` now actually starts working in the background — the shell (and any `-e` command or agent) runs immediately instead of waiting for the tab to be clicked, while everything the flag promised still holds: kooky stays in the background and what you're looking at doesn't change. Rendering stays paused for hidden tabs, so a busy background tab costs no GPU. (#59)
