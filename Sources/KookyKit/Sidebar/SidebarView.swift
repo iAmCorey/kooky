@@ -120,6 +120,7 @@ struct SidebarView: View {
                 // Backstop: ⌘⌃S mid-drag unmounts the handle before onEnded
                 // can fire — end the captured engines so the suspension
                 // refcount stays balanced (mirrors the split divider).
+                resizeDragStartWidth = nil
                 if sidebarResizeSuspended {
                     sidebarResizeSuspended = false
                     for engine in sidebarSuspendedEngines { engine.endSizePropagationSuspension() }
