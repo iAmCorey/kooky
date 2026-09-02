@@ -2,6 +2,10 @@
 
 Notable changes per release. Tagged commits use `vX.Y.Z` shortform.
 
+## v0.51.7 — 2026-09-02
+
+- New: the session history panel can be narrowed to the current workspace — tick "only this workspace" under the agent chips to list only conversations that ran inside the active workspace's project (its git repository, or the workspace folder outside git), so a busy machine's history stops burying the project you're in. The agent chips and the header count now follow whatever filter is active. Thanks @kaijianding for the idea and a draft implementation. (#71)
+
 ## v0.51.6 — 2026-09-01
 
 - Fixed: the numeric keypad Enter key now sends Return instead of being ignored. (#67)
