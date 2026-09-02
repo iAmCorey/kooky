@@ -181,13 +181,9 @@ final class LibghosttyApp {
         /// merged truth the slider claimed 100% while the window rendered at
         /// the inherited 0.6, and couldn't override it).
         var backgroundOpacity: Double = 1
-        /// `background-blur` as a radius (`true`/a number; 0 = off, the
-        /// `macos-glass-*` forms are kooky's own glass path). A positive
-        /// radius is what licenses window translucency without glass —
-        /// bare opacity with NO frosting underneath leaks the desktop
-        /// through kooky's layered chrome at visibly different levels
-        /// (inactive-pane dimming, sidebar, top strip all multiply
-        /// differently), so it stays opaque by design.
+        /// bare opacity alone also gives the main terminal window translucency
+        /// (`applyGlassBacking(allowsBareOpacity:)`); this radius only
+        /// matters for the frosted look on top of it.
         var windowBlurRadius: Int = 0
     }
     private(set) var hostConfig = HostConfig()
@@ -551,7 +547,6 @@ final class LibghosttyEngine: TerminalEngine {
     func renderNowIfNeeded() {
         surfaceView.renderNowIfNeeded()
     }
-    var backgroundColor: NSColor { Theme.terminalSurface }
     var onPwdChange: ((String) -> Void)? {
         get { surfaceView.onPwdChange }
         set { surfaceView.onPwdChange = newValue }

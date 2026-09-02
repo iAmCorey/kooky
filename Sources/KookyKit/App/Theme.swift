@@ -40,6 +40,8 @@ enum KookyAppearanceMode: String, CaseIterable, Identifiable {
 enum Theme {
     // MARK: Colors
 
+    /// Chrome derives from the terminal theme's `background`; dark themes can
+    /// mix it toward black using the configurable chrome ratio.
     static var chromeBackground: Color { Color(nsColor: resolved.chromeBackgroundColor) }
     static var chromeForeground: Color { Color(nsColor: resolved.foregroundColor) }
     static var chromeMuted: Color { resolved.chromeMuted }
@@ -180,12 +182,12 @@ enum Theme {
 
     /// Chrome panels (sidebar, tab bar, status bar, menus) sit *in front* of
     /// the single window-level glass layer, so in glass mode they use a
-    /// translucent chrome tint to let the glass read through instead of their
-    /// own opaque fill. `clear` glass shows more; `regular` stays a touch
-    /// more solid. Tune these on macOS 26 hardware.
+    /// translucent tint of the same terminal theme background to let the
+    /// glass read through instead of their own opaque fill. `clear` glass
+    /// shows more; `regular` stays a touch more solid.
     static var glassPanelTint: Color {
         let opacity: Double = glassStyle == .clear ? 0.40 : 0.60
-        return Color(nsColor: resolved.chromeBackgroundColor).opacity(opacity)
+        return Color(nsColor: resolved.backgroundColor).opacity(opacity)
     }
 
     /// `~/.config/ghostty/config` `background-blur` / `background-opacity`,
@@ -214,8 +216,8 @@ enum Theme {
     /// SwiftUI's `@Observable` machinery registers the dependency on every
     /// body that touches a chrome token — without that read, body
     /// re-evaluation wouldn't fire on a theme switch. The cache key includes
-    /// parsed background / foreground colors so a user theme file refreshes
-    /// chrome when Settings reloads after the file changes.
+    /// parsed colors and the chrome mix ratio so every appearance edit rebuilds
+    /// the derived chrome tokens.
     static var resolved: Resolved {
         let model = KookySettingsModel.shared
         let isDarkAppearance = resolvedAppearanceIsDark
@@ -224,23 +226,30 @@ enum Theme {
             themeId: theme?.id,
             backgroundHex: theme?.backgroundHex,
             foregroundHex: theme?.foregroundHex,
-            isDarkAppearance: isDarkAppearance
+            isDarkAppearance: isDarkAppearance,
+            chromeBackgroundMix: model.chromeBackgroundMix
         )
         if let cached = cachedResolved, cached.cacheKey == key { return cached }
-        let next = Resolved(cacheKey: key, theme: theme, isDarkAppearance: isDarkAppearance)
+        let next = Resolved(
+            cacheKey: key,
+            theme: theme,
+            isDarkAppearance: isDarkAppearance,
+            chromeBackgroundMix: model.chromeBackgroundMix
+        )
         cachedResolved = next
         return next
     }
     private static var cachedResolved: Resolved?
 
     /// Snapshot of every token derived from one terminal theme. Computed once
-    /// and reused until the theme id changes — see `Theme.resolved`.
+    /// and reused until one of the theme inputs changes — see `Theme.resolved`.
     struct Resolved {
         struct CacheKey: Equatable {
             let themeId: String?
             let backgroundHex: String?
             let foregroundHex: String?
             let isDarkAppearance: Bool
+            let chromeBackgroundMix: Double
         }
 
         let cacheKey: CacheKey
@@ -260,7 +269,8 @@ enum Theme {
         fileprivate init(
             cacheKey: CacheKey,
             theme: KookyTerminalTheme?,
-            isDarkAppearance: Bool
+            isDarkAppearance: Bool,
+            chromeBackgroundMix: Double
         ) {
             self.cacheKey = cacheKey
             self.backgroundColor = theme.flatMap { NSColor(hex: $0.backgroundHex) }
@@ -268,12 +278,11 @@ enum Theme {
             self.foregroundColor = theme.flatMap { NSColor(hex: $0.foregroundHex) }
                 ?? (isDarkAppearance ? defaultForeground : defaultLightForeground)
             self.isLight = backgroundColor.relativeLuminance > 0.55
-            // Chrome sits one step off the surface so the terminal reads as
-            // the framed canvas. Dark themes nudge toward black, light
-            // themes toward the ink — keeps the chrome readable on each.
+            // Chrome uses the theme background with a configurable dark-theme
+            // mix toward black; 0.16 preserves the existing default.
             self.chromeBackgroundColor = isLight
                 ? mix(backgroundColor, foregroundColor, 0.035)
-                : mix(backgroundColor, sRGBBlack, 0.16)
+                : mix(backgroundColor, sRGBBlack, min(max(chromeBackgroundMix, 0), 1))
             let mutedNS = mix(foregroundColor, chromeBackgroundColor, isLight ? 0.42 : 0.52)
             let faintNS = mix(foregroundColor, chromeBackgroundColor, isLight ? 0.68 : 0.72)
             let fgColor = Color(nsColor: foregroundColor)

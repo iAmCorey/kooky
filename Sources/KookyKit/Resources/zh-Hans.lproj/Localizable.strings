@@ -46,6 +46,7 @@
 "cursor-style" = "光标样式";
 "liquid-glass" = "液态玻璃";
 "background-opacity" = "背景透明度";
+"chrome-background-mix" = "界面背景混色";
 "show-search-pill" = "显示搜索入口";
 "show-agent-panel-tag" = "显示智能体面板标签";
 "default-new-tab" = "新标签页默认项";

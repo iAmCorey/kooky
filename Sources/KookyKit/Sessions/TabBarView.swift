@@ -39,6 +39,7 @@ struct TabBarView: View {
                 NSApplication.shared.keyWindow?.performZoom(nil)
             }
         }
+        .glassChromeBackground()
     }
 
     /// Split-right / split-down buttons. Mirror ⌘D / ⌘⇧D exactly: Split

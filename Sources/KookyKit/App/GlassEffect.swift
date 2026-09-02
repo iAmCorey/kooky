@@ -53,27 +53,34 @@ private struct GlassEffectLayer: NSViewRepresentable {
 }
 #endif
 
+/// The bare-`background-opacity` value currently enabled for the main window,
+/// or nil when the window should not use the bare-opacity path. A single
+/// helper keeps window backing and alpha state on the same threshold.
+@MainActor
+private func activeBareOpacity() -> Double? {
+    guard !Theme.glassEnabled, Theme.backgroundOpacity < 1 else { return nil }
+    let model = KookySettingsModel.shared
+    let frosted = model.backgroundBlur.map {
+        !KookySettings.isBlurExplicitlyOff($0) && !KookySettings.isGlassBlur($0)
+    } ?? false
+    return frosted ? nil : Theme.backgroundOpacity
+}
+
 extension View {
     /// Backmost window layer. On macOS 26 with a glass style configured this
     /// is the single real `NSGlassEffectView` that every chrome panel sits in
-    /// front of and lets read through. Otherwise (glass off, or any system
-    /// below macOS 26) it's the opaque `fallback` — pass the terminal surface
-    /// color so the window edge stays seamless with the terminal, matching
-    /// kooky's pre-glass look exactly.
-    func glassWindowBackground(fallback: Color) -> some View {
-        // `.ignoresSafeArea()` lets the backing fill the whole window —
-        // including under a transparent titlebar — while the foreground
-        // content still respects the titlebar safe area. That's what keeps
-        // the glass seamless on titled windows (Settings, Update) instead of
-        // leaving an unglassed titlebar strip.
-        background { GlassWindowBacking(fallback: fallback).ignoresSafeArea() }
+    /// front of and lets read through. Otherwise it uses the supplied fallback
+    /// color; the main window can opt into bare opacity with `followsOpacity`.
+    func glassWindowBackground(fallback: Color, followsOpacity: Bool = false) -> some View {
+        // `.ignoresSafeArea()` lets the backing fill the whole window,
+        // including under a transparent titlebar.
+        background { GlassWindowBacking(fallback: fallback, followsOpacity: followsOpacity).ignoresSafeArea() }
     }
 
-    /// Chrome panel background (sidebar, status bar, right panel). When glass
-    /// is actively rendering (macOS 26 + a style set) it's a translucent chrome
-    /// tint so the window glass shows through; otherwise the opaque chrome
-    /// color — identical to kooky's pre-glass chrome on every system below
-    /// macOS 26.
+    /// Chrome panel background (sidebar, tab bar, status bar, right panel).
+    /// Glass mode uses a translucent tint; bare opacity uses an opaque theme
+    /// color because `NSWindow.alphaValue` now applies the shared translucency
+    /// to the complete main window in one compositing step.
     func glassChromeBackground() -> some View {
         background(Theme.glassEnabled ? Theme.glassPanelTint : Theme.chromeBackground)
     }
@@ -85,6 +92,9 @@ extension View {
 /// window isn't key — without that, macOS washes inactive glass to a flat gray.
 private struct GlassWindowBacking: View {
     let fallback: Color
+    /// Whether this window lets a bare `background-opacity < 1` (no glass, no
+    /// blur) turn the backing clear. True only for the main terminal window.
+    let followsOpacity: Bool
     @Environment(\.controlActiveState) private var activeState
 
     var body: some View {
@@ -107,39 +117,58 @@ private struct GlassWindowBacking: View {
         #endif
     }
 
-    /// The non-glass window backing follows `background-opacity` ONLY when a
-    /// numeric `background-blur` provides the frosting (bare opacity stays
-    /// opaque — see `applyGlassBacking`). Reads the settings.json values via
-    /// the model so SwiftUI observes live edits; values set only in an
-    /// inherited ghostty config apply at the window layer but keep this
-    /// backing opaque — a recorded settings.json-first boundary.
+    /// The non-glass window backing uses a clear base for the main window's
+    /// bare-opacity path; its opaque content is composited uniformly by the
+    /// window alpha. Frosted blur keeps its tinted fallback so the frost reads
+    /// against a colored base, not raw desktop.
+    @ViewBuilder
     private var translucentFallback: some View {
         let model = KookySettingsModel.shared
         let frosted = model.backgroundBlur.map {
             !KookySettings.isBlurExplicitlyOff($0) && !KookySettings.isGlassBlur($0)
         } ?? false
-        return fallback.opacity(frosted ? (model.backgroundOpacity ?? 1) : 1)
+        if followsOpacity, activeBareOpacity() != nil {
+            Color.clear
+        } else {
+            fallback.opacity(frosted ? (model.backgroundOpacity ?? 1) : 1)
+        }
     }
 }
 
 extension NSWindow {
-    /// Match the window's backing to the current glass + opacity state —
-    /// non-opaque + clear when the glass layer needs to sample the desktop
-    /// OR `background-opacity < 1` wants it showing through (opacity works
-    /// WITHOUT glass, on every macOS — the core renders the surface with
-    /// alpha, the window just has to let it through). Call at window
-    /// creation and from `refreshThemeAppearances` so live edits flip every
-    /// window in step.
-    @MainActor func applyGlassBacking() {
+    /// Match the window's backing to the current glass + opacity state. Bare
+    /// opacity uses a clear backing plus one window-level alpha so terminal
+    /// and SwiftUI chrome are composited identically; glass and numeric blur
+    /// retain their existing backing behavior. Call at window creation and
+    /// from `refreshThemeAppearances` so live edits flip every window in step.
+    ///
+    /// `allowsBareOpacity` is the window-layer counterpart to
+    /// `glassWindowBackground(followsOpacity:)`: true only on the main
+    /// terminal window, so auxiliary windows (Settings, About, …) never go
+    /// translucent from a bare opacity — they only follow glass or blur.
+    @MainActor func applyGlassBacking(allowsBareOpacity: Bool = false) {
         let glass = Theme.glassEnabled
-        // Translucency needs a frosting layer under it — Liquid Glass or the
-        // core's window blur. BARE opacity stays opaque by design: kooky's
-        // layered chrome (inactive-pane dimming × surface alpha × sidebar ×
-        // top strip) multiplies to visibly different levels with nothing
-        // frosted underneath to absorb the difference.
-        let translucent = glass || LibghosttyApp.shared.hostConfig.windowBlurRadius > 0
-        isOpaque = !translucent
-        backgroundColor = translucent ? .clear : nil
+        let bareOpacity = allowsBareOpacity ? activeBareOpacity() : nil
+        let translucent = glass
+            || LibghosttyApp.shared.hostConfig.windowBlurRadius > 0
+            || bareOpacity != nil
+        // The top strip draws the titlebar-area chrome; keep AppKit's titlebar
+        // transparent so its background follows the live theme.
+        titlebarAppearsTransparent = true
+        // The bare-opacity backing color fills the native window edge while
+        // the single window alpha keeps it visually consistent with content.
+        backgroundColor = if bareOpacity != nil {
+            Theme.terminalSurface
+        } else if translucent {
+            .clear
+        } else {
+            nil
+        }
+        // In bare-opacity mode the terminal surface and SwiftUI chrome must
+        // share one alpha operation. AppKit's window alpha does that; applying
+        // opacity independently to each child produces visibly different
+        // colors when the desktop shows through.
+        alphaValue = CGFloat(bareOpacity ?? 1)
         // ghostty's own window blur (`background-blur = true` or a radius) —
         // the traditional frosted look, works on every macOS. The call reads
         // the config value itself; under glass we must CLEAR instead: the

@@ -93,6 +93,7 @@ private struct PaneView: View {
                         transaction.animation = nil
                     }
                     .padding(8)
+                    .glassChromeBackground()
                     .overlay(RightClickCatcher { unit in
                         // Promote this pane to the workspace's active one —
                         // RightClickCatcher swallows rightMouseDown before
