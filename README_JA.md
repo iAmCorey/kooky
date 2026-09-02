@@ -41,8 +41,8 @@ AI コーディングのために作られた、ミニマルでモダンな macO
 | Antigravity CLI | `agy` | ✓ | ✗ | ✗ |
 | Kimi Code | `kimi` | ✓ | ✗ | ✓ |
 | Pi | `pi` | ✓ | ✓ | ✓ |
-| Oh My Pi (new) | `omp` | ✓ | ✓ | ✓ |
-| Reasonix (new) | `reasonix` | ✓ | ✓ | ✓ |
+| Oh My Pi | `omp` | ✓ | ✓ | ✓ |
+| Reasonix | `reasonix` | ✓ | ✓ | ✓ |
 | Kiro CLI | `kiro-cli` | ✗ | ✗ | ✓ |
 | Droid | `droid` | ✓ | ✗ | ✓ |
 
@@ -82,7 +82,7 @@ AI コーディングのために作られた、ミニマルでモダンな macO
 
 **Agent パネル。** 上部のトグル (左サイドバーと同じ 3 段階の折りたたみ) で右サイドバーを開くと、全ウィンドウの agent を一覧でき、あなたを必要とする順に並びます —— ユーザー待ち、失敗、実行中、アイドル。任意の行をクリックすればその tab に直接ジャンプ、コンパクトモードではステータス色のドット付きアイコンの細い列に縮みます。
 
-**セッション履歴。** Agent パネルを 2 ページ目 (下部の時計アイコン) に切り替えると、ほとんどの内蔵 agent (上の表参照) の過去の会話を新しい順に一覧できます —— kooky の外で始めた会話も含まれます。タイトルやプロジェクトで検索、agent や現在のワークスペースで絞り込み、行をクリックすればその会話を再開: 会話の元のフォルダに新しい tab が開き、agent 自身のセッション ID でコンテキストが完全に復元されます。
+**セッション履歴。** Agent パネルを 2 ページ目 (下部の時計アイコン) に切り替えると、ほとんどの内蔵 agent (上の表参照) の過去の会話を新しい順に一覧できます —— kooky の外で始めた会話も含まれます。タイトルやプロジェクトで検索、agent や現在のワークスペースで絞り込み (ローカルのワークスペースのみ —— SSH ワークスペースのセッションはリモート側にあります)、行をクリックすればその会話を再開: 会話の元のフォルダに新しい tab が開き、agent 自身のセッション ID でコンテキストが完全に復元されます。
 
 ![過去の Claude Code / Codex の会話を検索して再開](img/screenshot-5.webp)
 
@@ -182,7 +182,7 @@ Xcode 26+ と macOS 14+ (Sonoma —— `@Observable` の最低システム要件
 ./scripts/setup-libghostty.sh        # 初回のみ：プリビルドの libghostty xcframework を Vendor/ にダウンロード
 swift build
 swift run                            # 開発モードで直接起動
-swift test                           # 850+ 個のユニットテスト
+swift test                           # 1000+ 個のユニットテスト
 ./scripts/bench.sh                   # パフォーマンスベンチマーク (release ビルド、結果は bench-history.jsonl に記録)
 
 ./scripts/build-app.sh               # dist/Kooky.app を出力

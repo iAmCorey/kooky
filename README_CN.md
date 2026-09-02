@@ -41,8 +41,8 @@
 | Antigravity CLI | `agy` | ✓ | ✗ | ✗ |
 | Kimi Code | `kimi` | ✓ | ✗ | ✓ |
 | Pi | `pi` | ✓ | ✓ | ✓ |
-| Oh My Pi (new) | `omp` | ✓ | ✓ | ✓ |
-| Reasonix (new) | `reasonix` | ✓ | ✓ | ✓ |
+| Oh My Pi | `omp` | ✓ | ✓ | ✓ |
+| Reasonix | `reasonix` | ✓ | ✓ | ✓ |
 | Kiro CLI | `kiro-cli` | ✗ | ✗ | ✓ |
 | Droid | `droid` | ✓ | ✗ | ✓ |
 
@@ -82,7 +82,7 @@
 
 **Agent 面板。** 顶栏有个开关（三种折叠状态，跟左边栏一样）能拉出右侧边栏，把所有窗口里的 agent 一次性列出来，按谁最需要你排序：等你处理、失败、运行中、空闲。点任意一行直接跳到对应 tab；折叠模式会收成一条带状态色圆点的窄图标栏。
 
-**会话历史。** 把 agent 面板翻到第二页（底部的时钟图标），大部分内置 agent（见上表）的历史对话按最近排序全在这里——在 kooky 外面开的也算。按标题或项目搜索、按 agent 过滤或只看当前工作区，点一行就接着聊：kooky 会在那个对话原来的目录里开一个新 tab，用 agent 自己的会话 ID 把上下文完整恢复回来。
+**会话历史。** 把 agent 面板翻到第二页（底部的时钟图标），大部分内置 agent（见上表）的历史对话按最近排序全在这里——在 kooky 外面开的也算。按标题或项目搜索、按 agent 过滤或只看当前工作区（仅本地工作区——SSH 工作区的会话在远端），点一行就接着聊：kooky 会在那个对话原来的目录里开一个新 tab，用 agent 自己的会话 ID 把上下文完整恢复回来。
 
 ![搜索并恢复任意一条 Claude Code / Codex 历史对话](img/screenshot-5.webp)
 
@@ -182,7 +182,7 @@ macOS **只拦第一次启动**。之后从 Spotlight、Dock、Finder 启动都�
 ./scripts/setup-libghostty.sh        # 一次性：把预编译的 libghostty xcframework 下到 Vendor/
 swift build
 swift run                            # 开发模式直接跑
-swift test                           # 850+ 个单测
+swift test                           # 1000+ 个单测
 ./scripts/bench.sh                   # 性能基准（release 构建，结果记录在 bench-history.jsonl）
 
 ./scripts/build-app.sh               # 产出 dist/Kooky.app
