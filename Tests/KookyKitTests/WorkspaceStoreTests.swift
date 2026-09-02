@@ -1609,6 +1609,42 @@ final class WorkspaceStoreTests: XCTestCase {
         XCTAssertEqual(persistedTab?.conversationId, "convo-roundtrip")
     }
 
+    /// ⌘Q's teardown echo (#70): `terminate()` SIGHUPs the agent, its
+    /// shutdown hook reports mid-drain, and the final flush must still
+    /// persist the agent and its conversation, not a plain terminal.
+    func testHookTrafficAfterTerminateCannotChangeWhatRestores() throws {
+        let persistence = InMemoryPersistence()
+        let store = makeStore(persistence: persistence)
+        let ws = store.addWorkspace(workingDirectory: projectA)
+        let tab = store.addTab(in: ws, template: .terminal)
+        store.applyHookEvent(agent: .ohMyPi, event: .running, sessionId: tab.id)
+        store.applyConversationId(conversationId: "omp-session", sessionId: tab.id)
+
+        store.terminate()
+        store.applyHookEvent(agent: .ohMyPi, event: .ended, sessionId: tab.id)
+        store.applyConversationId(conversationId: "late-id", sessionId: tab.id)
+        store.flushPersistence()
+
+        let persisted = try XCTUnwrap(
+            persistence.saved?.workspaces.flatMap(\.root.allTabs).first { $0.id == tab.id }
+        )
+        XCTAssertEqual(persisted.agentId, AgentTemplate.ohMyPi.id)
+        XCTAssertEqual(persisted.conversationId, "omp-session")
+    }
+
+    /// Scope check: a live store still reverts on `ended`, keeping only the id.
+    func testEndedBeforeTerminateStillRevertsToTerminal() {
+        let store = makeStore()
+        let ws = store.addWorkspace(workingDirectory: projectA)
+        let tab = store.addTab(in: ws, template: .terminal)
+        store.applyHookEvent(agent: .ohMyPi, event: .running, sessionId: tab.id)
+        store.applyConversationId(conversationId: "omp-session", sessionId: tab.id)
+        store.applyHookEvent(agent: .ohMyPi, event: .ended, sessionId: tab.id)
+
+        XCTAssertEqual(tab.agent.id, AgentTemplate.terminal.id)
+        XCTAssertEqual(tab.conversationId, "omp-session")
+    }
+
     func testClaudeNoSessionPersistenceDropsResumeIdWithoutDisablingFutureCapture() {
         let store = WorkspaceStore(
             persistence: InMemoryPersistence(),

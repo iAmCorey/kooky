@@ -464,7 +464,8 @@ final class WorkspaceStore {
     /// windowWillClose crashes AppKit), so for one tick a dead store is
     /// still reachable through `windowControllers` — anything that acts on
     /// a store from outside the UI (the CLI) must skip it, or it lands a tab
-    /// in a store that is about to be dropped and reports success.
+    /// in a store that is about to be dropped and reports success. Hook-socket
+    /// ingress gates itself on it instead (`hookSession`).
     private(set) var isTerminated = false
     private static let saveDebounce: UInt64 = 1_000_000_000
 
@@ -1736,9 +1737,10 @@ final class WorkspaceStore {
     /// Routes a hook event to the named session. On `.ended`, drops the leaf
     /// back to `.terminal` only if the agent reporting end matches the
     /// session's current agent — otherwise a Codex run inside a Claude tab
-    /// (or a delayed `ended`) would wipe the still-active icon.
+    /// (or a delayed `ended`) would wipe the still-active icon. Dropped once
+    /// `terminate()` has run (`hookSession`).
     func applyHookEvent(agent: AgentTemplate, event: HookEvent, sessionId: UUID) {
-        guard let session = findSession(id: sessionId) else { return }
+        guard let session = hookSession(id: sessionId) else { return }
         let agentBefore = session.agent.id
         if event == .ended {
             // A custom agent based on this builtin shares its binary's
@@ -1778,7 +1780,7 @@ final class WorkspaceStore {
     }
 
     func applyShellEnvironment(_ env: [String: String], sessionId: UUID) {
-        guard let session = findSession(id: sessionId) else { return }
+        guard let session = hookSession(id: sessionId) else { return }
         session.shellEnvironment = env
         refreshEnvironment(for: session)
     }
@@ -1790,7 +1792,7 @@ final class WorkspaceStore {
     /// on every SessionStart / UserPromptSubmit / Stop / SessionEnd, so the
     /// dedup keeps the debounce loop quiet.
     func applyConversationId(conversationId: String, sessionId: UUID) {
-        guard let session = findSession(id: sessionId) else { return }
+        guard let session = hookSession(id: sessionId) else { return }
         guard session.conversationId != conversationId else { return }
         session.conversationId = conversationId
         scheduleSave()
@@ -1810,7 +1812,7 @@ final class WorkspaceStore {
         toolUseId: String?,
         sessionId: UUID
     ) {
-        guard let session = findSession(id: sessionId) else { return }
+        guard let session = hookSession(id: sessionId) else { return }
 
         switch event {
         case .pre:
@@ -1845,6 +1847,19 @@ final class WorkspaceStore {
 
     private func findSession(id: UUID) -> Session? {
         location(ofSessionId: id)?.pane.tabs.first { $0.id == id }
+    }
+
+    /// A hook-socket message's target session, or `nil` once `terminate()`
+    /// has run — from then on kooky itself is killing the engines, so hook
+    /// traffic is a teardown echo. On ⌘Q the drain waits for the SIGHUP'd
+    /// agent to exit with the socket still listening, and the agent's own
+    /// shutdown hook pings `ended`; applied, that reverts the tab to
+    /// `.terminal` and the post-drain flush persists a plain terminal, so
+    /// the next launch neither relaunches nor resumes it (#70). The OSC-2
+    /// marker path needs no twin: `releaseSurface` seals the byte stream
+    /// before the drain starts.
+    private func hookSession(id: UUID) -> Session? {
+        isTerminated ? nil : findSession(id: id)
     }
 
     /// Re-resolves every live session's `agent` against the current templates.
