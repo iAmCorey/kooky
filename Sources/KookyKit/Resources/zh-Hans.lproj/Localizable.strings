@@ -294,6 +294,7 @@
 "no sessions found" = "未找到会话";
 "search sessions" = "搜索会话";
 "all" = "全部";
+"only this workspace" = "仅显示当前工作区";
 "untitled" = "未命名";
 "color" = "颜色";
 "no access" = "无访问权限";

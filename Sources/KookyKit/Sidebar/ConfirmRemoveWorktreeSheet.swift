@@ -92,14 +92,11 @@ struct ConfirmRemoveWorktreeSheet: View {
 
     /// Toggle exposing the destructive escape hatch — when on, close
     /// also runs `git worktree remove --force` + `git branch -d`.
-    /// Native SwiftUI `Toggle` styled to fit brutalist chrome.
     private var alsoDeleteCheckbox: some View {
-        Toggle(isOn: $alsoDelete) {
-            Text(String(localized: "also delete worktree directory and branch", bundle: .kookyResources))
-                .font(Theme.mono(11.5))
-                .foregroundStyle(alsoDelete ? Theme.chromeForeground : Theme.chromeMuted)
-        }
-        .toggleStyle(.checkbox)
+        KookyCheckbox(
+            title: String(localized: "also delete worktree directory and branch", bundle: .kookyResources),
+            isOn: $alsoDelete
+        )
         .disabled(isWorking)
     }
 

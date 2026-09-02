@@ -19,8 +19,20 @@ struct AgentSessionRecord: Identifiable, Hashable, Sendable {
     /// The directory the conversation ran in. Resume respawns here so the
     /// conversation's file references stay valid.
     let cwd: URL
+    /// `cwd.path`, built once here: the History filters compare it per
+    /// record per keystroke, and `URL.path` is a fresh String each call.
+    let cwdPath: String
     /// Session file's modification date — "when this conversation last moved".
     let lastActivity: Date
+
+    init(agentId: String, conversationId: String, title: String, cwd: URL, lastActivity: Date) {
+        self.agentId = agentId
+        self.conversationId = conversationId
+        self.title = title
+        self.cwd = cwd
+        self.cwdPath = cwd.path
+        self.lastActivity = lastActivity
+    }
 
     var id: String { "\(agentId):\(conversationId)" }
 }
@@ -408,9 +420,6 @@ final class AgentSessionHistory {
     private static let minSecondsBetweenScans: TimeInterval = 30
 
     private(set) var records: [AgentSessionRecord] = []
-    /// Agents present in `records`, cached at the write so the chips row
-    /// doesn't rebuild the set per keystroke.
-    private(set) var presentAgentIds: Set<String> = []
     /// True only until the FIRST scan lands — refreshes after that keep the
     /// stale list on screen instead of flashing a spinner over it.
     private(set) var isInitialLoad = true
@@ -436,7 +445,6 @@ final class AgentSessionHistory {
             // regardless of change.
             if records != result {
                 records = result
-                presentAgentIds = Set(result.map(\.agentId))
             }
             if isInitialLoad { isInitialLoad = false }
             lastScanCompleted = Date()
@@ -476,11 +484,53 @@ private let monthDayFormatter: DateFormatter = {
     return formatter
 }()
 
+// MARK: - Filter
+
+/// The History pane's three filters as one pure value, so the row list, the
+/// agent chips, and the header count all derive from one pass. Location
+/// scopes FIRST, and the chip set is taken from the scoped records BEFORE
+/// agent + query narrow them: a chip for an agent with no sessions in this
+/// workspace would click through to an empty list, while an agent hidden
+/// only by the current chip/query must keep its chip so it can be picked.
+struct SessionHistoryFilter {
+    /// Every spelling of the workspace root a record's cwd may carry
+    /// (`WorkspaceStore.historyWorkspaceRootPaths`); empty = every location.
+    var workspaceRootPaths: [String]
+    /// nil = every agent.
+    var agentId: String?
+    var query: String
+
+    struct Result {
+        var visible: [AgentSessionRecord] = []
+        /// Agents with at least one session in scope.
+        var presentAgentIds: Set<String> = []
+    }
+
+    func apply(_ records: [AgentSessionRecord]) -> Result {
+        var result = Result()
+        for record in records {
+            if !workspaceRootPaths.isEmpty,
+               !workspaceRootPaths.contains(where: { pathIsInside(record.cwdPath, root: $0) }) {
+                continue
+            }
+            result.presentAgentIds.insert(record.agentId)
+            if let agentId, record.agentId != agentId { continue }
+            if !query.isEmpty,
+               !record.title.localizedCaseInsensitiveContains(query),
+               !record.cwdPath.localizedCaseInsensitiveContains(query) {
+                continue
+            }
+            result.visible.append(record)
+        }
+        return result
+    }
+}
+
 // MARK: - View
 
-/// Right sidebar's History pane: search + agent filter over the on-disk
-/// session list; a click resumes that conversation in a new tab of the
-/// active workspace.
+/// Right sidebar's History pane: workspace / agent / search filters over the
+/// on-disk session list; a click resumes that conversation in a new tab of
+/// the active workspace.
 struct SessionHistoryView: View {
     @Bindable var store: WorkspaceStore
     var history = AgentSessionHistory.shared
@@ -497,14 +547,20 @@ struct SessionHistoryView: View {
     @State private var resumeError: String?
 
     var body: some View {
+        let filtered = SessionHistoryFilter(
+            workspaceRootPaths: store.historyWorkspaceRootPaths,
+            agentId: store.historyFilterAgentId,
+            query: store.historySearchQuery
+        ).apply(history.records)
+        let visible = filtered.visible
         VStack(spacing: 0) {
-            RightPanelHeader(title: "session history", count: history.records.count) {
+            RightPanelHeader(title: "session history", count: visible.count) {
                 refreshButton
             }
             searchField
-            filterChips
+            filterChips(present: filtered.presentAgentIds)
+            workspaceFilterRow
             resumeErrorBanner
-            let visible = filteredRecords
             if visible.isEmpty {
                 PanelEmptyState(
                     symbol: "clock",
@@ -617,23 +673,42 @@ struct SessionHistoryView: View {
         .padding(.top, 8)
     }
 
-    private var filterChips: some View {
-        // With nine scanned stores the full roster can't fit a 230pt panel —
-        // chips show only the agents PRESENT in the results (in roster
-        // order), which on any one machine is a handful. The active filter's
-        // chip stays even when its store scans empty, so a rescan can't
-        // silently bounce the user back to `all`; the horizontal scroll is
-        // the everything-installed fallback.
+    /// `present` is the agent set of the workspace-scoped records: with the
+    /// workspace filter on, only agents that have sessions HERE get a chip.
+    private func filterChips(present: Set<String>) -> some View {
+        // The full scanned roster can't fit a 230pt panel — chips show only
+        // the agents PRESENT in the scoped results (in roster order), which
+        // on any one machine is a handful. The active filter's chip stays
+        // even when its store scans empty, so a rescan can't silently
+        // bounce the user back to `all`; the horizontal scroll is the
+        // everything-installed fallback.
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 4) {
                 filterChip(nil, label: String(localized: "all", bundle: .kookyResources))
-                let present = history.presentAgentIds
                 ForEach(AgentSessionScanner.supportedAgentIds.filter { present.contains($0) || $0 == store.historyFilterAgentId }, id: \.self) { agentId in
                     filterChip(agentId, label: AgentTemplate.builtin(id: agentId)?.title.lowercased() ?? agentId)
                 }
             }
             .padding(.horizontal, 10)
             .padding(.vertical, 6)
+        }
+    }
+
+    /// Location is its own axis, so it gets its own row under the agent
+    /// chips — a checkbox, not a member of the radio group. Shown exactly
+    /// when the store has something local to scope to.
+    @ViewBuilder
+    private var workspaceFilterRow: some View {
+        if store.historyScopeAnchor != nil {
+            KookyCheckbox(
+                title: String(localized: "only this workspace", bundle: .kookyResources),
+                isOn: $store.historyFilterCurrentWorkspace,
+                size: 10
+            )
+            .controlSize(.small)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 14)
+            .padding(.bottom, 6)
         }
     }
 
@@ -644,16 +719,6 @@ struct SessionHistoryView: View {
         }
     }
 
-    private var filteredRecords: [AgentSessionRecord] {
-        let query = store.historySearchQuery
-        let agentFilter = store.historyFilterAgentId
-        return history.records.filter { record in
-            if let agentFilter, record.agentId != agentFilter { return false }
-            guard !query.isEmpty else { return true }
-            return record.title.localizedCaseInsensitiveContains(query)
-                || record.cwd.path.localizedCaseInsensitiveContains(query)
-        }
-    }
 }
 
 /// Selected-capable chip for the History filter strip. This deliberately

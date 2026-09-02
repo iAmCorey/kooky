@@ -37,6 +37,22 @@ func canonicalDiskPath(_ url: URL) -> URL {
     url.resolvingSymlinksInPath().standardizedFileURL
 }
 
+/// "`path` is `root` or lies inside it", on already-standardized absolute
+/// paths. The sibling trap (`/a/bc` is not inside `/a/b`) lives here once;
+/// so does the root-of-the-disk case, which the prefix form alone would
+/// spell as `//`.
+func pathIsInside(_ path: String, root: String) -> Bool {
+    root == "/" ? path.hasPrefix("/") : path == root || path.hasPrefix(root + "/")
+}
+
+/// macOS keeps `/tmp`, `/var`, `/etc` as symlinks into `/private`. Foundation
+/// strips that prefix when it resolves a path; the kernel's `getcwd` — what
+/// an agent records — keeps it. The other spelling of a path under those
+/// dirs, nil elsewhere.
+func privateSpelling(of path: String) -> String? {
+    ["/tmp", "/var", "/etc"].contains { pathIsInside(path, root: $0) } ? "/private" + path : nil
+}
+
 /// Trims a title string; blank or whitespace-only input collapses to `nil`.
 /// Shared by the manual-rename paths and the OSC-title observer so "empty
 /// means no title" stays one rule.
@@ -125,6 +141,60 @@ final class WorkspaceStore {
     /// defaults on every reopen.
     var historyFilterAgentId: String?
     var historySearchQuery = ""
+    /// The "only this workspace" checkbox: list only sessions that ran
+    /// inside the active workspace (`historyWorkspaceRoot`). Off by default
+    /// like the agent chip — it isn't persisted, and a preference that
+    /// reset to ON would need re-flipping every launch.
+    var historyFilterCurrentWorkspace = false
+    /// The directory the checkbox would scope to, or nil when there is
+    /// nothing local to scope: no workspace, or an SSH workspace (its
+    /// sessions live on the remote — the local spawn dir says nothing about
+    /// them). The checkbox row shows exactly when this is non-nil, so the
+    /// view never restates the rule.
+    var historyScopeAnchor: URL? {
+        guard let workspace = active, workspace.sshRemoteHost == nil else { return nil }
+        return workspace.diskPath
+    }
+    /// The root the History pane filters by while the checkbox is on, else
+    /// nil: git's own answer for the anchor — the working-tree root above
+    /// its PHYSICAL path. Physical because git resolves cwd with `getcwd`,
+    /// so a symlink INTO a repo (`~/alias -> ~/repo/src`) belongs to
+    /// `~/repo` even though nothing above `~/alias` holds a `.git`. NOT the
+    /// anchor itself: `workingDirectory` follows the active tab's `cd`, so a
+    /// session launched at the project root would vanish the moment the
+    /// user cd's into `src/`. Outside any repo the workspace dir is the best
+    /// root there is. Not `gitStatus.repoRoot`: that is nil until a tab's
+    /// first prompt fetch lands (a restored tab may not have spawned yet)
+    /// and one prompt stale across a `cd` between repos.
+    var historyWorkspaceRoot: URL? {
+        guard historyFilterCurrentWorkspace, let anchor = historyScopeAnchor else { return nil }
+        let physical = canonicalDiskPath(anchor)
+        return GitWatcher.worktreeRoot(near: physical) ?? physical
+    }
+    /// `historyWorkspaceRoot` in every spelling a record's cwd may carry.
+    /// Most agents record the physical cwd, but Go's `os.Getwd` (Reasonix)
+    /// keeps the shell's LOGICAL `$PWD`, and the kernel keeps `/private`
+    /// where Foundation strips it — so beside the root itself: the logical
+    /// walk's root when it resolves to the same directory (a symlink ABOVE
+    /// the root, `~/code -> /Volumes/Dev/code`), the anchor's own logical
+    /// path (inside the root by construction, and the only logical spelling
+    /// a symlink INTO a repo has), and the `/private` form. Only roots are
+    /// resolved — resolving every record would stat paths on volumes long
+    /// gone. Empty when not filtering.
+    var historyWorkspaceRootPaths: [String] {
+        guard let root = historyWorkspaceRoot, let anchor = historyScopeAnchor else { return [] }
+        var paths = [root.path]
+        func add(_ path: String) {
+            if !paths.contains(where: { pathIsInside(path, root: $0) }) { paths.append(path) }
+        }
+        if let logicalRoot = GitWatcher.worktreeRoot(near: anchor),
+           canonicalDiskPath(logicalRoot).path == root.path {
+            add(logicalRoot.standardizedFileURL.path)
+        }
+        add(anchor.standardizedFileURL.path)
+        for path in paths { if let kernel = privateSpelling(of: path) { add(kernel) } }
+        return paths
+    }
     /// Session Info's collapsed sections, keyed by section title. Owned by the
     /// store for exactly the reason above — the page unmounts whenever the
     /// panel switches, so `@State` in the view would forget every collapse the
@@ -822,10 +892,8 @@ final class WorkspaceStore {
     private func pruneRecentlyClosed(under workspace: Workspace) {
         let root = workspace.diskPath.standardizedFileURL.path
         recentlyClosed.removeAll { entry in
-            let cwd = entry.cwd.standardizedFileURL.path
-            return entry.workspaceId == workspace.id
-                || cwd == root
-                || cwd.hasPrefix(root + "/")
+            entry.workspaceId == workspace.id
+                || pathIsInside(entry.cwd.standardizedFileURL.path, root: root)
         }
     }
 

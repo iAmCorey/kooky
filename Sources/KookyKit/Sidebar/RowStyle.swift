@@ -323,6 +323,25 @@ struct FooterSegment: View {
 /// Shared rename-popover body used by tab + workspace rename. Both render
 /// inside `.popover` modifiers anchored to their own row; the caller picks
 /// the arrowEdge so the popover points the right way.
+/// kooky's checkbox: a native `.checkbox` Toggle whose mono label lifts to
+/// the foreground tier when on. Third verbatim copy (the two worktree
+/// close sheets, History's workspace filter) earned it a home; control size
+/// and layout stay at the call site.
+struct KookyCheckbox: View {
+    let title: String
+    @Binding var isOn: Bool
+    var size: CGFloat = 11.5
+
+    var body: some View {
+        Toggle(isOn: $isOn) {
+            Text(title)
+                .font(Theme.mono(size))
+                .foregroundStyle(isOn ? Theme.chromeForeground : Theme.chromeMuted)
+        }
+        .toggleStyle(.checkbox)
+    }
+}
+
 struct KookyRenameField: View {
     let placeholder: String
     @Binding var text: String

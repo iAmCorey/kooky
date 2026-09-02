@@ -114,12 +114,10 @@ struct ConfirmBulkCloseSheet: View {
     }
 
     private var alsoDeleteCheckbox: some View {
-        Toggle(isOn: $alsoDelete) {
-            Text(String(localized: "also delete worktree directories and branches", bundle: .kookyResources))
-                .font(Theme.mono(11.5))
-                .foregroundStyle(alsoDelete ? Theme.chromeForeground : Theme.chromeMuted)
-        }
-        .toggleStyle(.checkbox)
+        KookyCheckbox(
+            title: String(localized: "also delete worktree directories and branches", bundle: .kookyResources),
+            isOn: $alsoDelete
+        )
         .disabled(isWorking)
     }
 

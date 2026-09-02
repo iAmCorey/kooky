@@ -111,34 +111,45 @@ final class GitWatcher {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.2, execute: work)
     }
 
+    /// Nearest ancestor of `cwd` (inclusive) holding a `.git` entry — the
+    /// working-tree root, for a plain repo, a linked worktree, or a
+    /// submodule alike (each keeps its own `.git` file or directory at its
+    /// top level). Nil when `cwd` isn't inside any repo. Looser than
+    /// `findGitDir != nil` on purpose: an unparseable `.git` file still
+    /// marks the project boundary, it just isn't watchable.
+    nonisolated static func worktreeRoot(near cwd: URL) -> URL? {
+        var dir = cwd.standardizedFileURL
+        while dir.path != "/" {
+            if FileManager.default.fileExists(atPath: dir.appendingPathComponent(".git").path) {
+                return dir
+            }
+            dir = dir.deletingLastPathComponent()
+        }
+        return nil
+    }
+
     /// Walks up from `cwd` looking for `.git`. Returns the gitdir URL when
     /// found — either the `.git/` directory itself, or the path resolved
     /// from a `.git` worktree pointer file (`gitdir: <path>`). Returns nil
     /// when not inside any repo.
     nonisolated static func findGitDir(near cwd: URL) -> URL? {
-        let fm = FileManager.default
-        var dir = cwd.standardizedFileURL
-        while dir.path != "/" {
-            let candidate = dir.appendingPathComponent(".git")
-            var isDir: ObjCBool = false
-            if fm.fileExists(atPath: candidate.path, isDirectory: &isDir) {
-                if isDir.boolValue { return candidate }
-                if let contents = try? String(contentsOf: candidate, encoding: .utf8),
-                   let line = contents.split(whereSeparator: \.isNewline)
-                       .first(where: { $0.hasPrefix("gitdir: ") }) {
-                    let raw = String(line.dropFirst("gitdir: ".count))
-                        .trimmingCharacters(in: .whitespaces)
-                    // Submodule `.git` files commonly carry a relative path
-                    // (e.g. `gitdir: ../.git/modules/foo`). Resolve against
-                    // the `.git` file's directory, not the process cwd —
-                    // otherwise the watcher opens a nonexistent path and
-                    // silently never fires.
-                    let base = candidate.deletingLastPathComponent()
-                    return URL(fileURLWithPath: raw, relativeTo: base).standardizedFileURL
-                }
-                return nil
-            }
-            dir = dir.deletingLastPathComponent()
+        guard let root = worktreeRoot(near: cwd) else { return nil }
+        let candidate = root.appendingPathComponent(".git")
+        var isDir: ObjCBool = false
+        if FileManager.default.fileExists(atPath: candidate.path, isDirectory: &isDir), isDir.boolValue {
+            return candidate
+        }
+        if let contents = try? String(contentsOf: candidate, encoding: .utf8),
+           let line = contents.split(whereSeparator: \.isNewline)
+               .first(where: { $0.hasPrefix("gitdir: ") }) {
+            let raw = String(line.dropFirst("gitdir: ".count))
+                .trimmingCharacters(in: .whitespaces)
+            // Submodule `.git` files commonly carry a relative path
+            // (e.g. `gitdir: ../.git/modules/foo`). Resolve against
+            // the `.git` file's directory, not the process cwd —
+            // otherwise the watcher opens a nonexistent path and
+            // silently never fires.
+            return URL(fileURLWithPath: raw, relativeTo: root).standardizedFileURL
         }
         return nil
     }

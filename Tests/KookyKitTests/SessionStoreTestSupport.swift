@@ -22,6 +22,17 @@ func makeTestStore() -> WorkspaceStore {
 /// (`PerformanceBenchmarks.testSessionScanRealStores` is the one sanctioned
 /// exception, via the explicitly-named `scanDefaultRoots`.)
 enum SessionStoreFixtures {
+    /// A resumable record with placeholder title/id — the History filter
+    /// and resume tests care about agent + cwd, nothing else.
+    static func record(
+        agentId: String = AgentTemplate.claudeCodeID,
+        cwd: URL,
+        title: String = "old conversation",
+        conversationId: String = "11111111-2222-3333-4444-555555555555"
+    ) -> AgentSessionRecord {
+        AgentSessionRecord(agentId: agentId, conversationId: conversationId, title: title, cwd: cwd, lastActivity: Date())
+    }
+
     @discardableResult
     static func writeFile(_ name: String, in dir: URL, lines: [String], mtime: Date? = nil) throws -> URL {
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)

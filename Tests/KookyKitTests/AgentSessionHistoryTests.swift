@@ -572,13 +572,7 @@ final class AgentSessionResumeTests: XCTestCase {
     }
 
     private func makeRecord(agentId: String, cwd: URL) -> AgentSessionRecord {
-        AgentSessionRecord(
-            agentId: agentId,
-            conversationId: "11111111-2222-3333-4444-555555555555",
-            title: "old conversation",
-            cwd: cwd,
-            lastActivity: Date()
-        )
+        SessionStoreFixtures.record(agentId: agentId, cwd: cwd)
     }
 
     func testResumeAgentSessionForcesResumePastDisabledSetting() throws {
@@ -689,5 +683,201 @@ final class AgentSessionResumeTests: XCTestCase {
             engineFactory: { TestEngine() }
         )
         XCTAssertEqual(restored.rightSidebarContent, .info)
+    }
+}
+
+/// The History pane's workspace filter, end to end: the store picks the
+/// root and its spellings, the pure filter applies them. One class because
+/// the store half needs the main actor and the filter half doesn't care.
+@MainActor
+final class SessionHistoryFilterTests: XCTestCase {
+    private var tempDir: URL!
+
+    override func setUpWithError() throws {
+        tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("kooky-history-filter-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+    }
+
+    override func tearDownWithError() throws {
+        try? FileManager.default.removeItem(at: tempDir)
+    }
+
+    private func record(_ agentId: String = AgentTemplate.claudeCodeID, cwd: String, title: String = "t") -> AgentSessionRecord {
+        SessionStoreFixtures.record(agentId: agentId, cwd: URL(fileURLWithPath: cwd), title: title, conversationId: UUID().uuidString)
+    }
+
+    private func filter(roots: [String] = [], agentId: String? = nil, query: String = "") -> SessionHistoryFilter {
+        SessionHistoryFilter(workspaceRootPaths: roots, agentId: agentId, query: query)
+    }
+
+    // MARK: Pure filter
+
+    func testWorkspaceScopeKeepsTheRootAndItsDescendantsOnly() {
+        let inside = [record(cwd: "/a/b"), record(cwd: "/a/b/c/d")]
+        // `/a/bc` shares the string prefix but is a sibling, and `/a` is
+        // the parent — neither is "inside this workspace".
+        let outside = [record(cwd: "/a/bc"), record(cwd: "/a"), record(cwd: "/x")]
+        XCTAssertEqual(filter(roots: ["/a/b"]).apply(inside + outside).visible.map(\.id), inside.map(\.id))
+    }
+
+    func testEmptyScopeKeepsEveryRecord() {
+        XCTAssertEqual(filter().apply([record(cwd: "/a"), record(cwd: "/b")]).visible.count, 2)
+    }
+
+    func testAnyRootSpellingAdmitsARecord() {
+        let records = [record(cwd: "/logical/proj/sub"), record(cwd: "/physical/proj"), record(cwd: "/elsewhere")]
+        XCTAssertEqual(
+            filter(roots: ["/logical/proj", "/physical/proj"]).apply(records).visible.map(\.id),
+            Array(records.prefix(2)).map(\.id)
+        )
+    }
+
+    func testRootOfTheDiskScopesEveryAbsolutePath() {
+        // Codex P2: the prefix form spelled root-of-disk as `//` and hid
+        // everything but a session at `/` itself.
+        XCTAssertTrue(pathIsInside("/Users/a/proj", root: "/"))
+        XCTAssertTrue(pathIsInside("/", root: "/"))
+        XCTAssertEqual(filter(roots: ["/"]).apply([record(cwd: "/Users/a"), record(cwd: "/x")]).visible.count, 2)
+    }
+
+    func testPrivateSpellingCoversOnlyTheThreeSymlinkedSystemDirs() {
+        XCTAssertEqual(privateSpelling(of: "/var/folders/x/proj"), "/private/var/folders/x/proj")
+        XCTAssertEqual(privateSpelling(of: "/tmp"), "/private/tmp")
+        XCTAssertNil(privateSpelling(of: "/Users/a/proj"))
+        XCTAssertNil(privateSpelling(of: "/variety"), "sibling trap")
+    }
+
+    func testAgentChipsDrawFromTheScopeNotTheNarrowedList() {
+        // Chips come from the scoped records BEFORE the agent/query narrow:
+        // an agent hidden only by the current chip must keep its chip, an
+        // agent with no sessions in this workspace must lose it.
+        let records = [
+            record(AgentTemplate.claudeCodeID, cwd: "/a/b"),
+            record("codex", cwd: "/a/b"),
+            record("pi", cwd: "/x"),
+        ]
+        let result = filter(roots: ["/a/b"], agentId: "codex").apply(records)
+        XCTAssertEqual(result.presentAgentIds, [AgentTemplate.claudeCodeID, "codex"])
+        XCTAssertEqual(result.visible.map(\.id), [records[1].id])
+    }
+
+    func testNarrowComposesAgentAndQuery() {
+        let records = [
+            record(AgentTemplate.claudeCodeID, cwd: "/p", title: "Fix parser"),
+            record(AgentTemplate.claudeCodeID, cwd: "/p", title: "Write docs"),
+            record("codex", cwd: "/p", title: "Fix parser"),
+        ]
+        XCTAssertEqual(filter(agentId: AgentTemplate.claudeCodeID, query: "PARSER").apply(records).visible.map(\.id), [records[0].id])
+    }
+
+    // MARK: Store-side root
+
+    func testWorkspaceRootIsTheRepoRootNotTheTabCwd() throws {
+        // `workingDirectory` follows the active tab's cd — anchoring the
+        // filter there would hide a root-launched session after `cd src`.
+        let repo = tempDir.appendingPathComponent("repo")
+        let src = repo.appendingPathComponent("src")
+        try FileManager.default.createDirectory(at: repo.appendingPathComponent(".git"), withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: src, withIntermediateDirectories: true)
+
+        let store = makeTestStore()
+        store.addWorkspace(workingDirectory: src)
+        XCTAssertFalse(store.historyFilterCurrentWorkspace, "off by default, like the agent chip")
+        XCTAssertNotNil(store.historyScopeAnchor, "the checkbox row shows for a local workspace")
+        XCTAssertNil(store.historyWorkspaceRoot, "no root while the checkbox is off")
+
+        store.historyFilterCurrentWorkspace = true
+        XCTAssertEqual(store.historyWorkspaceRoot?.standardizedFileURL.path, repo.standardizedFileURL.path)
+    }
+
+    func testWorkspaceRootFallsBackToTheWorkspaceDirOutsideGit() throws {
+        let plain = tempDir.appendingPathComponent("plain")
+        try FileManager.default.createDirectory(at: plain, withIntermediateDirectories: true)
+        let store = makeTestStore()
+        store.addWorkspace(workingDirectory: plain)
+        store.historyFilterCurrentWorkspace = true
+        XCTAssertEqual(store.historyWorkspaceRoot?.standardizedFileURL.path, plain.standardizedFileURL.path)
+    }
+
+    func testWorkspaceRootPathsCarryBothSpellingsOfASymlinkedRoot() throws {
+        // OSC 7 reports the logical path the user typed (through the link);
+        // an agent's own record carries getcwd()'s physical path. The store
+        // hands the filter both, so either spelling lands in the workspace.
+        let real = tempDir.appendingPathComponent("real")
+        try FileManager.default.createDirectory(at: real, withIntermediateDirectories: true)
+        let link = tempDir.appendingPathComponent("link")
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: real)
+        let physical = real.resolvingSymlinksInPath()
+        XCTAssertNotEqual(physical.path, link.path)
+
+        let store = makeTestStore()
+        store.addWorkspace(workingDirectory: link)
+        store.historyFilterCurrentWorkspace = true
+        let paths = store.historyWorkspaceRootPaths
+        XCTAssertTrue(paths.contains(link.standardizedFileURL.path), "\(paths)")
+        XCTAssertTrue(paths.contains(physical.path), "\(paths)")
+
+        let records = [
+            record(cwd: physical.appendingPathComponent("sub").path),
+            record(cwd: link.path),
+            record(cwd: tempDir.appendingPathComponent("elsewhere").path),
+        ]
+        XCTAssertEqual(
+            filter(roots: paths).apply(records).visible.map(\.id),
+            Array(records.prefix(2)).map(\.id)
+        )
+    }
+
+    func testSymlinkIntoARepoAnchorsOnThePhysicalRepoRoot() throws {
+        // Codex P2: `~/alias -> ~/repo/src` has no `.git` above its logical
+        // path; git itself works from the physical cwd and answers `~/repo`.
+        // Sessions at the repo root AND sessions recorded through the alias
+        // (a logical-$PWD agent) both belong to this workspace.
+        let repo = tempDir.appendingPathComponent("repo")
+        let src = repo.appendingPathComponent("src")
+        try FileManager.default.createDirectory(at: repo.appendingPathComponent(".git"), withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: src, withIntermediateDirectories: true)
+        let alias = tempDir.appendingPathComponent("alias")
+        try FileManager.default.createSymbolicLink(at: alias, withDestinationURL: src)
+
+        let store = makeTestStore()
+        store.addWorkspace(workingDirectory: alias)
+        store.historyFilterCurrentWorkspace = true
+        let physicalRepo = canonicalDiskPath(repo)
+        XCTAssertEqual(store.historyWorkspaceRoot?.path, physicalRepo.path)
+
+        let paths = store.historyWorkspaceRootPaths
+        let records = [
+            record(cwd: physicalRepo.path),
+            record(cwd: alias.appendingPathComponent("deep").path),
+            record(cwd: tempDir.appendingPathComponent("elsewhere").path),
+        ]
+        XCTAssertEqual(filter(roots: paths).apply(records).visible.map(\.id), Array(records.prefix(2)).map(\.id), "\(paths)")
+    }
+
+    func testRootPathsCarryTheKernelSpellingOfATempDirRoot() throws {
+        // An agent launched under `/var/…` records `/private/var/…`
+        // (getcwd); Foundation's resolved root says `/var/…`.
+        let plain = tempDir.appendingPathComponent("plain")
+        try FileManager.default.createDirectory(at: plain, withIntermediateDirectories: true)
+        let store = makeTestStore()
+        store.addWorkspace(workingDirectory: plain)
+        store.historyFilterCurrentWorkspace = true
+        let root = try XCTUnwrap(store.historyWorkspaceRoot)
+        try XCTSkipUnless(privateSpelling(of: root.path) != nil, "temp dir not under a /private-backed dir: \(root.path)")
+        let kernel = record(cwd: "/private" + root.path + "/sub")
+        XCTAssertEqual(filter(roots: store.historyWorkspaceRootPaths).apply([kernel]).visible.count, 1, "\(store.historyWorkspaceRootPaths)")
+    }
+
+    func testScopeAnchorIsNilForSSHWorkspaces() {
+        // The local spawn dir says nothing about a remote project's
+        // sessions — the checkbox row hides and the filter no-ops there.
+        let store = makeTestStore()
+        store.addWorkspace(workingDirectory: tempDir, sshRemoteHost: "user@box")
+        store.historyFilterCurrentWorkspace = true
+        XCTAssertNil(store.historyScopeAnchor)
+        XCTAssertNil(store.historyWorkspaceRoot)
+        XCTAssertEqual(store.historyWorkspaceRootPaths, [])
     }
 }
