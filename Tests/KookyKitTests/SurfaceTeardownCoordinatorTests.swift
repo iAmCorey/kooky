@@ -62,14 +62,17 @@ final class SurfaceTeardownCoordinatorTests: XCTestCase {
         XCTAssertEqual(recorder.frees, [7])
     }
 
-    func testDrainWaitsForForegroundProcessGroupTermination() {
+    func testNativeTeardownStartsAfterForegroundProcessGroupTermination() {
         let recorder = TeardownRecorder()
         let foregroundFinished = LockedBox<(@Sendable () -> Void)?>(nil)
-        let nativeFreeFinished = DispatchSemaphore(value: 0)
+        let nativeFreeStarted = DispatchSemaphore(value: 0)
         let drained = expectation(description: "drained")
         let coordinator = SurfaceTeardownCoordinator(
             requestTermination: { recorder.recordRequest($0) },
-            freeSurface: { _ in nativeFreeFinished.signal() },
+            freeSurface: {
+                recorder.recordFree($0)
+                nativeFreeStarted.signal()
+            },
             beginForegroundTermination: { processGroup, completion in
                 recorder.recordForegroundRequest(processGroup)
                 foregroundFinished.value = completion
@@ -77,14 +80,19 @@ final class SurfaceTeardownCoordinatorTests: XCTestCase {
         )
 
         coordinator.enqueue(surfaceBits: 8, foregroundProcessGroup: 77, retainedHostBits: nil)
-        XCTAssertEqual(recorder.requests, [8])
-        XCTAssertEqual(recorder.foregroundRequests, [77])
-        XCTAssertEqual(nativeFreeFinished.wait(timeout: .now() + 2), .success)
-        XCTAssertFalse(coordinator.isDrained)
+        XCTAssertEqual(recorder.requests, [])
+        XCTAssertEqual(
+            nativeFreeStarted.wait(timeout: .now() + 0.1),
+            .timedOut,
+            "native teardown must wait for graceful foreground termination"
+        )
 
         coordinator.whenDrained { drained.fulfill() }
         foregroundFinished.value?()
+        XCTAssertEqual(nativeFreeStarted.wait(timeout: .now() + 2), .success)
         wait(for: [drained], timeout: 2)
+        XCTAssertEqual(recorder.requests, [8])
+        XCTAssertEqual(recorder.frees, [8])
         XCTAssertTrue(coordinator.isDrained)
     }
 }

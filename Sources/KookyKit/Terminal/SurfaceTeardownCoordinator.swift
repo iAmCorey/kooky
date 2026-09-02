@@ -65,17 +65,25 @@ final class SurfaceTeardownCoordinator: @unchecked Sendable {
         pending[id] = Pending(components: components, retainedHostBits: retainedHostBits)
         lock.unlock()
 
-        // This must precede free-queue admission. If both free workers are
-        // blocked, a third closed tab still needs its process shutdown to begin.
-        requestTermination(surfaceBits)
-        if let foregroundProcessGroup {
-            beginForegroundTermination(foregroundProcessGroup) { [self] in
-                finish(id: id, component: .foregroundProcessGroup)
+        let startNativeTeardown: @Sendable () -> Void = { [self] in
+            requestTermination(surfaceBits)
+            freeQueue.addOperation { [self] in
+                freeSurface(surfaceBits)
+                finish(id: id, component: .nativeFree)
             }
         }
-        freeQueue.addOperation { [self] in
-            freeSurface(surfaceBits)
-            finish(id: id, component: .nativeFree)
+
+        // Keep the PTY and IO thread alive while the foreground program gets
+        // the terminal's normal SIGHUP notification and performs cleanup.
+        // Native teardown stops that IO thread, so it must start only after
+        // the foreground process group exits or the grace period escalates.
+        if let foregroundProcessGroup {
+            beginForegroundTermination(foregroundProcessGroup) { [self] in
+                startNativeTeardown()
+                finish(id: id, component: .foregroundProcessGroup)
+            }
+        } else {
+            startNativeTeardown()
         }
     }
 
@@ -156,7 +164,12 @@ private enum ForegroundProcessGroupTerminator {
         }
 
         Task.detached(priority: .utility) {
-            if await waitUntilGone(processGroup, timeout: sighupGrace) {
+            if await waitUntilLeaderGone(processGroup, timeout: sighupGrace) {
+                // The process-group leader is the foreground job's root
+                // process (the bash launcher for Kooky's agent tabs). Its exit
+                // marks the owning command as done; descendants it spawned
+                // (for example MCP servers) must not keep Kooky waiting.
+                _ = killpg(processGroup, SIGTERM)
                 completion()
                 return
             }
@@ -164,6 +177,16 @@ private enum ForegroundProcessGroupTerminator {
             _ = await waitUntilGone(processGroup, timeout: sigkillGrace)
             completion()
         }
+    }
+
+    private static func waitUntilLeaderGone(_ processGroup: pid_t, timeout: Duration) async -> Bool {
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: timeout)
+        while processExists(processGroup) {
+            guard clock.now < deadline else { return false }
+            try? await Task.sleep(for: pollInterval)
+        }
+        return true
     }
 
     private static func waitUntilGone(_ processGroup: pid_t, timeout: Duration) async -> Bool {
@@ -174,6 +197,11 @@ private enum ForegroundProcessGroupTerminator {
             try? await Task.sleep(for: pollInterval)
         }
         return true
+    }
+
+    private static func processExists(_ process: pid_t) -> Bool {
+        if kill(process, 0) == 0 { return true }
+        return errno == EPERM
     }
 
     private static func processGroupExists(_ processGroup: pid_t) -> Bool {
