@@ -66,7 +66,10 @@
 "Work" = "工作";
 "Selecting text copies it to the clipboard immediately." = "选中文本后立即复制到剪贴板。";
 "Requires macOS 26 or later." = "需要 macOS 26 或更高版本。";
-"Window translucency — takes effect with liquid-glass or a numeric background-blur; opaque otherwise." = "窗口透明度仅在启用液态玻璃或设置数值型背景模糊时生效；否则保持不透明。";
+"Window translucency — below 100% the whole terminal window becomes see-through on every macOS; liquid-glass and background-blur add frosting on top." = "窗口透明度 — 低于 100% 时整个终端窗口在任意 macOS 上均可透视；液态玻璃与背景模糊在此基础上增加磨砂效果。";
+"Dark chrome background mix toward black. 0% uses the theme background unchanged; 16% is the default." = "深色界面背景向黑色混合的比例。0% 使用未经调整的主题背景；默认值为 16%。";
+"max-tab-width" = "标签页最大宽度";
+"Maximum tab width in pixels. Values are capped at 200px." = "标签页最大宽度（像素）。最大限制为 200px。";
 "Auto: stay awake while agents or SSH work even lid closed.\nAlways: always stay awake." = "自动：智能体或 SSH 工作时保持唤醒，合盖也不休眠。\n始终：始终保持唤醒。";
 "Theme reloads existing panes. Font and cursor changes may need restart." = "主题会在现有窗格中立即更新；字体和光标变更可能需要重启。";
 "restart kooky" = "重启 kooky";
