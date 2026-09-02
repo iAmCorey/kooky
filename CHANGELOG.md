@@ -2,6 +2,10 @@
 
 Notable changes per release. Tagged commits use `vX.Y.Z` shortform.
 
+## v0.51.8 — 2026-09-02
+
+- Fixed: quitting kooky with ⌘Q while an agent was running no longer turns that tab into a plain terminal on the next launch — the agent comes back and resumes its conversation, as it did before v0.50.1. Thanks @kaijianding for the diagnosis and a draft fix. (#70)
+
 ## v0.51.7 — 2026-09-02
 
 - New: the session history panel can be narrowed to the current workspace — tick "only this workspace" under the agent chips to list only conversations that ran inside the active workspace's project (its git repository, or the workspace folder outside git), so a busy machine's history stops burying the project you're in. The agent chips follow the workspace filter, and the header count follows every filter that's active. Thanks @kaijianding for the idea and a draft implementation. (#71)
