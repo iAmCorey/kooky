@@ -61,6 +61,13 @@ func normalizedTitle(_ raw: String) -> String? {
     return trimmed.isEmpty ? nil : trimmed
 }
 
+func normalizedLocalHostName(_ raw: String) -> String {
+    let lowercased = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    return lowercased.hasSuffix(".local")
+        ? String(lowercased.dropLast(6))
+        : lowercased
+}
+
 /// `NSHomeDirectory()` re-resolves through Foundation on every call and cannot
 /// change while the process lives. `Session.title` and `Workspace.title` both
 /// compare against it, and those run on every sidebar / agent-panel row render,
@@ -2112,6 +2119,44 @@ final class WorkspaceStore {
         raw.flatMap(normalizedTitle)
     }
 
+    static func localTerminalTitle(
+        _ raw: String,
+        username: String,
+        localHostNames: Set<String>,
+        fallbackPath: String
+    ) -> String {
+        let normalized = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        let identity: Substring
+        let suffix: Substring?
+        if let colon = normalized.firstIndex(of: ":") {
+            identity = normalized[..<colon]
+            suffix = normalized[normalized.index(after: colon)...]
+        } else {
+            identity = normalized[...]
+            suffix = nil
+        }
+        guard let at = identity.lastIndex(of: "@") else { return normalized }
+        let titleUser = String(identity[..<at])
+        let titleHost = identity[identity.index(after: at)...]
+        guard titleUser == username,
+              localHostNames.contains(normalizedLocalHostName(String(titleHost))) else {
+            return normalized
+        }
+        guard let suffix else { return fallbackPath }
+        let path = suffix.trimmingCharacters(in: .whitespaces)
+        return path.isEmpty ? fallbackPath : path
+    }
+
+    private static let localHostNames: Set<String> = [
+        ProcessInfo.processInfo.hostName,
+        Host.current().name,
+        Host.current().localizedName,
+    ]
+        .compactMap { $0 }
+        .map(normalizedLocalHostName)
+        .filter { !$0.isEmpty }
+        .reduce(into: Set<String>()) { $0.insert($1) }
+
     /// `codexRolloutId` is the id of the rollout file this session ALREADY
     /// has on disk, nil when none exists yet — it steers the Codex usage
     /// monitor's file resolution. Spawn-path callers pass
@@ -2236,7 +2281,19 @@ final class WorkspaceStore {
             let next = normalizedTitle(title).flatMap {
                 ($0.hasPrefix("/") || $0.hasPrefix("~")) ? nil : $0
             }
-            session.applyTerminalTitle(next)
+            if let next {
+                let display = session.effectiveRemoteHost == nil
+                    ? Self.localTerminalTitle(
+                        next,
+                        username: NSUserName(),
+                        localHostNames: Self.localHostNames,
+                        fallbackPath: session.currentDirectory.path
+                    )
+                    : next
+                session.applyTerminalTitle(display)
+            } else {
+                session.applyTerminalTitle(nil)
+            }
         }
         engine.onFocus = { [weak self, weak session, weak workspace] in
             guard let self, let session, let workspace else { return }
