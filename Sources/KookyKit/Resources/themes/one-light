@@ -1,0 +1,22 @@
+# Kooky theme: One Light
+background = #FAFAFA
+foreground = #383A42
+cursor-color = #383A42
+selection-background = #DBDBDC
+selection-foreground = #383A42
+palette = 0=#383A42
+palette = 1=#E45649
+palette = 2=#50A14F
+palette = 3=#C18401
+palette = 4=#4078F2
+palette = 5=#A626A4
+palette = 6=#0184BC
+palette = 7=#A0A1A7
+palette = 8=#696C77
+palette = 9=#E45649
+palette = 10=#50A14F
+palette = 11=#C18401
+palette = 12=#4078F2
+palette = 13=#A626A4
+palette = 14=#0184BC
+palette = 15=#FFFFFF

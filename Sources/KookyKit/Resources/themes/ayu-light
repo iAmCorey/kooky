@@ -1,0 +1,22 @@
+# Kooky theme: Ayu Light
+background = #F8F9FA
+foreground = #5C6166
+cursor-color = #F29718
+selection-background = #D3E1F5
+selection-foreground = #5C6166
+palette = 0=#000000
+palette = 1=#F06B6C
+palette = 2=#6CBF43
+palette = 3=#E7A100
+palette = 4=#21A1E2
+palette = 5=#A176CB
+palette = 6=#4ABC96
+palette = 7=#C7C7C7
+palette = 8=#686868
+palette = 9=#F07171
+palette = 10=#86B300
+palette = 11=#EBA400
+palette = 12=#22A4E6
+palette = 13=#A37ACC
+palette = 14=#4CBF99
+palette = 15=#D1D1D1

@@ -1,0 +1,22 @@
+# Kooky theme: Rosé Pine Dawn
+background = #FAF4ED
+foreground = #575279
+cursor-color = #575279
+selection-background = #DFDAD9
+selection-foreground = #575279
+palette = 0=#F2E9E1
+palette = 1=#B4637A
+palette = 2=#286983
+palette = 3=#EA9D34
+palette = 4=#56949F
+palette = 5=#907AA9
+palette = 6=#D7827E
+palette = 7=#575279
+palette = 8=#9893A5
+palette = 9=#B4637A
+palette = 10=#286983
+palette = 11=#EA9D34
+palette = 12=#56949F
+palette = 13=#907AA9
+palette = 14=#D7827E
+palette = 15=#575279

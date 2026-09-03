@@ -1,0 +1,22 @@
+# Kooky theme: GitHub Light High Contrast
+background = #FFFFFF
+foreground = #0E1116
+cursor-color = #0349B4
+selection-background = #0E1116
+selection-foreground = #FFFFFF
+palette = 0=#0E1116
+palette = 1=#A0111F
+palette = 2=#024C1A
+palette = 3=#3F2200
+palette = 4=#0349B4
+palette = 5=#622CBC
+palette = 6=#1B7C83
+palette = 7=#66707B
+palette = 8=#4B535D
+palette = 9=#86061D
+palette = 10=#055D20
+palette = 11=#4E2C00
+palette = 12=#1168E3
+palette = 13=#844AE7
+palette = 14=#3192AA
+palette = 15=#88929D

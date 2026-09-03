@@ -1,0 +1,22 @@
+# Kooky theme: One Dark Pro
+background = #282C34
+foreground = #ABB2BF
+cursor-color = #528BFF
+selection-background = #41454E
+selection-foreground = #ABB2BF
+palette = 0=#3F4451
+palette = 1=#E05561
+palette = 2=#8CC265
+palette = 3=#D18F52
+palette = 4=#4AA5F0
+palette = 5=#C162DE
+palette = 6=#42B3C2
+palette = 7=#D7DAE0
+palette = 8=#4F5666
+palette = 9=#FF616E
+palette = 10=#A5E075
+palette = 11=#F0A45D
+palette = 12=#4DC4FF
+palette = 13=#DE73FF
+palette = 14=#4CD1E0
+palette = 15=#E6E6E6

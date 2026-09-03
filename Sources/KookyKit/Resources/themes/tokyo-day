@@ -1,0 +1,22 @@
+# Kooky theme: Tokyo Day
+background = #E1E2E7
+foreground = #3760BF
+cursor-color = #3760BF
+selection-background = #B7C1E3
+selection-foreground = #3760BF
+palette = 0=#B4B5B9
+palette = 1=#F52A65
+palette = 2=#587539
+palette = 3=#8C6C3E
+palette = 4=#2E7DE9
+palette = 5=#9854F1
+palette = 6=#007197
+palette = 7=#6172B0
+palette = 8=#A1A6C5
+palette = 9=#F52A65
+palette = 10=#587539
+palette = 11=#8C6C3E
+palette = 12=#2E7DE9
+palette = 13=#9854F1
+palette = 14=#007197
+palette = 15=#3760BF

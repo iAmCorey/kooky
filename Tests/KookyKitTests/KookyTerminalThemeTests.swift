@@ -3,6 +3,27 @@ import XCTest
 
 @MainActor
 final class KookyTerminalThemeTests: XCTestCase {
+    func testBundledThemesLoadFromPackagedGhosttyThemeFiles() throws {
+        XCTAssertEqual(KookyTerminalTheme.presets.count, 42)
+        XCTAssertEqual(
+            Set(KookyTerminalTheme.presets.map(\.id)).count,
+            KookyTerminalTheme.presets.count
+        )
+        let theme = try XCTUnwrap(KookyTerminalTheme.preset(for: "one-dark"))
+        let resource = try XCTUnwrap(
+            Bundle.module.url(forResource: "one-dark", withExtension: nil)
+        )
+        XCTAssertEqual(
+            try String(contentsOf: resource, encoding: .utf8)
+                .split(whereSeparator: \.isNewline)
+                .first.map(String.init),
+            "# Kooky theme: One Dark"
+        )
+        XCTAssertEqual(theme.title, "One Dark")
+        XCTAssertEqual(theme.lines.first, "background = #282C34")
+        XCTAssertEqual(theme.lines.filter { $0.hasPrefix("palette = ") }.count, 16)
+    }
+
     func testPresetLookupAcceptsStableId() {
         let theme = KookyTerminalTheme.preset(for: "solarized-light")
         XCTAssertEqual(theme?.title, "Solarized Light")

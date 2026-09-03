@@ -1,0 +1,22 @@
+# Kooky theme: Catppuccin Frappe
+background = #303446
+foreground = #C6D0F5
+cursor-color = #F2D5CF
+selection-background = #626880
+selection-foreground = #C6D0F5
+palette = 0=#51576D
+palette = 1=#E78284
+palette = 2=#A6D189
+palette = 3=#E5C890
+palette = 4=#8CAAEE
+palette = 5=#F4B8E4
+palette = 6=#81C8BE
+palette = 7=#A5ADCE
+palette = 8=#626880
+palette = 9=#E67172
+palette = 10=#8EC772
+palette = 11=#D9BA73
+palette = 12=#7B9EF0
+palette = 13=#F2A4DB
+palette = 14=#5ABFB5
+palette = 15=#B5BFE2
