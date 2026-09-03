@@ -102,6 +102,54 @@ final class PersistenceTests: XCTestCase {
         XCTAssertEqual(b.load(), stateB)
     }
 
+    // MARK: - Window frame
+
+    func testFrameRoundTripsThroughStateJSON() {
+        let url = tempURL()
+        let app = AppPersistence(fileURL: url)
+        let id = UUID()
+        let frame = PersistedFrame(x: 120, y: 80, width: 1440, height: 900)
+        app.setWindow(id, state: makeState(), frame: frame)
+        XCTAssertEqual(AppPersistence(fileURL: url).frame(for: id), frame)
+    }
+
+    /// A pre-v0.51.9 file has no `frame` key at all — it must decode (nil),
+    /// not fail and drop the window.
+    func testStateWrittenWithoutFrameDecodesAsNoFrame() throws {
+        let url = tempURL()
+        let id = UUID()
+        let json = try JSONEncoder().encode(PersistedApp(windows: [PersistedWindow(id: id, state: makeState())]))
+        XCTAssertFalse(String(decoding: json, as: UTF8.self).contains("\"frame\""))
+        try json.write(to: url)
+        let app = AppPersistence(fileURL: url)
+        XCTAssertEqual(app.windowIds, [id])
+        XCTAssertNil(app.frame(for: id))
+    }
+
+    /// nil means "unknown": a save without a frame keeps the one before it.
+    func testSavingWithoutAFrameKeepsThePreviousOne() {
+        let url = tempURL()
+        let app = AppPersistence(fileURL: url)
+        let id = UUID()
+        let frame = PersistedFrame(x: 0, y: 0, width: 800, height: 600)
+        app.setWindow(id, state: makeState(), frame: frame)
+        app.setWindow(id, state: makeState(dir: "/other"), frame: nil)
+        XCTAssertEqual(AppPersistence(fileURL: url).frame(for: id), frame)
+    }
+
+    func testWindowPersistenceFoldsTheProvidersFrameIntoEverySave() {
+        let url = tempURL()
+        let app = AppPersistence(fileURL: url)
+        let persistence = WindowPersistence(windowId: UUID(), app: app)
+        var frame = PersistedFrame(x: 10, y: 20, width: 1000, height: 700)
+        persistence.frameProvider = { frame }
+        persistence.save(makeState())
+        XCTAssertEqual(app.frame(for: persistence.windowId), frame)
+        frame.width = 1200
+        persistence.save(makeState())
+        XCTAssertEqual(app.frame(for: persistence.windowId)?.width, 1200)
+    }
+
     // MARK: - Worktree fields
 
     func testPersistedWorkspaceRoundtripsWorktreeFields() throws {

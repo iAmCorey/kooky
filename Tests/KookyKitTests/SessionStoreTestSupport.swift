@@ -6,9 +6,9 @@ import Foundation
 /// (DeepLink / PaneTreeHost / CLIController) earned it the shared home —
 /// a new WorkspaceStore injection seam lands here once, not per file.
 @MainActor
-func makeTestStore() -> WorkspaceStore {
+func makeTestStore(persistence: any Persistence = InMemoryPersistence()) -> WorkspaceStore {
     WorkspaceStore(
-        persistence: InMemoryPersistence(),
+        persistence: persistence,
         engineFactory: { TestEngine() },
         optionsProvider: { _ in nil },
         resumeProvider: { true }

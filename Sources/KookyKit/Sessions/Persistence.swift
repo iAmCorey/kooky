@@ -33,11 +33,21 @@ struct PersistedApp: Codable, Equatable {
     var windows: [PersistedWindow]
 }
 
-/// Window frame (size / position) is intentionally not persisted — kooky
-/// has never restored window geometry; restored windows just cascade.
+/// A window's frame in AppKit screen points (origin bottom-left). Restored
+/// through `WindowPlacement` against the launch-time screen layout.
+struct PersistedFrame: Codable, Equatable {
+    var x: Double
+    var y: Double
+    var width: Double
+    var height: Double
+}
+
 struct PersistedWindow: Codable, Equatable {
     var id: UUID
     var state: PersistedState
+    /// Absent in files written before v0.51.9 (nil → the window is placed
+    /// the old way: centered / cascaded at the default size).
+    var frame: PersistedFrame?
 }
 
 struct PersistedWorkspace: Codable, Equatable {
@@ -304,15 +314,23 @@ final class AppPersistence {
         windows.first { $0.id == id }?.state
     }
 
+    func frame(for id: UUID) -> PersistedFrame? {
+        windows.first { $0.id == id }?.frame
+    }
+
     /// Upserts a window's state — a new id appends (so a `⌘⇧N` window
     /// restores last) — and writes the file. The write is synchronous:
     /// `WorkspaceStore.scheduleSave` already debounces upstream, and a
-    /// closing window must reach disk before the process can exit.
-    func setWindow(_ id: UUID, state: PersistedState) {
+    /// closing window must reach disk before the process can exit. A nil
+    /// `frame` means "unknown" and keeps whatever was saved before — a
+    /// provider with no window to read must never erase a frame an earlier
+    /// save wrote.
+    func setWindow(_ id: UUID, state: PersistedState, frame: PersistedFrame? = nil) {
         if let idx = windows.firstIndex(where: { $0.id == id }) {
             windows[idx].state = state
+            if let frame { windows[idx].frame = frame }
         } else {
-            windows.append(PersistedWindow(id: id, state: state))
+            windows.append(PersistedWindow(id: id, state: state, frame: frame))
         }
         writeToDisk()
     }
@@ -347,12 +365,25 @@ final class AppPersistence {
 
 /// A `Persistence` scoped to one window's slice of the shared `state.json`.
 /// `WorkspaceStore` uses it like any `Persistence` and never knows it's one
-/// window among several.
+/// window among several. A class, not a struct: `frameProvider` is wired
+/// AFTER the store (which owns this object) and the window controller (which
+/// owns the frame) both exist — a struct copy inside the store would never
+/// see it.
 @MainActor
-struct WindowPersistence: Persistence {
+final class WindowPersistence: Persistence {
     let windowId: UUID
     let app: AppPersistence
+    /// Read at every save so the window's frame rides the same debounced
+    /// write as the workspace state. Set by `AppDelegate.addWindow`.
+    var frameProvider: (() -> PersistedFrame?)?
+
+    init(windowId: UUID, app: AppPersistence) {
+        self.windowId = windowId
+        self.app = app
+    }
 
     func load() -> PersistedState? { app.state(for: windowId) }
-    func save(_ state: PersistedState) { app.setWindow(windowId, state: state) }
+    func save(_ state: PersistedState) {
+        app.setWindow(windowId, state: state, frame: frameProvider?())
+    }
 }

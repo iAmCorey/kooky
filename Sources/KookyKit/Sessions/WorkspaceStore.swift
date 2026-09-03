@@ -457,7 +457,7 @@ final class WorkspaceStore {
     private var recentlyClosed: [ClosedTabState] = []
     private static let closedTabHistoryLimit = 50
 
-    private var pendingSave: Task<Void, Never>?
+    private(set) var pendingSave: Task<Void, Never>?
 
     /// Set by `terminate()`. The window layer drops its controller only on
     /// the NEXT main-queue tick (releasing an NSWindow synchronously inside
@@ -2651,7 +2651,16 @@ final class WorkspaceStore {
         session.environment = env
     }
 
-    private func scheduleSave() {
+    /// Debounced persistence of the whole snapshot — every mutation site and
+    /// the window controller's frame changes funnel here (the frame itself is
+    /// read by `WindowPersistence.frameProvider` at write time). A torn-down
+    /// store never re-arms: after a red-button close `removeWindow` has
+    /// dropped the slot, and a late AppKit notification or a click on the
+    /// still-visible dead window would otherwise upsert it back. ⌘Q's drain
+    /// loses nothing to this — its post-drain `flushPersistence` is ungated
+    /// and snapshots the live state.
+    func scheduleSave() {
+        guard !isTerminated else { return }
         pendingSave?.cancel()
         pendingSave = Task { @MainActor [weak self] in
             try? await Task.sleep(nanoseconds: Self.saveDebounce)

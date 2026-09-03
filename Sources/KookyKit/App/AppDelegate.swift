@@ -255,27 +255,52 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
     /// workspace; a restored id loads that window's persisted slice.
     @discardableResult
     private func addWindow(windowId: UUID = UUID()) -> KookyWindowController {
+        let persistence = WindowPersistence(windowId: windowId, app: appPersistence)
         let store = WorkspaceStore(
-            persistence: WindowPersistence(windowId: windowId, app: appPersistence),
+            persistence: persistence,
             peerStores: { [weak self] in self?.windowControllers.map(\.store) ?? [] },
             moveToNewWindow: { [weak self] id in self?.moveTabToNewWindow(sessionId: id) },
             onSessionAlert: { [weak self] id, kind in self?.handleSessionAlert(id, kind) },
             noteRecentFolder: { RecentFolders.shared.note($0) }
         )
         let controller = KookyWindowController(windowId: windowId, store: store)
+        persistence.frameProvider = { [weak controller] in controller?.persistableFrame }
         controller.onWillClose = { [weak self] in self?.handleWindowWillClose($0) }
         controller.onDidBecomeKey = { [weak self] in self?.lastKeyController = $0 }
+        // The window a frame-less newcomer copies its size from: the key
+        // window for ⌘⇧N / "Move to New Window", the previous one at launch.
+        let reference = activeController?.persistableFrame
         windowControllers.append(controller)
         if let window = controller.window {
-            if windowControllers.count == 1 {
-                window.center()
-                cascadePoint = NSPoint(x: window.frame.minX, y: window.frame.maxY)
-            } else {
-                cascadePoint = window.cascadeTopLeft(from: cascadePoint)
-            }
+            place(window, restoring: appPersistence.frame(for: windowId), inheritingSizeFrom: reference)
             window.makeKeyAndOrderFront(nil)
         }
         return controller
+    }
+
+    /// A window with a saved frame goes back where it was (see
+    /// `WindowPlacement` for the screen-layout clamping). Without one — fresh
+    /// install, a pre-v0.51.9 state.json, ⌘⇧N — it takes the reference
+    /// window's size and is centered / cascaded as before; the cascade
+    /// continues from wherever the last window landed either way.
+    private func place(_ window: NSWindow, restoring saved: PersistedFrame?, inheritingSizeFrom reference: PersistedFrame?) {
+        if let saved,
+           let frame = WindowPlacement.restoredFrame(
+               saved.rect, minSize: window.minSize, screens: NSScreen.screens.map(\.visibleFrame)
+           ) {
+            window.setFrame(frame, display: false)
+            cascadePoint = NSPoint(x: frame.minX, y: frame.maxY)
+            return
+        }
+        if let reference {
+            window.setFrame(NSRect(origin: window.frame.origin, size: reference.rect.size), display: false)
+        }
+        if windowControllers.count == 1 {
+            window.center()
+            cascadePoint = NSPoint(x: window.frame.minX, y: window.frame.maxY)
+        } else {
+            cascadePoint = window.cascadeTopLeft(from: cascadePoint)
+        }
     }
 
     /// Right-click → "Move to New Window": creates a fresh window and pulls
