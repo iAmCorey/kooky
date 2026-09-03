@@ -1360,13 +1360,12 @@ final class GhosttySurfaceView: NSView {
             return
         }
 
-        // Cursor keys are mode-aware: after a TUI enables DECCKM (`smkx`),
-        // libghostty must switch them from CSI (`ESC [ A`) to SS3
-        // (`ESC O A`). Route the physical key event through libghostty so
-        // old terminfo-strict programs (vim 7.2 on CentOS 6, etc.) see the
-        // active mode instead of kooky hard-coding CSI forever. If libghostty
-        // declines the key — shouldn't happen for a focused surface — fall
-        // back to the CSI form; a non-mode-aware arrow still beats a dead one.
+        // Mode-aware keys — arrows (DECCKM: CSI vs SS3) and Return (kitty
+        // CSI-u / modifyOtherKeys / user keybinds) — go through libghostty;
+        // see `shouldForwardModeAwareKeyToLibghostty`. If it declines the key
+        // — shouldn't happen for a focused surface — fall back to the
+        // hand-written form where one exists; a non-mode-aware arrow still
+        // beats a dead one.
         if !hasMarkedText(),
            Self.shouldForwardModeAwareKeyToLibghostty(keyCode: event.keyCode, modifierFlags: mods) {
             if !sendKey(event: event, action: GHOSTTY_ACTION_PRESS, surface: surface),
@@ -1455,8 +1454,8 @@ final class GhosttySurfaceView: NSView {
             // outside composition. Send the full key event so libghostty's
             // encoder owns the bytes (its ctrlSeq table: Ctrl+Space → NUL,
             // Ctrl+3 → ESC, …) and kitty sessions get CSI-u (issue #54).
-            // Keys `handWrittenEscapeSequence` claims (Ctrl+Enter/Tab/
-            // arrows/F1-12) are intercepted above and never reach here.
+            // Keys intercepted above — Return via the forward path, Ctrl+Tab/
+            // arrows/F1-12 via `handWrittenEscapeSequence` — never reach here.
             // Scoped to Ctrl on purpose — every other empty-accumulator
             // keystroke still sends nothing (the v0.45.7 containment
             // stands; widening also means plumbing `composing` through
@@ -1545,25 +1544,32 @@ final class GhosttySurfaceView: NSView {
         sendInputBytes(text, to: surface)
     }
 
-    /// Physical keys whose output depends on libghostty's terminal mode state.
-    /// Keep these out of `handWrittenEscapeSequence`: hard-coded CSI cursor
-    /// bytes break applications that requested application cursor keys.
+    /// Physical keys whose output depends on libghostty's terminal mode state,
+    /// so they must go through `ghostty_surface_key` rather than
+    /// `handWrittenEscapeSequence`: arrows flip CSI ↔ SS3 under DECCKM, and a
+    /// modified Return is `ESC[13;2u` once a program pushes kitty keyboard
+    /// flags, `ESC[27;2;13~` otherwise — with the user's own
+    /// `keybind = shift+enter=…` running before either (issue #72). Cmd combos
+    /// exit `keyDown` before this runs. Return forwards with any modifier;
+    /// arrows forward unmodified only — modified arrows and the rest of the
+    /// hand-written table (Tab / Backspace / Escape / Home / End / F-keys)
+    /// still bypass the core, pending a follow-up that gives each its own
+    /// byte contract.
     nonisolated static func shouldForwardModeAwareKeyToLibghostty(
         keyCode: UInt16,
         modifierFlags: NSEvent.ModifierFlags
     ) -> Bool {
-        guard modifierFlags.intersection([.shift, .control, .option, .command]).isEmpty else {
-            return false
-        }
         switch keyCode {
-        case 123, 124, 125, 126: return true  // left, right, down, up
+        case 36, 76: return true                // Return / keypad Enter
+        case 123, 124, 125, 126:                // left, right, down, up
+            return modifierFlags.intersection([.shift, .control, .option, .command]).isEmpty
         default: return false
         }
     }
 
     /// Map kooky's own functional-key policy to bytes. Returns `nil` for
-    /// normal text and mode-aware physical keys that must go through
-    /// `ghostty_surface_key`.
+    /// normal text; for the mode-aware keys `keyDown` forwards to
+    /// `ghostty_surface_key` this is the decline fallback only.
     nonisolated static func handWrittenEscapeSequence(
         forKeyCode code: UInt16,
         modifierFlags mods: NSEvent.ModifierFlags
@@ -1575,11 +1581,13 @@ final class GhosttySurfaceView: NSView {
         switch code {
         // Functional
         case 36, 76:
-            // Return / keypad Return (76): Shift+Enter sends `\` then CR —
-            // zsh line-continuation and Claude Code's documented `\` +
-            // Enter → newline trick both honor this. `\n` alone is useless:
-            // ZLE binds it to accept-line.
-            return mods.contains(.shift) ? "\\\r" : "\r"
+            // Decline fallback for Return / keypad Enter (see
+            // `shouldForwardModeAwareKeyToLibghostty`). A bare Return still
+            // gets CR; a modified one the core declined (a user
+            // `keybind = shift+enter=ignore`) must stay declined — CR would
+            // turn it into a submit. The old Shift+Enter `\` + CR trick lived
+            // here (issue #72).
+            return mods.intersection([.shift, .control, .option]).isEmpty ? "\r" : nil
         case 48:  return mods.contains(.shift) ? "\u{1B}[Z" : "\t"  // Tab / Shift+Tab
         case 51:  return "\u{7F}"                          // Backspace (DEL)
         case 53:  return "\u{1B}"                          // Escape

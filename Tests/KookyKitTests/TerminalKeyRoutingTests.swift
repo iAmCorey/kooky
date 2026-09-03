@@ -57,14 +57,9 @@ final class TerminalKeyRoutingTests: XCTestCase {
     func testGhosttyCursorKeyTracksApplicationCursorMode() throws {
         let up = try Self.keyDownEvent(keyCode: 126, characters: "\u{F700}", mods: [])
         try withManualSurface { surface, output in
-            XCTAssertTrue(Self.press(event: up, on: surface))
-            XCTAssertEqual(output.takeString(), "\u{1B}[A")
-
-            "\u{1B}[?1h".withCString { cstr in
-                ghostty_surface_process_output(surface, cstr, UInt(strlen(cstr)))
-            }
-            XCTAssertTrue(Self.press(event: up, on: surface))
-            XCTAssertEqual(output.takeString(), "\u{1B}OA")
+            XCTAssertEqual(try Self.bytes(for: up, on: surface, output: output), "\u{1B}[A")
+            Self.feed("\u{1B}[?1h", to: surface)
+            XCTAssertEqual(try Self.bytes(for: up, on: surface, output: output), "\u{1B}OA")
         }
     }
 
@@ -93,13 +88,8 @@ final class TerminalKeyRoutingTests: XCTestCase {
                     keyCode: keyCode, characters: chars, mods: [.control],
                     requireUnshifted: unshifted
                 )
-                _ = output.takeString()
-                XCTAssertTrue(
-                    Self.press(event: event, on: surface),
-                    "libghostty declined keyCode \(keyCode)"
-                )
                 XCTAssertEqual(
-                    output.takeString(), expected,
+                    try Self.bytes(for: event, on: surface, output: output), expected,
                     "wrong bytes for Ctrl+\(unshifted)"
                 )
             }
@@ -112,15 +102,11 @@ final class TerminalKeyRoutingTests: XCTestCase {
     /// codes" pushed must come out as `ESC [99;5u`, not 0x03.
     func testCtrlLetterUnderKittyProtocolEncodesCSIu() throws {
         try withManualSurface { surface, output in
-            "\u{1B}[>1u".withCString { cstr in
-                ghostty_surface_process_output(surface, cstr, UInt(strlen(cstr)))
-            }
+            Self.feed("\u{1B}[>1u", to: surface)
             let event = try Self.keyDownEvent(
                 keyCode: 8, characters: "\u{03}", mods: [.control], requireUnshifted: "c"
             )
-            _ = output.takeString()
-            XCTAssertTrue(Self.press(event: event, on: surface))
-            XCTAssertEqual(output.takeString(), "\u{1B}[99;5u")
+            XCTAssertEqual(try Self.bytes(for: event, on: surface, output: output), "\u{1B}[99;5u")
         }
     }
 
@@ -242,9 +228,54 @@ final class TerminalKeyRoutingTests: XCTestCase {
             let event = try Self.keyDownEvent(
                 keyCode: 8, characters: "\u{03}", mods: [.control, .shift], requireUnshifted: "c"
             )
-            _ = output.takeString()
-            XCTAssertTrue(Self.press(event: event, on: surface))
-            XCTAssertEqual(output.takeString(), "\u{1B}[99;6u")
+            XCTAssertEqual(try Self.bytes(for: event, on: surface, output: output), "\u{1B}[99;6u")
+        }
+    }
+
+    // MARK: - Return through the libghostty key encoder (issue #72)
+
+    /// The `od -c` contract for Return, through the production key-event
+    /// pieces and a real surface. kooky used to hand-write Shift+Enter as
+    /// `\` + CR (a Claude Code trick); every TUI on the kitty keyboard
+    /// protocol rendered that as a literal backslash. The encoder emits
+    /// xterm modifyOtherKeys in legacy mode and CSI-u once a program pushes
+    /// kitty flags — the two forms Claude Code / pi / omp actually parse.
+    func testReturnVariantsEncodeLegacyThenKittySequences() throws {
+        typealias Case = (name: String, code: UInt16, mods: NSEvent.ModifierFlags, legacy: String, kitty: String)
+        let cases: [Case] = [
+            //  name            code  mods        legacy               kitty
+            ("Return",          36,   [],         "\r",                "\r"),
+            ("Shift+Return",    36,   [.shift],   "\u{1B}[27;2;13~",   "\u{1B}[13;2u"),
+            ("Ctrl+Return",     36,   [.control], "\u{1B}[27;5;13~",   "\u{1B}[13;5u"),
+            ("Option+Return",   36,   [.option],  "\u{1B}\r",          "\u{1B}[13;3u"),
+            ("Keypad Enter",    76,   [],         "\r",                "\u{1B}[57414u"),
+        ]
+        try withManualSurface { surface, output in
+            @MainActor func check(_ phase: String, _ expected: (Case) -> String) throws {
+                for c in cases {
+                    let event = try Self.keyDownEvent(keyCode: c.code, characters: "\r", mods: c.mods)
+                    XCTAssertNil(GhosttySurfaceView.keyEventText(for: event), "\(c.name) must carry no text")
+                    XCTAssertEqual(
+                        try Self.bytes(for: event, on: surface, output: output), expected(c),
+                        "\(phase) bytes for \(c.name)"
+                    )
+                }
+            }
+            try check("legacy") { $0.legacy }
+            Self.feed("\u{1B}[>1u", to: surface)
+            try check("kitty") { $0.kitty }
+        }
+    }
+
+    /// Pins the contract helper's config guard using a binding ghostty ships
+    /// by default on macOS (`super+c` → copy), so a machine whose config
+    /// binds a contract key gets a SKIP with a reason, never a red row.
+    func testContractHelperSkipsKeysBoundByGhosttyConfig() throws {
+        let cmdC = try Self.keyDownEvent(keyCode: 8, characters: "c", mods: [.command], requireUnshifted: "c")
+        try withManualSurface { surface, output in
+            XCTAssertThrowsError(try Self.bytes(for: cmdC, on: surface, output: output)) { error in
+                XCTAssertTrue(error is XCTSkip, "expected XCTSkip, got \(type(of: error))")
+            }
         }
     }
 
@@ -316,39 +347,85 @@ final class TerminalKeyRoutingTests: XCTestCase {
         return event
     }
 
-    /// Presses through the SAME production pieces `sendKey` composes —
-    /// `makeKeyEvent` + `keyEventText` + `send` — so a regression in any of
-    /// them reddens the od-contract assertions.
-    private static func press(event: NSEvent, on surface: ghostty_surface_t) -> Bool {
-        GhosttySurfaceView.send(
-            GhosttySurfaceView.makeKeyEvent(for: event),
-            text: GhosttySurfaceView.keyEventText(for: event),
-            to: surface
+    /// Feeds PTY-side bytes (a mode switch, a kitty flags push) to the surface.
+    private static func feed(_ bytes: String, to surface: ghostty_surface_t) {
+        bytes.withCString { cstr in
+            ghostty_surface_process_output(surface, cstr, UInt(strlen(cstr)))
+        }
+    }
+
+    /// Drains stale output, presses `event` through the SAME production
+    /// pieces `sendKey` composes — `makeKeyEvent` + `keyEventText` + `send`,
+    /// so a regression in any of them reddens the od-contract assertions —
+    /// and returns only the bytes that press produced. A declined key fails
+    /// the test at the caller's line.
+    ///
+    /// Skips (never fails) when THIS machine's ghostty config binds the key:
+    /// the shared `LibghosttyApp` loads `~/.config/ghostty/config`, and a
+    /// binding runs instead of the encoder — a developer following the
+    /// CHANGELOG's own `keybind = shift+enter=…` advice would otherwise
+    /// redden the Shift+Return row.
+    private static func bytes(
+        for event: NSEvent,
+        on surface: ghostty_surface_t,
+        output: ManualGhosttyOutput,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) throws -> String {
+        let key = GhosttySurfaceView.makeKeyEvent(for: event)
+        let text = GhosttySurfaceView.keyEventText(for: event)
+        try XCTSkipIf(
+            isBinding(key, text: text, on: surface),
+            "keyCode \(event.keyCode) mods \(event.modifierFlags.rawValue) is bound by this machine's ghostty config"
         )
+        _ = output.takeString()
+        let accepted = GhosttySurfaceView.send(key, text: text, to: surface)
+        XCTAssertTrue(accepted, "libghostty declined keyCode \(event.keyCode)", file: file, line: line)
+        return output.takeString()
+    }
+
+    private static func isBinding(
+        _ key: ghostty_input_key_s, text: String?, on surface: ghostty_surface_t
+    ) -> Bool {
+        var key = key
+        var flags = ghostty_binding_flags_e(rawValue: 0)
+        guard let text, !text.isEmpty else {
+            return ghostty_surface_key_is_binding(surface, key, &flags)
+        }
+        return text.withCString { cstr in
+            key.text = cstr
+            return ghostty_surface_key_is_binding(surface, key, &flags)
+        }
+    }
+
+    /// Return forwards to libghostty with any modifier (Cmd combos exit
+    /// `keyDown` before the predicate runs); its hand-written entry is the
+    /// decline fallback only — CR for a bare Return, nothing for a modified
+    /// one the core declined, never the old `\` + CR trick (issue #72).
+    func testReturnForwardsToLibghosttyAndFallsBackToPlainCROnly() {
+        for keyCode: UInt16 in [36, 76] {
+            for mods: NSEvent.ModifierFlags in [[], [.shift], [.control], [.option], [.shift, .option]] {
+                XCTAssertTrue(
+                    GhosttySurfaceView.shouldForwardModeAwareKeyToLibghostty(
+                        keyCode: keyCode, modifierFlags: mods
+                    ),
+                    "keyCode \(keyCode) mods \(mods.rawValue) must forward"
+                )
+            }
+            XCTAssertEqual(
+                GhosttySurfaceView.handWrittenEscapeSequence(forKeyCode: keyCode, modifierFlags: []),
+                "\r"
+            )
+            XCTAssertNil(
+                GhosttySurfaceView.handWrittenEscapeSequence(forKeyCode: keyCode, modifierFlags: [.shift]),
+                "a modified Return the core declined must stay declined, not become a submit"
+            )
+        }
     }
 
     func testNonCursorSpecialKeysKeepExplicitSequences() {
         XCTAssertFalse(
-            GhosttySurfaceView.shouldForwardModeAwareKeyToLibghostty(
-                keyCode: 36,
-                modifierFlags: []
-            )
-        )
-        XCTAssertEqual(
-            GhosttySurfaceView.handWrittenEscapeSequence(forKeyCode: 36, modifierFlags: []),
-            "\r"
-        )
-        XCTAssertEqual(
-            GhosttySurfaceView.handWrittenEscapeSequence(forKeyCode: 36, modifierFlags: [.shift]),
-            "\\\r"
-        )
-        XCTAssertEqual(
-            GhosttySurfaceView.handWrittenEscapeSequence(forKeyCode: 76, modifierFlags: []),
-            "\r"
-        )
-        XCTAssertEqual(
-            GhosttySurfaceView.handWrittenEscapeSequence(forKeyCode: 76, modifierFlags: [.shift]),
-            "\\\r"
+            GhosttySurfaceView.shouldForwardModeAwareKeyToLibghostty(keyCode: 48, modifierFlags: [.shift])
         )
         XCTAssertEqual(
             GhosttySurfaceView.handWrittenEscapeSequence(forKeyCode: 48, modifierFlags: [.shift]),
