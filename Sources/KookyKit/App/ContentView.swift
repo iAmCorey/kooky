@@ -45,7 +45,7 @@ struct ContentView: View {
                 }
             }
         }
-        .glassWindowBackground(fallback: chromeBackground)
+        .glassWindowBackground(fallback: Theme.chromeBackground, followsOpacity: true)
         .preferredColorScheme(Theme.chromeColorScheme)
         .ignoresSafeArea(.all)
         .onChange(of: store.sidebarMode) { _, _ in
@@ -127,6 +127,7 @@ struct ContentView: View {
             .padding(.trailing, Theme.chromeBarEdgeInset)
         }
         .frame(height: 32)
+        .glassChromeBackground()
     }
 
     private var mainPane: some View {
@@ -136,11 +137,6 @@ struct ContentView: View {
         // #24, workspace-switch flicker) — the AppKit host switches by
         // visibility instead.
         PaneTreeHostRepresentable(host: paneHost)
-    }
-
-    private var chromeBackground: Color {
-        let color = store.active?.activeSession?.engine.backgroundColor ?? Theme.terminalSurface
-        return Color(nsColor: color)
     }
 
     private var minimumTerminalTreeWidth: CGFloat {

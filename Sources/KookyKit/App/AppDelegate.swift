@@ -977,7 +977,11 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
             InboxWindowController.shared.window,
             AboutWindowController.shared.window,
         ]
-        for window in windowControllers.map(\.window) + auxiliary {
+        for window in windowControllers.map(\.window) {
+            window?.appearance = appearance
+            window?.applyGlassBacking(allowsBareOpacity: true)
+        }
+        for window in auxiliary {
             window?.appearance = appearance
             window?.applyGlassBacking()
         }

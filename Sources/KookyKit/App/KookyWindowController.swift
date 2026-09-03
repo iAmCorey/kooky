@@ -218,8 +218,9 @@ final class KookyWindowController: NSWindowController, NSWindowDelegate {
         window.title = KookyApp.name
         window.titleVisibility = .hidden
         window.titlebarAppearsTransparent = true
-        // Tab strips sit under the transparent titlebar; only our explicit
-        // sidebar handle moves the window so tab DnD never races AppKit.
+        // Tab strips and the top chrome draw in the full-size content area;
+        // keep the native titlebar transparent so their backgrounds follow
+        // the live theme and opacity settings.
         window.isMovable = false
         window.isMovableByWindowBackground = false
         window.appearance = Theme.windowAppearance
@@ -231,10 +232,9 @@ final class KookyWindowController: NSWindowController, NSWindowDelegate {
         // "kooky × N" above our own workspace/tab list. Drop them — the Dock
         // menu's workspace list and ⌘P are the real navigation.
         window.isExcludedFromWindowsMenu = true
-        // Liquid Glass needs a non-opaque window so the glass layer can sample
-        // the desktop behind it and the terminal's `background-opacity` reads
-        // through. `refreshThemeAppearances` keeps this in sync on live edits.
-        window.applyGlassBacking()
+        // `allowsBareOpacity` lets a bare opacity < 1 use one window-level
+        // alpha for the main terminal window; auxiliary windows stay opaque.
+        window.applyGlassBacking(allowsBareOpacity: true)
         return window
     }
 
