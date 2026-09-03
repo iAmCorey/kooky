@@ -2,6 +2,11 @@
 
 Notable changes per release. Tagged commits use `vX.Y.Z` shortform.
 
+## v0.51.9 — 2026-09-03
+
+- New: windows come back where you left them. Each window's size and position is restored on the next launch; one whose display is gone lands centered on the main screen at its old size. A new window (⌘⇧N) takes the current window's size. Thanks @kaijianding for the draft implementation. (#75)
+- Fixed: Shift+Enter in Claude Code, pi, omp and other TUI programs now inserts a newline instead of typing a literal `\`. Return is handed to libghostty the way Ghostty does it, so Ctrl+Enter and Option+Enter reach programs as themselves and a `keybind = shift+enter=…` line in your Ghostty config takes effect. The old shell line-continuation shortcut goes with it; add `keybind = shift+enter=text:\\\r` to your Ghostty config to keep it. Thanks @kchen0x for the report and diagnosis. (#72)
+
 ## v0.51.8 — 2026-09-02
 
 - Fixed: quitting kooky with ⌘Q while an agent was running no longer turns that tab into a plain terminal on the next launch — the agent comes back and resumes its conversation, as it did before v0.50.1. Thanks @kaijianding for the diagnosis and a draft fix. (#70)
