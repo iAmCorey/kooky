@@ -1,0 +1,22 @@
+# Kooky theme: Catppuccin Mocha
+background = #1E1E2E
+foreground = #CDD6F4
+cursor-color = #F5E0DC
+selection-background = #585B70
+selection-foreground = #CDD6F4
+palette = 0=#45475A
+palette = 1=#F38BA8
+palette = 2=#A6E3A1
+palette = 3=#F9E2AF
+palette = 4=#89B4FA
+palette = 5=#F5C2E7
+palette = 6=#94E2D5
+palette = 7=#A6ADC8
+palette = 8=#585B70
+palette = 9=#F37799
+palette = 10=#89D88B
+palette = 11=#EBD391
+palette = 12=#74A8FC
+palette = 13=#F2AEDE
+palette = 14=#6BD7CA
+palette = 15=#BAC2DE

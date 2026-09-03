@@ -1,0 +1,22 @@
+# Kooky theme: Catppuccin Latte
+background = #EFF1F5
+foreground = #4C4F69
+cursor-color = #DC8A78
+selection-background = #CCD0DA
+selection-foreground = #4C4F69
+palette = 0=#5C5F77
+palette = 1=#D20F39
+palette = 2=#40A02B
+palette = 3=#DF8E1D
+palette = 4=#1E66F5
+palette = 5=#EA76CB
+palette = 6=#179299
+palette = 7=#ACB0BE
+palette = 8=#6C6F85
+palette = 9=#D20F39
+palette = 10=#40A02B
+palette = 11=#DF8E1D
+palette = 12=#1E66F5
+palette = 13=#EA76CB
+palette = 14=#179299
+palette = 15=#BCC0CC

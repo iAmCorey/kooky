@@ -1,0 +1,22 @@
+# Kooky theme: Monokai
+background = #272822
+foreground = #F8F8F2
+cursor-color = #F8F8F0
+selection-background = #575A5A
+selection-foreground = #F8F8F2
+palette = 0=#333333
+palette = 1=#C4265E
+palette = 2=#86B42B
+palette = 3=#B3B42B
+palette = 4=#6A7EC8
+palette = 5=#8C6BC8
+palette = 6=#56ADBC
+palette = 7=#E3E3DD
+palette = 8=#666666
+palette = 9=#F92672
+palette = 10=#A6E22E
+palette = 11=#E2E22E
+palette = 12=#819AFF
+palette = 13=#AE81FF
+palette = 14=#66D9EF
+palette = 15=#F8F8F2

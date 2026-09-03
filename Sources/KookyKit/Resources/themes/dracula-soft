@@ -1,0 +1,22 @@
+# Kooky theme: Dracula Soft
+background = #282A36
+foreground = #F6F6F4
+cursor-color = #F6F6F4
+selection-background = #44475A
+selection-foreground = #F6F6F4
+palette = 0=#262626
+palette = 1=#EE6666
+palette = 2=#62E884
+palette = 3=#E7EE98
+palette = 4=#BF9EEE
+palette = 5=#F286C4
+palette = 6=#97E1F1
+palette = 7=#F6F6F4
+palette = 8=#7B7F8B
+palette = 9=#F07C7C
+palette = 10=#78F09A
+palette = 11=#F6F6AE
+palette = 12=#D6B4F7
+palette = 13=#F49DDA
+palette = 14=#ADF6F6
+palette = 15=#FFFFFF

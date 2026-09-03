@@ -21,7 +21,7 @@ upstream license; nothing here is dual-licensed under kooky's MIT.
 - Package: `@shikijs/themes` 3.23.0
 - License: MIT
 - Use: background, foreground, cursor, selection, and 16-color ANSI tables in
-  `Sources/KookyKit/App/KookyTerminalTheme.swift`
+-   `Sources/KookyKit/Resources/themes/` Ghostty theme files
 
 Copyright (c) 2021 Pine Wu
 Copyright (c) 2023 Anthony Fu <https://github.com/antfu>

@@ -1,0 +1,22 @@
+# Kooky theme: Dracula
+background = #282A36
+foreground = #F8F8F2
+cursor-color = #F8F8F2
+selection-background = #44475A
+selection-foreground = #F8F8F2
+palette = 0=#000000
+palette = 1=#FF5555
+palette = 2=#50FA7B
+palette = 3=#F1FA8C
+palette = 4=#BD93F9
+palette = 5=#FF79C6
+palette = 6=#8BE9FD
+palette = 7=#BBBBBB
+palette = 8=#555555
+palette = 9=#FF5555
+palette = 10=#50FA7B
+palette = 11=#F1FA8C
+palette = 12=#BD93F9
+palette = 13=#FF79C6
+palette = 14=#8BE9FD
+palette = 15=#FFFFFF

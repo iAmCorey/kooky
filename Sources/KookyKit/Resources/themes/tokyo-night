@@ -1,0 +1,22 @@
+# Kooky theme: Tokyo Night
+background = #1A1B26
+foreground = #C0CAF5
+cursor-color = #C0CAF5
+selection-background = #283457
+selection-foreground = #C0CAF5
+palette = 0=#15161E
+palette = 1=#F7768E
+palette = 2=#9ECE6A
+palette = 3=#E0AF68
+palette = 4=#7AA2F7
+palette = 5=#BB9AF7
+palette = 6=#7DCFFF
+palette = 7=#A9B1D6
+palette = 8=#414868
+palette = 9=#F7768E
+palette = 10=#9ECE6A
+palette = 11=#E0AF68
+palette = 12=#7AA2F7
+palette = 13=#BB9AF7
+palette = 14=#7DCFFF
+palette = 15=#C0CAF5
