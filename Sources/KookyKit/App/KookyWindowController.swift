@@ -167,6 +167,15 @@ final class KookyWindowController: NSWindowController, NSWindowDelegate {
     /// can drop this window from its list and decide whether the window's
     /// persisted slot survives (one of several closed) or is discarded.
     var onWillClose: ((KookyWindowController) -> Void)?
+    /// Set by `AppDelegate`. Fires from `windowShouldClose` — a user-initiated
+    /// close (traffic light) — and returning `false` keeps the window alive;
+    /// the delegate hides the last window instead of tearing its sessions
+    /// down. Programmatic `close()` (the emptied-window path) bypasses it.
+    var onShouldClose: ((KookyWindowController) -> Bool)?
+    /// Ordered out by a user close, sessions still running. Explicit rather
+    /// than derived from `NSWindow.isVisible`, which ⌘H (Hide kooky) and a
+    /// just-closed window awaiting its next-tick drop also make false.
+    private(set) var hiddenOnClose = false
     /// Fires when this window becomes key — lets `AppDelegate` remember the
     /// most-recently-active kooky window, so menu actions route there when a
     /// Settings / Update panel is the key window instead.
@@ -238,11 +247,31 @@ final class KookyWindowController: NSWindowController, NSWindowDelegate {
         return window
     }
 
+    /// The close-instead-of-hide half of `shouldCloseWindow`.
+    func hideInsteadOfClose() {
+        hiddenOnClose = true
+        store.setOnScreen(false)
+        window?.orderOut(nil)
+    }
+
+    /// Any path that puts the window back in front (Dock reopen, deep link,
+    /// menu action) lands here — from `front(_:)` explicitly and again from
+    /// `windowDidBecomeKey`, whichever comes first.
+    func markPresented() {
+        hiddenOnClose = false
+        store.setOnScreen(true)
+    }
+
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        onShouldClose?(self) ?? true
+    }
+
     func windowWillClose(_ notification: Notification) {
         onWillClose?(self)
     }
 
     func windowDidBecomeKey(_ notification: Notification) {
+        markPresented()
         alignTrafficLights()
         onDidBecomeKey?(self)
     }

@@ -467,7 +467,29 @@ final class WorkspaceStore {
     /// in a store that is about to be dropped and reports success. Hook-socket
     /// ingress gates itself on it instead (`hookSession`).
     private(set) var isTerminated = false
+    /// False while this store's window is ordered out (closed-but-alive,
+    /// see `AppDelegate.shouldCloseWindow`). Sessions and agents keep
+    /// running; only work that exists to paint pixels pauses — terminal
+    /// rendering, git status fetches, file-tree watchers, the Session Info
+    /// process poll. Not `isTerminated`: that path kills engines.
+    private(set) var isOnScreen = true
     private static let saveDebounce: UInt64 = 1_000_000_000
+
+    func setOnScreen(_ onScreen: Bool) {
+        guard onScreen != isOnScreen, !isTerminated else { return }
+        isOnScreen = onScreen
+        let sessions = workspaces.flatMap { $0.root.allPanes }.flatMap(\.tabs)
+        for session in sessions { session.engine.setOnScreen(onScreen) }
+        if onScreen {
+            fileTree.resume()
+            // Everything git-related was skipped while hidden — prompts,
+            // GitWatcher events, and edits from outside that touch neither
+            // HEAD nor index. One fetch per session catches all of it up.
+            for session in sessions { refreshGitStatus(for: session) }
+        } else {
+            fileTree.suspend()
+        }
+    }
 
     var active: Workspace? {
         workspaces.first { $0.id == activeWorkspaceId }
@@ -2363,6 +2385,8 @@ final class WorkspaceStore {
     }
 
     private func refreshGitStatus(for session: Session) {
+        // Off screen nothing paints the result; `setOnScreen(true)` refetches.
+        guard isOnScreen else { return }
         if let gitDir = sessionGitWatch[session.id]?.gitDir,
            gitWatches[gitDir]?.subscribers.contains(session.id) == true {
             scheduleGitStatusRefresh(for: gitDir)
@@ -2598,7 +2622,9 @@ final class WorkspaceStore {
     /// prior dispatch, beyond the fetcher's 50ms coalescing window, so a
     /// genuinely later burst cannot be swallowed by the previous batch.
     private func performSharedGitStatusRefresh(_ gitDir: String) {
-        guard let entry = gitWatches[gitDir] else { return }
+        // GitWatcher-driven path; the prompt-driven one is gated in
+        // `refreshGitStatus`. Off screen nothing paints the result.
+        guard let entry = gitWatches[gitDir], isOnScreen else { return }
         var anchor: Session?
         for id in entry.subscribers {
             guard let session = findSession(id: id) else { continue }

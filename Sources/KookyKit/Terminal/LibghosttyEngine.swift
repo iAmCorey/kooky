@@ -548,6 +548,10 @@ final class LibghosttyEngine: TerminalEngine {
     private let surfaceView: GhosttySurfaceView
 
     var view: NSView { surfaceView }
+
+    func setOnScreen(_ onScreen: Bool) {
+        surfaceView.isOffScreen = !onScreen
+    }
     func renderNowIfNeeded() {
         surfaceView.renderNowIfNeeded()
     }
@@ -1023,9 +1027,16 @@ final class GhosttySurfaceView: NSView {
         renderLink?.isPaused = false
     }
 
+    /// Set while the owning window is ordered out by a user close. `orderOut`
+    /// leaves the view in the window with no hidden ancestor, so without this
+    /// the render link would keep presenting frames nobody can see.
+    var isOffScreen = false {
+        didSet { if oldValue != isOffScreen { updateRenderLink() } }
+    }
+
     /// Present the active surface immediately instead of waiting for the next vsync.
     func renderNowIfNeeded() {
-        guard let surface, !isHiddenOrHasHiddenAncestor else { return }
+        guard let surface, !isHiddenOrHasHiddenAncestor, !isOffScreen else { return }
         needsRender = false
         ghostty_surface_render_now(surface)
     }
@@ -1038,7 +1049,7 @@ final class GhosttySurfaceView: NSView {
     /// `setNeedsRender()` still latches while hidden; the first tick after
     /// unhide presents the accumulated state.
     private func updateRenderLink() {
-        if surface != nil, window != nil, !isHiddenOrHasHiddenAncestor {
+        if surface != nil, window != nil, !isHiddenOrHasHiddenAncestor, !isOffScreen {
             startRenderLink()
         } else {
             stopRenderLink()
