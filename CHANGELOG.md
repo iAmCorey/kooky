@@ -2,6 +2,10 @@
 
 Notable changes per release. Tagged commits use `vX.Y.Z` shortform.
 
+## v0.51.10 — 2026-09-03
+
+- Changed: closing the last window no longer quits kooky. The window is hidden with its terminals and agents still running, the app stays in the Dock like Terminal and iTerm do, and clicking its icon brings the same window back exactly as you left it. ⌘Q still quits.
+
 ## v0.51.9 — 2026-09-03
 
 - New: windows come back where you left them. Each window's size and position is restored on the next launch; one whose display is gone lands centered on the main screen at its old size. A new window (⌘⇧N) takes the current window's size. Thanks @kaijianding for the draft implementation. (#75)
