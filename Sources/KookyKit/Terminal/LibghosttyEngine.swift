@@ -1072,8 +1072,13 @@ final class GhosttySurfaceView: NSView {
         createSurfaceIfReady()
         // A hidden tab may have missed geometry changes. Re-sync only when it
         // becomes visible, avoiding background SIGWINCH while preserving the
-        // first visible frame's dimensions.
-        if surface != nil { propagateSizeToSurface(force: true) }
+        // first visible frame's dimensions. No `force`: the surface stayed in
+        // the same window across the hide/unhide, so pixel-dedup correctly
+        // skips a redundant set_size when the frame didn't change. A forced
+        // push here sends a SIGWINCH to TUI apps (omp/Claude Code) whose
+        // async redraw moves the viewport after scroll_to_bottom has already
+        // re-pinned — the user returns to a tab scrolled to the middle.
+        if surface != nil { propagateSizeToSurface() }
         updateRenderLink()
     }
 
