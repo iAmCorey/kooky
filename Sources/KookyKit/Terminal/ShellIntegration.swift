@@ -1970,6 +1970,15 @@ enum KookyShellIntegration {
     /// the binary from a plain Terminal.app shell.
     private static func bracketBody(slug: String) -> String {
         """
+        # Self-updating agents (omp) resolve their own binary via the child's
+        # PATH, which would hit this shim dir first and overwrite it with the
+        # real binary. Prepend the real binary's dir for the update invocation
+        # only; every normal call keeps its PATH byte-identical. Before
+        # ttyPassthroughGuard so non-tty updates are covered too.
+        if [[ "${1:-}" == "update" ]]; then
+            export PATH="$(dirname "$real"):$PATH"
+        fi
+
         \(ttyPassthroughGuard)
 
         if [[ -n "$KOOKY_SURFACE_ID" || -n "$KOOKY_AGENT_MARKERS" ]]; then
