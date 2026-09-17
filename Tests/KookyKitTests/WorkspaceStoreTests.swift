@@ -1012,6 +1012,30 @@ final class WorkspaceStoreTests: XCTestCase {
         XCTAssertEqual(pane.activeTabId, b.id)
     }
 
+    func testCycleWorkspaceAdvancesAndWrapsAroundEnd() {
+        let store = makeStore()
+        let first = store.workspaces[0]
+        let second = store.addWorkspace(workingDirectory: projectA)
+        let third = store.addWorkspace(workingDirectory: projectB)
+        XCTAssertEqual(store.activeWorkspaceId, third.id)
+
+        store.cycleWorkspace(direction: 1)  // third → first (wrap)
+        XCTAssertEqual(store.activeWorkspaceId, first.id)
+
+        store.cycleWorkspace(direction: 1)  // first → second
+        XCTAssertEqual(store.activeWorkspaceId, second.id)
+    }
+
+    func testCycleWorkspaceBackwardsWrapsAtStart() {
+        let store = makeStore()
+        let first = store.workspaces[0]
+        let second = store.addWorkspace(workingDirectory: projectA)
+        store.activateWorkspace(first)
+
+        store.cycleWorkspace(direction: -1)  // first → second (wrap backward)
+        XCTAssertEqual(store.activeWorkspaceId, second.id)
+    }
+
     func testClosingActiveTabActivatesNeighbor() {
         let store = makeStore()
         let ws = store.workspaces[0]

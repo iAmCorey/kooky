@@ -1221,10 +1221,23 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
             // ordinal; cycle wraps at the ends and doesn't need a digit key.
             selfRow("Next Tab", #selector(handleNextTab), "\t", modifiers: [.control]),
             selfRow("Previous Tab", #selector(handlePreviousTab), "\t", modifiers: [.control, .shift]),
+            // Same tab cycle on ⌘⌥← / ⌘⌥→, pairing with the ⌘⌥↑ / ⌘⌥↓
+            // workspace cycle below into one arrow-key family.
+            selfRow("Previous Tab", #selector(handlePreviousTab), "\u{F702}", modifiers: [.command, .option]),
+            selfRow("Next Tab", #selector(handleNextTab), "\u{F703}", modifiers: [.command, .option]),
             .separator,
         ]
         + tabSwitchRows
         + [.separator]
+        + [
+            // ⌘⌥↑ / ⌘⌥↓ walk the workspace list in sidebar order, wrapping
+            // at the ends — the keyboard counterpart to clicking rows,
+            // without depending on which pane or row holds focus. Discrete
+            // from ⌘⌥1-9 below, which jump to a workspace by ordinal.
+            selfRow("Previous Workspace", #selector(handlePreviousWorkspace), "\u{F700}", modifiers: [.command, .option]),
+            selfRow("Next Workspace", #selector(handleNextWorkspace), "\u{F701}", modifiers: [.command, .option]),
+            .separator,
+        ]
         + workspaceSwitchRows
         + [
             .separator,
@@ -1566,6 +1579,14 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
         store.cycleTab(in: workspace, direction: -1)
     }
 
+    @objc private func handleNextWorkspace() {
+        activeStore?.cycleWorkspace(direction: 1)
+    }
+
+    @objc private func handlePreviousWorkspace() {
+        activeStore?.cycleWorkspace(direction: -1)
+    }
+
     @objc private func handleSplitRight() {
         guard let store = activeStore, let workspace = store.active,
               let pane = workspace.activePane else { return }
@@ -1705,6 +1726,14 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
             let index = MenuTag.workspaceIndex(from: menuItem.tag)
             let count = activeStore?.workspaces.count ?? 0
             return terminalWindowIsKey && index >= 0 && index < count
+        }
+
+        if menuItemMatches(
+            menuItem,
+            #selector(handlePreviousWorkspace),
+            #selector(handleNextWorkspace)
+        ) {
+            return terminalWindowIsKey && (activeStore?.workspaces.count ?? 0) > 1
         }
 
         if menuItemMatches(
