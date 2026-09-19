@@ -297,6 +297,7 @@
 "scanning…" = "正在扫描…";
 "no sessions found" = "未找到会话";
 "search sessions" = "搜索会话";
+"created %@ · active %@" = "创建于 %@ · 活跃于 %@";
 "all" = "全部";
 "only this workspace" = "仅显示当前工作区";
 "untitled" = "未命名";

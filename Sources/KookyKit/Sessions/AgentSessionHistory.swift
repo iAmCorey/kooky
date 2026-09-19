@@ -24,6 +24,10 @@ struct AgentSessionRecord: Identifiable, Hashable, Sendable {
     let cwdPath: String
     /// Session file's modification date — "when this conversation last moved".
     let lastActivity: Date
+    /// When the conversation was created — the backing file's creation date
+    /// (or SQLite `created_at`). Nil where the store records no creation
+    /// time reliably.
+    let createdAt: Date?
     /// The backing session file (or store) used by deletion.
     let sourceURL: URL
     init(
@@ -32,6 +36,7 @@ struct AgentSessionRecord: Identifiable, Hashable, Sendable {
         title: String,
         cwd: URL,
         lastActivity: Date,
+        createdAt: Date? = nil,
         sourceURL: URL = URL(fileURLWithPath: "/dev/null")
     ) {
         self.agentId = agentId
@@ -40,6 +45,7 @@ struct AgentSessionRecord: Identifiable, Hashable, Sendable {
         self.cwd = cwd
         self.cwdPath = cwd.path
         self.lastActivity = lastActivity
+        self.createdAt = createdAt
         self.sourceURL = sourceURL
     }
 
@@ -288,6 +294,7 @@ enum AgentSessionScanner {
             title: cleanedTitle(customTitle ?? summary ?? firstUserText ?? ""),
             cwd: URL(fileURLWithPath: cwd),
             lastActivity: mtime,
+            createdAt: creationDate(of: file),
             sourceURL: file
         )
     }
@@ -323,7 +330,7 @@ enum AgentSessionScanner {
         return result
     }
 
-    private static let userMessageMarker = Data("user_message".utf8)
+    static let userMessageMarker = Data("user_message".utf8)
 
     static func codexRecord(file: URL, mtime: Date) -> AgentSessionRecord? {
         let lines = headLines(of: file)
@@ -367,11 +374,19 @@ enum AgentSessionScanner {
             title: cleanedTitle(title ?? ""),
             cwd: URL(fileURLWithPath: cwd),
             lastActivity: mtime,
+            createdAt: creationDate(of: file),
             sourceURL: file
         )
     }
 
     // MARK: Shared parsing helpers
+
+    /// The backing file's creation date, when the FS reports one. File-backed
+    /// stores are append-only JSONL, so creation date ≈ when the conversation
+    /// started — a stable `createdAt` the hover preview can show.
+    static func creationDate(of url: URL) -> Date? {
+        try? url.resourceValues(forKeys: [.creationDateKey]).creationDate
+    }
 
     /// Line slices from the file's first `headByteLimit` bytes, split on raw
     /// newlines — no String decode: JSONSerialization takes UTF-8 `Data`
@@ -443,6 +458,10 @@ final class AgentSessionHistory {
     private static let minSecondsBetweenScans: TimeInterval = 30
 
     private(set) var records: [AgentSessionRecord] = []
+    /// Full first-message text read on hover, keyed by record id — hover
+    /// re-entering a row must not re-read disk. Cleared with its record on
+    /// delete.
+    private(set) var firstMessageCache: [String: String] = [:]
     /// Agents present in `records`, cached at the write so the chips row
     /// doesn't rebuild the set per keystroke.
     private(set) var presentAgentIds: Set<String> = []
@@ -482,6 +501,17 @@ final class AgentSessionHistory {
         }
     }
 
+    /// Full first-message text for a hovered record, cached per id. The read
+    /// is off-main and bounded by the same head limit the scan uses.
+    func firstMessage(for record: AgentSessionRecord) async -> String? {
+        if let cached = firstMessageCache[record.id] { return cached }
+        let text = await Task.detached(priority: .userInitiated) {
+            AgentSessionScanner.firstMessageText(for: record)
+        }.value
+        if let text { firstMessageCache[record.id] = text }
+        return text
+    }
+
     /// Deletes the backing store entry off the main actor (SQLite I/O must
     /// never block UI), then removes the record from the cache only when the
     /// disk delete actually happened.
@@ -492,6 +522,7 @@ final class AgentSessionHistory {
         guard removed else { return false }
         refreshGeneration &+= 1
         records.removeAll { $0.id == record.id }
+        firstMessageCache.removeValue(forKey: record.id)
         presentAgentIds = Set(records.map(\.agentId))
         lastScanCompleted = Date()
         return true
@@ -586,6 +617,13 @@ struct SessionHistoryView: View {
     /// model's `isScanning`; this only stretches its tail.
     @State private var spinnerMinHold = false
     @State private var pendingDelete: AgentSessionRecord?
+    /// Hover-driven preview: which record is hovered, where (in the panel's
+    /// `sessionHistory` space), and its lazily-loaded first message. Rendered
+    /// as a panel-level overlay pinned left of the sidebar — deliberately not
+    /// a popover, whose direction the system flips by available space.
+    @State private var hoveredRecord: AgentSessionRecord?
+    @State private var hoverAnchor: CGPoint?
+    @State private var previewText: String?
     /// Cleared on the next successful resume, and by the banner's own ✕.
     /// `@State` is right despite this view being unmounted by the panel's
     /// mode cycle — a stale failure from before the user navigated away is
@@ -627,6 +665,15 @@ struct SessionHistoryView: View {
                                 }
                             } onDelete: {
                                 pendingDelete = record
+                            } onPreview: { record, anchor in
+                                if let record {
+                                    hoveredRecord = record
+                                    hoverAnchor = anchor
+                                } else {
+                                    hoveredRecord = nil
+                                    hoverAnchor = nil
+                                    previewText = nil
+                                }
                             }
                         }
                     }
@@ -634,6 +681,25 @@ struct SessionHistoryView: View {
                 }
             }
             Spacer(minLength: 0)
+        }
+        .coordinateSpace(name: "sessionHistory")
+        .overlay(alignment: .topLeading) {
+            GeometryReader { geo in
+                if let hoveredRecord, let hoverAnchor {
+                    HistoryPreviewCard(record: hoveredRecord, text: previewText)
+                        .position(
+                            x: -HistoryPreviewCard.cardWidth / 2,
+                            y: min(max(hoverAnchor.y, 200), max(200, geo.size.height - 200))
+                        )
+                        .allowsHitTesting(false)
+                        .zIndex(100)
+                }
+            }
+            .allowsHitTesting(false)
+        }
+        .task(id: hoveredRecord?.id) {
+            guard let hoveredRecord else { return }
+            previewText = await history.firstMessage(for: hoveredRecord)
         }
         .sheet(item: $pendingDelete) { record in
             ConfirmDeleteSessionSheet(
@@ -643,6 +709,125 @@ struct SessionHistoryView: View {
             )
         }
         .onAppear { history.refresh() }
+    }
+
+    /// The hover preview card: agent/age header, the full first user message
+    /// (loaded on demand), then title/location + created/active. Drawn as a
+    /// panel overlay pinned left of the row. `history` caches the read so
+    /// re-hovering the row costs no disk I/O.
+    ///
+    /// Height adapts to content: a `ScrollView` alone never contracts to its
+    /// content under a position/overlay proposal, so the card measures the
+    /// message's rendered height via preference and only switches to the
+    /// bounded scroller when it exceeds `maxMessageHeight`.
+    private struct HistoryPreviewCard: View {
+        let record: AgentSessionRecord
+        let text: String?
+        /// Fixed card width; the overlay anchors it by its left edge.
+        static let cardWidth: CGFloat = 460
+        /// Message cap before the card switches from inline text to a scroller.
+        static let maxMessageHeight: CGFloat = 320
+
+        @State private var messageHeight: CGFloat = 0
+
+        private var template: AgentTemplate? { AgentTemplate.builtin(id: record.agentId) }
+        private var overflows: Bool { messageHeight > Self.maxMessageHeight }
+        /// The user's terminal font-size drives the preview body — a long
+        /// first message is the one place preview text should match the
+        /// chosen reading size, not the compact chrome tokens.
+        private var bodyFontSize: CGFloat {
+            CGFloat(KookySettingsModel.shared.fontSize ?? 13)
+        }
+
+        var body: some View {
+            VStack(alignment: .leading, spacing: 8) {
+                header
+                if let text {
+                    if overflows {
+                        ScrollView {
+                            messageText(text)
+                                .padding(.vertical, 2)
+                        }
+                        .frame(height: Self.maxMessageHeight)
+                    } else {
+                        messageText(text)
+                            .padding(.vertical, 2)
+                    }
+                    footer
+                } else {
+                    ProgressView()
+                        .progressViewStyle(.circular)
+                        .controlSize(.small)
+                        .scaleEffect(0.6)
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 60)
+                }
+            }
+            .padding(12)
+            .frame(width: Self.cardWidth, alignment: .leading)
+            .onPreferenceChange(MessageHeightPreferenceKey.self) { messageHeight = $0 }
+            // Match the sidebar's own surface so the preview reads as part
+            // of the chrome, not a detached system panel.
+            .background(Theme.glassEnabled ? Theme.glassPanelTint : Theme.chromeBackground)
+            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(Theme.chromeSeparator, lineWidth: 1))
+            .shadow(color: .black.opacity(0.25), radius: 12, y: 4)
+        }
+
+        private var header: some View {
+            HStack(spacing: 6) {
+                AgentIconView(asset: template?.iconAsset, fallbackSymbol: template?.symbol ?? "sparkles", size: 14)
+                Text(singleLine(template?.title ?? record.agentId))
+                    .font(Theme.mono(11, weight: .semibold))
+                    .foregroundStyle(Theme.chromeForeground)
+                    .lineLimit(1)
+                Spacer(minLength: 4)
+                Text(relativeActivityLabel(record.lastActivity))
+                    .font(Theme.mono(10))
+                    .foregroundStyle(Theme.chromeMuted)
+            }
+        }
+
+        private var footer: some View {
+            VStack(alignment: .leading, spacing: 3) {
+                Text("\(singleLine(record.title.isEmpty ? String(localized: "untitled", bundle: .kookyResources) : record.title)) · \(singleLine((record.cwd.path as NSString).abbreviatingWithTildeInPath))")
+                    .font(Theme.mono(11))
+                    .foregroundStyle(Theme.chromeMuted)
+                    .lineLimit(1)
+                if let createdAt = record.createdAt {
+                    Text(String.localizedStringWithFormat(
+                        String(localized: "created %@ · active %@", bundle: .kookyResources),
+                        relativeActivityLabel(createdAt),
+                        relativeActivityLabel(record.lastActivity)
+                    ))
+                    .font(Theme.mono(10))
+                    .foregroundStyle(Theme.chromeMuted.opacity(0.75))
+                    .lineLimit(1)
+                }
+            }
+        }
+
+        private func messageText(_ text: String) -> some View {
+            Text(text)
+                .font(Theme.mono(bodyFontSize))
+                .foregroundStyle(Theme.chromeForeground)
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(
+                    GeometryReader { geo in
+                        Color.clear.preference(key: MessageHeightPreferenceKey.self, value: geo.size.height)
+                    }
+                )
+        }
+    }
+
+    /// Height of the first-message text, reported so short content can
+    /// shrink the card (a ScrollView alone never contracts to its content).
+    private struct MessageHeightPreferenceKey: PreferenceKey {
+        static let defaultValue: CGFloat = 0
+        static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+            value = max(value, nextValue())
+        }
     }
 
     /// A refused resume is a configuration problem (launch options that
@@ -810,14 +995,25 @@ private struct SessionHistoryRow: View {
     let record: AgentSessionRecord
     let onResume: () -> Void
     let onDelete: () -> Void
+    /// Reports hover enter/leave with the row's centre in the panel's
+    /// `sessionHistory` coordinate space, so the panel-level preview floats
+    /// left of the row without relying on a popover's direction heuristics.
+    let onPreview: (AgentSessionRecord?, CGPoint) -> Void
     private let template: AgentTemplate?
 
     @State private var isHovered = false
+    @State private var rowFrameInPanel: CGRect = .zero
 
-    init(record: AgentSessionRecord, onResume: @escaping () -> Void, onDelete: @escaping () -> Void) {
+    init(
+        record: AgentSessionRecord,
+        onResume: @escaping () -> Void,
+        onDelete: @escaping () -> Void,
+        onPreview: @escaping (AgentSessionRecord?, CGPoint) -> Void
+    ) {
         self.record = record
         self.onResume = onResume
         self.onDelete = onDelete
+        self.onPreview = onPreview
         self.template = AgentTemplate.builtin(id: record.agentId)
     }
 
@@ -859,14 +1055,24 @@ private struct SessionHistoryRow: View {
         .hoverableRowBackground(isHovered: isHovered)
         .contentShape(Rectangle())
         .onTapGesture(perform: onResume)
-        .onHover { isHovered = $0 }
-        .help(hoverText)
-    }
-
-    private var hoverText: String {
-        let name = singleLine(template?.title ?? record.agentId)
-        let title = singleLine(record.title.isEmpty ? String(localized: "untitled", bundle: .kookyResources) : record.title)
-        let location = singleLine((record.cwd.path as NSString).abbreviatingWithTildeInPath)
-        return "\(name) · \(relativeActivityLabel(record.lastActivity))\n\(title)\n\(location)"
+        .onHover { hovering in
+            isHovered = hovering
+            onPreview(
+                hovering ? record : nil,
+                hovering ? CGPoint(x: rowFrameInPanel.midX, y: rowFrameInPanel.midY) : .zero
+            )
+        }
+        // Keep the row's frame in the panel coordinate space current so the
+        // hover report can anchor the preview to the right vertical position
+        // even after scrolling.
+        .background(
+            GeometryReader { geo in
+                Color.clear
+                    .onAppear { rowFrameInPanel = geo.frame(in: .named("sessionHistory")) }
+                    .onChange(of: geo.frame(in: .named("sessionHistory"))) { _, frame in
+                        rowFrameInPanel = frame
+                    }
+            }
+        )
     }
 }

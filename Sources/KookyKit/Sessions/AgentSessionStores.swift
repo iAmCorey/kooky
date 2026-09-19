@@ -72,6 +72,7 @@ extension AgentSessionScanner {
             title: cleanedTitle(renamedTitle ?? headerTitle ?? firstUserText ?? ""),
             cwd: URL(fileURLWithPath: cwd),
             lastActivity: mtime,
+            createdAt: creationDate(of: file),
             sourceURL: file
         )
     }
@@ -117,6 +118,7 @@ extension AgentSessionScanner {
                 title: cleanedTitle(title),
                 cwd: URL(fileURLWithPath: entry.cwd),
                 lastActivity: mtime,
+                createdAt: creationDate(of: entry.stateURL.deletingLastPathComponent()),
                 sourceURL: entry.stateURL.deletingLastPathComponent()
             )
         }
@@ -207,6 +209,9 @@ extension AgentSessionScanner {
                 title: cleanedTitle(title),
                 cwd: URL(fileURLWithPath: cwd),
                 lastActivity: mtime,
+                // summary.json is rewritten as the session progresses, so use the
+                // session dir's creation date for "when it started".
+                createdAt: creationDate(of: file.deletingLastPathComponent()),
                 sourceURL: file.deletingLastPathComponent()
             )
         }
@@ -305,6 +310,9 @@ extension AgentSessionScanner {
                 title: cleanedTitle(fields["name"] ?? ""),
                 cwd: URL(fileURLWithPath: cwd),
                 lastActivity: mtime,
+                // workspace.yaml is rewritten, so the session dir's creation
+                // date stands in for "when the conversation started".
+                createdAt: creationDate(of: file.deletingLastPathComponent()),
                 sourceURL: file.deletingLastPathComponent()
             )
         }
@@ -330,7 +338,7 @@ extension AgentSessionScanner {
         SELECT key, conversation_id, \
         COALESCE(json_extract(value, '$.latest_summary'), \
                  json_extract(value, '$.history[0].user.content.Prompt.prompt'), '') , \
-        updated_at FROM conversations_v2 ORDER BY updated_at DESC LIMIT \(perAgentCap)
+        updated_at, created_at FROM conversations_v2 ORDER BY updated_at DESC LIMIT \(perAgentCap)
         """
         var statement: OpaquePointer?
         guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK, let statement else {
@@ -347,12 +355,14 @@ extension AgentSessionScanner {
             guard !cwd.isEmpty, !id.isEmpty else { continue }
             let title = sqlite3_column_text(statement, 2).map { String(cString: $0) } ?? ""
             let updatedMs = sqlite3_column_int64(statement, 3)
+            let createdMs = sqlite3_column_int64(statement, 4)
             records.append(AgentSessionRecord(
                 agentId: AgentTemplate.kiro.id,
                 conversationId: id,
                 title: cleanedTitle(displayableUserText(title) ?? ""),
                 cwd: URL(fileURLWithPath: cwd),
                 lastActivity: Date(timeIntervalSince1970: TimeInterval(updatedMs) / 1000),
+                createdAt: createdMs > 0 ? Date(timeIntervalSince1970: TimeInterval(createdMs) / 1000) : nil,
                 sourceURL: root
             ))
         }
@@ -441,6 +451,7 @@ extension AgentSessionScanner {
             title: cleanedTitle(summary ?? firstUserText ?? ""),
             cwd: URL(fileURLWithPath: cwd),
             lastActivity: mtime,
+            createdAt: creationDate(of: file),
             sourceURL: file
         )
     }
@@ -517,6 +528,7 @@ extension AgentSessionScanner {
             title: cleanedTitle(title),
             cwd: URL(fileURLWithPath: cwd),
             lastActivity: mtime,
+            createdAt: creationDate(of: file),
             sourceURL: file
         )
     }
@@ -567,6 +579,7 @@ extension AgentSessionScanner {
             title: cleanedTitle(title ?? ""),
             cwd: URL(fileURLWithPath: cwd),
             lastActivity: mtime,
+            createdAt: creationDate(of: file),
             sourceURL: file
         )
     }
@@ -775,5 +788,166 @@ extension AgentSessionScanner {
         sqlite3_bind_text(statement, 1, id, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self))
         if let secondValue { sqlite3_bind_text(statement, 2, secondValue, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self)) }
         return sqlite3_step(statement) == SQLITE_DONE
+    }
+
+    // MARK: On-demand first-message text (history hover)
+
+    /// Full (untruncated, multi-line) text of a conversation's first user
+    /// message, read only when the History row is hovered — never during a
+    /// scan. `record.sourceURL` locates the backing store per agent; agents
+    /// whose first-message format isn't cheaply recoverable (OpenCode,
+    /// Cursor, Kimi, Droid) return nil so the hover falls back to the title.
+    static func firstMessageText(for record: AgentSessionRecord) -> String? {
+        switch record.agentId {
+        case AgentTemplate.claudeCodeID:
+            return claudeFirstUserText(of: record.sourceURL)
+        case AgentTemplate.codex.id:
+            return codexFirstUserText(of: record.sourceURL)
+        case AgentTemplate.pi.id, AgentTemplate.ohMyPi.id:
+            return piStyleFirstUserText(of: record.sourceURL)
+        case AgentTemplate.gemini.id:
+            return geminiFirstUserText(of: record.sourceURL)
+        case AgentTemplate.grok.id:
+            return grokFirstUserText(in: record.sourceURL)
+        case AgentTemplate.reasonix.id:
+            return reasonixFirstUserText(of: record.sourceURL)
+        case AgentTemplate.copilot.id:
+            return copilotFirstPrompt(of: record.sourceURL)
+        case AgentTemplate.kiro.id:
+            return kiroFirstPrompt(root: record.sourceURL, conversationId: record.conversationId, cwd: record.cwd.path)
+        default:
+            return nil
+        }
+    }
+
+    /// Claude: first non-sidechain `user` line's text block. Mirrors the
+    /// `claudeRecord` extraction minus the title truncation/flattening. A
+    /// sidechain line is skipped, not terminal — a real user ask may follow
+    /// (unlike the record build, where sidechain means "drop the file").
+    private static func claudeFirstUserText(of file: URL) -> String? {
+        for line in headLines(of: file) {
+            guard let object = jsonObject(line), object["type"] as? String == "user" else { continue }
+            if object["isSidechain"] as? Bool == true { continue }
+            guard let message = object["message"] as? [String: Any] else { continue }
+            if let text = displayableUserText(messageContent(message["content"])) { return text }
+        }
+        return nil
+    }
+
+    /// Codex: first `user_message` event's text.
+    private static func codexFirstUserText(of file: URL) -> String? {
+        for line in headLines(of: file).dropFirst() {
+            guard line.range(of: userMessageMarker) != nil, let object = jsonObject(line) else { continue }
+            guard object["type"] as? String == "event_msg",
+                  let payload = object["payload"] as? [String: Any],
+                  payload["type"] as? String == "user_message"
+            else { continue }
+            return displayableUserText(payload["message"] as? String)
+        }
+        return nil
+    }
+
+    /// Pi / OhMyPi: first `role == user` message.
+    private static func piStyleFirstUserText(of file: URL) -> String? {
+        for line in headLines(of: file) {
+            guard let object = jsonObject(line), object["type"] as? String == "message",
+                  let message = object["message"] as? [String: Any],
+                  message["role"] as? String == "user"
+            else { continue }
+            if let text = displayableUserText(messageContent(message["content"])) { return text }
+        }
+        return nil
+    }
+
+    /// Gemini: first user message across `$set.messages` snapshots.
+    private static func geminiFirstUserText(of file: URL) -> String? {
+        for line in headLines(of: file) {
+            guard let object = jsonObject(line),
+                  let set = object["$set"] as? [String: Any],
+                  let messages = set["messages"] as? [[String: Any]]
+            else { continue }
+            for message in messages where message["type"] as? String == "user" {
+                let text = (message["content"] as? [[String: Any]])?
+                    .compactMap { $0["text"] as? String }
+                    .first
+                if let usable = displayableUserText(text) { return usable }
+            }
+        }
+        return nil
+    }
+
+    /// Grok: first `user` line of the sibling chat_history.jsonl, unwrapping
+    /// the `<user_query>` wrapper like the scan fallback does.
+    private static func grokFirstUserText(in sessionDir: URL) -> String? {
+        let history = sessionDir.appendingPathComponent("chat_history.jsonl")
+        for line in headLines(of: history) {
+            guard let entry = jsonObject(line), entry["type"] as? String == "user" else { continue }
+            let text = messageContent(entry["content"])
+            if let usable = displayableUserText(grokUserQuery(in: text) ?? text) { return usable }
+        }
+        return nil
+    }
+
+    /// Reasonix: `.meta` sidecar's `preview` — already the first real user
+    /// prompt with synthetic blocks filtered.
+    private static func reasonixFirstUserText(of file: URL) -> String? {
+        let meta = file.appendingPathExtension("meta")
+        guard let data = try? Data(contentsOf: meta),
+              let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              let preview = object["preview"] as? String
+        else { return nil }
+        return displayableUserText(preview)
+    }
+
+    /// Copilot: `name` in workspace.yaml. The scan keeps only the block
+    /// scalar's FIRST line for the title; hover wants the whole prompt, so
+    /// re-read the `name` block across all its indented lines.
+    private static func copilotFirstPrompt(of sessionDir: URL) -> String? {
+        let file = sessionDir.appendingPathComponent("workspace.yaml")
+        guard let data = try? Data(contentsOf: file) else { return nil }
+        var collecting = false
+        var blockLines: [String] = []
+        for line in String(decoding: data, as: UTF8.self).split(separator: "\n") {
+            if line.first == " " || line.first == "\t" {
+                if collecting { blockLines.append(String(line)) }
+                continue
+            }
+            collecting = false
+            guard let separator = line.range(of: ": ") else { continue }
+            let key = line[..<separator.lowerBound].trimmingCharacters(in: .whitespaces)
+            if key == "name" {
+                let value = line[separator.upperBound...]
+                    .trimmingCharacters(in: .whitespaces)
+                    .trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
+                if value.hasPrefix("|") || value.hasPrefix(">") {
+                    collecting = true
+                } else if !value.isEmpty {
+                    return displayableUserText(String(value))
+                }
+            }
+        }
+        guard !blockLines.isEmpty else { return nil }
+        return displayableUserText(blockLines.map { $0.trimmingCharacters(in: .whitespaces) }.joined(separator: "\n"))
+    }
+
+    /// Kiro: the first user prompt read whole out of the blob via
+    /// json_extract — same column the scan uses, without the title cap.
+    private static func kiroFirstPrompt(root: URL, conversationId: String, cwd: String) -> String? {
+        var db: OpaquePointer?
+        guard sqlite3_open_v2(root.path, &db, SQLITE_OPEN_READONLY, nil) == SQLITE_OK, let db else {
+            sqlite3_close(db)
+            return nil
+        }
+        defer { sqlite3_close(db) }
+        let sql = "SELECT json_extract(value, '$.history[0].user.content.Prompt.prompt') FROM conversations_v2 WHERE conversation_id = ? AND key = ?"
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK, let statement else { return nil }
+        defer { sqlite3_finalize(statement) }
+        sqlite3_bind_text(statement, 1, conversationId, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self))
+        sqlite3_bind_text(statement, 2, cwd, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self))
+        guard sqlite3_step(statement) == SQLITE_ROW,
+              let text = sqlite3_column_text(statement, 0)
+        else { return nil }
+        return displayableUserText(String(cString: text))
     }
 }

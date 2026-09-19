@@ -551,6 +551,154 @@ final class AgentSessionScannerTests: XCTestCase {
 
     // MARK: Relative time label
 
+    // MARK: On-demand first message (history hover)
+
+    private func record(
+        agentId: String,
+        id: String = UUID().uuidString,
+        cwd: String = "/tmp/proj",
+        sourceURL: URL
+    ) -> AgentSessionRecord {
+        AgentSessionRecord(
+            agentId: agentId,
+            conversationId: id,
+            title: "",
+            cwd: URL(fileURLWithPath: cwd),
+            lastActivity: Date(),
+            sourceURL: sourceURL
+        )
+    }
+
+    func testFirstMessageClaudeKeepsFullMultilineText() throws {
+        let dir = claudeRoot.appendingPathComponent("-tmp-proj")
+        let file = try writeFile("\(UUID().uuidString).jsonl", in: dir, lines: [
+            #"{"type":"user","cwd":"/tmp/proj","message":{"role":"user","content":"line one\nline two\nline three"}}"#,
+            #"{"type":"assistant","message":{"role":"assistant","content":"reply"}}"#,
+        ])
+        let rec = record(agentId: AgentTemplate.claudeCodeID, sourceURL: file)
+        XCTAssertEqual(
+            AgentSessionScanner.firstMessageText(for: rec),
+            "line one\nline two\nline three"
+        )
+    }
+
+    func testFirstMessageClaudeSkipsSidechainAndInjection() throws {
+        let dir = claudeRoot.appendingPathComponent("-tmp-proj")
+        let file = try writeFile("\(UUID().uuidString).jsonl", in: dir, lines: [
+            #"{"type":"user","isSidechain":true,"cwd":"/tmp/proj","message":{"role":"user","content":"sub work"}}"#,
+            #"{"type":"user","cwd":"/tmp/proj","message":{"role":"user","content":"<system-reminder>inject"}}"#,
+            #"{"type":"user","cwd":"/tmp/proj","message":{"role":"user","content":"real ask"}}"#,
+        ])
+        let rec = record(agentId: AgentTemplate.claudeCodeID, sourceURL: file)
+        XCTAssertEqual(AgentSessionScanner.firstMessageText(for: rec), "real ask")
+    }
+
+    func testFirstMessageCodexReadsUserMessageEvent() throws {
+        let dir = codexRoot.appendingPathComponent("2026/07/01")
+        let file = try writeFile("rollout-x.jsonl", in: dir, lines: [
+            #"{"type":"session_meta","payload":{"id":"thread-9","cwd":"/tmp/proj"}}"#,
+            #"{"type":"event_msg","payload":{"type":"user_message","message":"first ask"}}"#,
+        ])
+        let rec = record(agentId: AgentTemplate.codex.id, sourceURL: file)
+        XCTAssertEqual(AgentSessionScanner.firstMessageText(for: rec), "first ask")
+    }
+
+    func testFirstMessagePiKeepsFullMultiline() throws {
+        let dir = tempDir.appendingPathComponent("pi/--tmp-proj--")
+        let file = try writeFile("s.jsonl", in: dir, lines: [
+            #"{"type":"session","id":"pi-1","cwd":"/tmp/proj"}"#,
+            #"{"type":"message","message":{"role":"user","content":"multi\nline ask"}}"#,
+        ])
+        let rec = record(agentId: AgentTemplate.pi.id, sourceURL: file)
+        XCTAssertEqual(AgentSessionScanner.firstMessageText(for: rec), "multi\nline ask")
+    }
+
+    func testFirstMessageGeminiReadsSetMessages() throws {
+        let root = tempDir.appendingPathComponent("gemini")
+        let file = try writeFile("session-x.jsonl", in: root, lines: [
+            #"{"sessionId":"g-1","kind":"main"}"#,
+            #"{"$set":{"messages":[{"type":"user","content":[{"text":"gemini ask"}]}]}}"#,
+        ])
+        let rec = record(agentId: AgentTemplate.gemini.id, sourceURL: file)
+        XCTAssertEqual(AgentSessionScanner.firstMessageText(for: rec), "gemini ask")
+    }
+
+    func testFirstMessageGrokUnwrapsUserQuery() throws {
+        let root = tempDir.appendingPathComponent("grok")
+        let session = root.appendingPathComponent("p/sess")
+        try writeFile("chat_history.jsonl", in: session, lines: [
+            #"{"type":"user","content":[{"type":"text","text":"<user_info>ctx</user_info><user_query>grok ask</user_query>"}]}"#,
+        ])
+        let rec = record(agentId: AgentTemplate.grok.id, sourceURL: session)
+        XCTAssertEqual(AgentSessionScanner.firstMessageText(for: rec), "grok ask")
+    }
+
+    func testFirstMessageReasonixReadsPreview() throws {
+        let root = tempDir.appendingPathComponent("reasonix")
+        let sessions = root.appendingPathComponent("-p/sessions")
+        let file = try writeFile("a-gpt.jsonl", in: sessions, lines: ["{}"])
+        try writeFile("a-gpt.jsonl.meta", in: sessions, lines: [
+            #"{"schema_version":1,"workspace_root":"/tmp/proj","preview":"reasonix\nask","turns":2}"#,
+        ])
+        let rec = record(agentId: AgentTemplate.reasonix.id, sourceURL: file)
+        XCTAssertEqual(AgentSessionScanner.firstMessageText(for: rec), "reasonix\nask")
+    }
+
+    func testFirstMessageCopilotReadsWholeNameBlock() throws {
+        let root = tempDir.appendingPathComponent("copilot")
+        let session = root.appendingPathComponent("cop-1")
+        try writeFile("workspace.yaml", in: session, lines: [
+            "id: cop-1",
+            "name: |-",
+            "  first line",
+            "  second line",
+            "cwd: /tmp/proj",
+        ])
+        let rec = record(agentId: AgentTemplate.copilot.id, sourceURL: session)
+        XCTAssertEqual(AgentSessionScanner.firstMessageText(for: rec), "first line\nsecond line")
+    }
+
+    func testFirstMessageKiroReadsPromptWhole() throws {
+        let dbURL = tempDir.appendingPathComponent("kiro.sqlite3")
+        var db: OpaquePointer?
+        XCTAssertEqual(sqlite3_open(dbURL.path, &db), SQLITE_OK)
+        defer { sqlite3_close(db) }
+        let setup = """
+        CREATE TABLE conversations_v2 (key TEXT, conversation_id TEXT, value TEXT, created_at INTEGER, updated_at INTEGER, PRIMARY KEY (key, conversation_id));
+        """
+        XCTAssertEqual(sqlite3_exec(db, setup, nil, nil, nil), SQLITE_OK)
+        let blob = #"{"history":[{"user":{"content":{"Prompt":{"prompt":"kiro\nask"}}}}]}"#
+        var stmt: OpaquePointer?
+        XCTAssertEqual(
+            sqlite3_prepare_v2(db, "INSERT INTO conversations_v2 (key, conversation_id, value, updated_at) VALUES (?, ?, ?, ?)", -1, &stmt, nil),
+            SQLITE_OK
+        )
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_text(stmt, 1, "/tmp/proj", -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self))
+        sqlite3_bind_text(stmt, 2, "kiro-1", -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self))
+        sqlite3_bind_text(stmt, 3, blob, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self))
+        sqlite3_bind_int64(stmt, 4, 1_000)
+        XCTAssertEqual(sqlite3_step(stmt), SQLITE_DONE)
+        let rec = record(agentId: AgentTemplate.kiro.id, id: "kiro-1", cwd: "/tmp/proj", sourceURL: dbURL)
+        XCTAssertEqual(AgentSessionScanner.firstMessageText(for: rec), "kiro\nask")
+    }
+
+    func testFirstMessageFallsBackToNilForUnmappedAgents() throws {
+        let rec = record(agentId: AgentTemplate.opencode.id, sourceURL: tempDir)
+        XCTAssertNil(AgentSessionScanner.firstMessageText(for: rec))
+    }
+
+    func testFileBackedRecordCapturesCreationDate() throws {
+        let dir = claudeRoot.appendingPathComponent("-tmp-proj")
+        try writeFile("\(UUID().uuidString).jsonl", in: dir, lines: [claudeUserLine(text: "hello")])
+        let record = try XCTUnwrap(
+            scanIsolated([AgentTemplate.claudeCodeID: claudeRoot])
+                .first { $0.agentId == AgentTemplate.claudeCodeID }
+        )
+        let createdAt = try XCTUnwrap(record.createdAt)
+        XCTAssertLessThanOrEqual(createdAt, Date())
+    }
+
     func testRelativeActivityLabelTiers() {
         let now = Date()
         let bundle = KookyAppLanguage.english.previewBundle
@@ -942,6 +1090,42 @@ final class AgentSessionResumeTests: XCTestCase {
     }
 
     // MARK: Model-layer delete cache sync
+
+    func testFirstMessageIsCachedAndClearedOnDelete() async throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("kooky-hover-cache-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let project = dir.appendingPathComponent("proj")
+        func makeRecord(_ id: String) throws -> AgentSessionRecord {
+            let file = try SessionStoreFixtures.writeFile("\(UUID().uuidString).jsonl", in: project, lines: [
+                #"{"type":"user","cwd":"/tmp/proj","message":{"role":"user","content":"cached ask"}}"#,
+            ])
+            return AgentSessionRecord(
+                agentId: AgentTemplate.claudeCodeID,
+                conversationId: id,
+                title: "cached ask",
+                cwd: URL(fileURLWithPath: "/tmp/proj"),
+                lastActivity: Date(),
+                sourceURL: file
+            )
+        }
+        let history = AgentSessionHistory(records: [])
+        // Read 1 goes to disk; deleting the file proves read 2 is cached.
+        let cachedRecord = try makeRecord("cached-1")
+        let first = await history.firstMessage(for: cachedRecord)
+        XCTAssertEqual(first, "cached ask")
+        try FileManager.default.removeItem(at: cachedRecord.sourceURL)
+        let cached = await history.firstMessage(for: cachedRecord)
+        XCTAssertEqual(cached, "cached ask", "second read must hit the cache, not disk")
+        // A record whose file still exists: delete clears its cached preview.
+        let doomed = try makeRecord("cached-2")
+        _ = await history.firstMessage(for: doomed)
+        let deleted = await history.delete(doomed)
+        XCTAssertTrue(deleted)
+        XCTAssertNil(history.firstMessageCache[doomed.id], "delete must drop the cached preview")
+        XCTAssertEqual(history.firstMessageCache[cachedRecord.id], "cached ask",
+                       "other records' previews survive a sibling delete")
+    }
 
     func testModelDeleteRemovesRecordFromCacheOnlyOnSuccess() async throws {
         // Disk delete succeeded → the record leaves the cache immediately.
