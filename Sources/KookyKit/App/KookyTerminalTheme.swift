@@ -68,21 +68,25 @@ struct KookyTerminalTheme: Identifiable, Hashable {
         }
     }
 
-    private static func parseBundledTheme(_ text: String, id: String) -> KookyTerminalTheme? {
+    static func parseBundledTheme(_ text: String, id: String) -> KookyTerminalTheme? {
         let values = parseGhosttyConfigLines(text)
-        let palette = text.split(whereSeparator: \.isNewline).compactMap { rawLine -> String? in
+        var paletteByIndex: [Int: String] = [:]
+        for rawLine in text.split(whereSeparator: \.isNewline) {
             let line = rawLine.trimmingCharacters(in: .whitespaces)
-            guard let equals = line.firstIndex(of: "=") else { return nil }
+            guard let equals = line.firstIndex(of: "=") else { continue }
             let key = line[..<equals].trimmingCharacters(in: .whitespaces)
-            guard key == "palette" else { return nil }
+            guard key == "palette" else { continue }
             let rawColor = line[line.index(after: equals)...]
                 .trimmingCharacters(in: .whitespaces)
-            guard let separator = rawColor.firstIndex(of: "=") else { return nil }
-            return unwrapQuotes(
+            guard let separator = rawColor.firstIndex(of: "="),
+                  let index = Int(rawColor[..<separator].trimmingCharacters(in: .whitespaces)),
+                  (0..<16).contains(index) else { return nil }
+            paletteByIndex[index] = unwrapQuotes(
                 String(rawColor[rawColor.index(after: separator)...])
                     .trimmingCharacters(in: .whitespaces)
             )
         }
+        let palette = (0..<16).compactMap { paletteByIndex[$0] }
         let firstLine = text.split(whereSeparator: \.isNewline).first.map(String.init) ?? ""
         let titlePrefix = "# Kooky theme:"
         let title = firstLine.trimmingCharacters(in: .whitespaces).hasPrefix(titlePrefix)

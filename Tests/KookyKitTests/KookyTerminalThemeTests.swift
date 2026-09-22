@@ -3,6 +3,38 @@ import XCTest
 
 @MainActor
 final class KookyTerminalThemeTests: XCTestCase {
+    func testBundledThemePaletteKeepsIndicesWhenLinesAreReordered() throws {
+        let text = try bundledThemeText()
+        let lines = text.split(whereSeparator: \.isNewline).map(String.init)
+        let reordered = (
+            lines.filter { !$0.hasPrefix("palette = ") }
+                + lines.filter { $0.hasPrefix("palette = ") }.reversed()
+        ).joined(separator: "\n")
+        let theme = try XCTUnwrap(KookyTerminalTheme.parseBundledTheme(reordered, id: "one-dark"))
+
+        XCTAssertEqual(theme, KookyTerminalTheme.preset(for: "one-dark"))
+    }
+
+    func testBundledThemePaletteRejectsMissingIndexDespiteSixteenLines() throws {
+        let text = try bundledThemeText().replacingOccurrences(of: "palette = 15=", with: "palette = 0=")
+
+        XCTAssertNil(KookyTerminalTheme.parseBundledTheme(text, id: "one-dark"))
+    }
+
+    func testBundledThemePaletteUsesLastValueForRepeatedIndex() throws {
+        let text = try bundledThemeText() + "\npalette = 1=#010203\n"
+        let theme = try XCTUnwrap(KookyTerminalTheme.parseBundledTheme(text, id: "one-dark"))
+
+        XCTAssertTrue(theme.lines.contains("palette = 1=#010203"))
+        XCTAssertTrue(theme.lines.contains("palette = 0=#282C34"))
+        XCTAssertEqual(theme.lines.filter { $0.hasPrefix("palette = ") }.count, 16)
+    }
+
+    private func bundledThemeText() throws -> String {
+        let resource = try XCTUnwrap(Bundle.module.url(forResource: "one-dark", withExtension: nil))
+        return try String(contentsOf: resource, encoding: .utf8)
+    }
+
     func testBundledThemesLoadFromPackagedGhosttyThemeFiles() throws {
         XCTAssertEqual(KookyTerminalTheme.presets.count, 42)
         XCTAssertEqual(
