@@ -47,6 +47,11 @@ struct TerminalSessionConfig {
 protocol TerminalEngine: AnyObject {
     var view: NSView { get }
     func renderNowIfNeeded()
+    /// The owning window was ordered out (closed-but-alive) or brought back.
+    /// Off screen, an engine must stop presenting frames: the PTY keeps
+    /// running, only the GPU work stops. Default no-op for engines that
+    /// never render (tests).
+    func setOnScreen(_ onScreen: Bool)
     var backgroundColor: NSColor { get }
     /// Called when the engine observes a working-directory change (libghostty's
     /// `GHOSTTY_ACTION_PWD`, fired when the shell emits OSC 7). Lets the
@@ -168,4 +173,8 @@ protocol TerminalEngine: AnyObject {
     /// selection is active. Powers the right-click "Ask agent" path and
     /// the menu-bar Copy item — same surface, two callers.
     func readSelection() -> String?
+}
+
+extension TerminalEngine {
+    func setOnScreen(_ onScreen: Bool) {}
 }

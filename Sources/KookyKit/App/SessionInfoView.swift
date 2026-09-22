@@ -241,7 +241,9 @@ private struct SessionProcessesSection: View {
             // sample window, so changing it must not invalidate the section.
             var previousCPU: SessionProcessScanner.CPUSamples?
             while !Task.isCancelled {
-                if !store.collapsedInfoSections.contains(SessionInfoRules.processesTitle) {
+                // Off screen (window closed-but-alive) the sysctl/fd walk paints nothing.
+                if store.isOnScreen,
+                   !store.collapsedInfoSections.contains(SessionInfoRules.processesTitle) {
                     // The port walk can cost milliseconds on a connection-
                     // heavy child; keep every kernel query off the main actor.
                     let pid = session.engine.foregroundPid ?? 0

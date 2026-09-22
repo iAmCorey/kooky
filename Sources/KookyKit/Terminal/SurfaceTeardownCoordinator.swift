@@ -2,9 +2,9 @@ import Darwin
 import Foundation
 import GhosttyKit
 
-/// Starts process shutdown synchronously, then moves the blocking native free
-/// off the main actor. The native request retires the surface from app routing,
-/// so no surface API may be called after `enqueue`.
+/// Keeps terminal IO alive through foreground shutdown, then moves the blocking
+/// native free off the main actor. The caller must stop using the surface before
+/// `enqueue` and retain its callback host until native teardown finishes.
 final class SurfaceTeardownCoordinator: @unchecked Sendable {
     typealias NativeAction = @Sendable (UInt) -> Void
     typealias BeginForegroundTermination = @Sendable (pid_t, @escaping @Sendable () -> Void) -> Void
@@ -20,7 +20,7 @@ final class SurfaceTeardownCoordinator: @unchecked Sendable {
             guard let surface = UnsafeMutableRawPointer(bitPattern: bits) else { return }
             ghostty_surface_free(surface)
         },
-        beginForegroundTermination: ForegroundProcessGroupTerminator.begin,
+        beginForegroundTermination: { ForegroundProcessGroupTerminator.begin($0, completion: $1) },
         releaseHost: { bits in
             guard let pointer = UnsafeRawPointer(bitPattern: bits) else { return }
             Unmanaged<GhosttySurfaceView>.fromOpaque(pointer).release()
@@ -65,17 +65,25 @@ final class SurfaceTeardownCoordinator: @unchecked Sendable {
         pending[id] = Pending(components: components, retainedHostBits: retainedHostBits)
         lock.unlock()
 
-        // This must precede free-queue admission. If both free workers are
-        // blocked, a third closed tab still needs its process shutdown to begin.
-        requestTermination(surfaceBits)
-        if let foregroundProcessGroup {
-            beginForegroundTermination(foregroundProcessGroup) { [self] in
-                finish(id: id, component: .foregroundProcessGroup)
+        let startNativeTeardown: @Sendable () -> Void = { [self] in
+            requestTermination(surfaceBits)
+            freeQueue.addOperation { [self] in
+                freeSurface(surfaceBits)
+                finish(id: id, component: .nativeFree)
             }
         }
-        freeQueue.addOperation { [self] in
-            freeSurface(surfaceBits)
-            finish(id: id, component: .nativeFree)
+
+        // Keep the PTY and IO thread alive while the foreground program gets
+        // the terminal's normal SIGHUP notification and performs cleanup.
+        // Native teardown stops that IO thread, so it must start only after
+        // the foreground process group exits or the grace period escalates.
+        if let foregroundProcessGroup {
+            beginForegroundTermination(foregroundProcessGroup) { [self] in
+                startNativeTeardown()
+                finish(id: id, component: .foregroundProcessGroup)
+            }
+        } else {
+            startNativeTeardown()
         }
     }
 
@@ -139,12 +147,15 @@ final class SurfaceTeardownCoordinator: @unchecked Sendable {
     }
 }
 
-private enum ForegroundProcessGroupTerminator {
+enum ForegroundProcessGroupTerminator {
     private static let pollInterval = Duration.milliseconds(50)
-    private static let sighupGrace = Duration.seconds(12)
-    private static let sigkillGrace = Duration.seconds(3)
 
-    static func begin(_ processGroup: pid_t, completion: @escaping @Sendable () -> Void) {
+    static func begin(
+        _ processGroup: pid_t,
+        sighupGrace: Duration = .seconds(12),
+        sigkillGrace: Duration = .seconds(3),
+        completion: @escaping @Sendable () -> Void
+    ) {
         guard processGroup > 1, processGroup != getpgrp() else {
             completion()
             return
@@ -156,6 +167,8 @@ private enum ForegroundProcessGroupTerminator {
         }
 
         Task.detached(priority: .utility) {
+            // The bash launcher can die on SIGHUP while its agent is still
+            // saving state. Keep IO and the grace period for the whole group.
             if await waitUntilGone(processGroup, timeout: sighupGrace) {
                 completion()
                 return

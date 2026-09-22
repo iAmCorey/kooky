@@ -2,6 +2,14 @@
 
 Notable changes per release. Tagged commits use `vX.Y.Z` shortform.
 
+## Unreleased
+
+- Fixed: closing an agent tab or quitting kooky keeps terminal I/O available while the foreground processes finish their shutdown hooks and cleanup, avoiding unnecessary waits caused by stopping I/O first. Cleanup waits for the whole foreground process group, with a bounded grace period and forced termination for unresponsive processes. Thanks @kaijianding for the diagnosis and initial fix. (#76)
+
+## v0.51.10 — 2026-09-03
+
+- Changed: closing the last window no longer quits kooky. The window is hidden with its terminals and agents still running, the app stays in the Dock like Terminal and iTerm do, and clicking its icon brings the same window back exactly as you left it. ⌘Q still quits.
+
 ## v0.51.9 — 2026-09-03
 
 - New: windows come back where you left them. Each window's size and position is restored on the next launch; one whose display is gone lands centered on the main screen at its old size. A new window (⌘⇧N) takes the current window's size. Thanks @kaijianding for the draft implementation. (#75)
