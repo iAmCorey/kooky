@@ -1055,7 +1055,9 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
             self?.finishDeferredTermination()
         }
         terminationFallback = Task { @MainActor [weak self] in
-            try? await Task.sleep(for: .seconds(20))
+            // Foreground shutdown now precedes native shell shutdown; each
+            // can spend 12s on SIGHUP and 3s on SIGKILL before freeing.
+            try? await Task.sleep(for: .seconds(35))
             guard !Task.isCancelled else { return }
             self?.finishDeferredTermination()
         }
