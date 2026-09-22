@@ -63,6 +63,14 @@ final class TerminalKeyRoutingTests: XCTestCase {
         }
     }
 
+    func testRawShellControlInputPreservesUTF8AndNULTerminator() throws {
+        try withManualSurface { surface, output in
+            _ = output.takeString()
+            GhosttySurfaceView.writeInputBytes("git switch '中文'\0", to: surface)
+            XCTAssertEqual(output.takeString(), "git switch '中文'\0")
+        }
+    }
+
     // MARK: - Ctrl combos through the libghostty key encoder (issue #54)
 
     /// The `od -c` contract for Ctrl combos, end to end through the REAL

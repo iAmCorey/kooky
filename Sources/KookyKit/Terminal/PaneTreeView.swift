@@ -890,7 +890,7 @@ extension PopoverStatusSegment where Label == AnyView {
     }
 }
 
-/// A pill listing alternatives — click one to inject a shell command.
+/// A pill listing alternatives — runs commands without changing the shell's input buffer.
 /// Shared by the Node version switcher and the git branch switcher; new
 /// switchers (Python versions, mise tools, …) just instantiate with their
 /// own loader + formatter. Inventory becomes the presentation snapshot so
@@ -926,11 +926,11 @@ private struct SwitchableStatusSegment<Item: Hashable & Sendable>: View {
                     KookyMenuRow(
                         title: titleFor(item),
                         localizesTitle: false,
-                        isDisabled: current,
+                        isDisabled: current || !session.canRunShellCommand,
                         leading: { menuRowCheckmark(visible: current) }
                     ) {
                         dismiss()
-                        session.engine.sendInput(commandFor(item))
+                        if !session.runShellCommand(commandFor(item)) { NSSound.beep() }
                     }
                 }
             }

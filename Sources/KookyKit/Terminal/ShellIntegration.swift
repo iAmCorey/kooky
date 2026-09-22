@@ -2136,13 +2136,15 @@ enum KookyShellIntegration {
         _kooky_title_pwd() { printf '\\e]2;%s\\a' "$PWD"; }
         \(envStatusBlock)
 
+        \(ShellCommandIntegration.bash)
+
         # No command-line reporting here on purpose: bash gets no OSC 133 from
         # kooky (only the zsh and fish integrations emit it), so there is no
         # command RESULT for the text to label — it would cost a subshell plus
         # a hook spawn per prompt to feed a row that can never render. Giving
         # bash 133 is its own item: the `C` marker needs PS0, which stock
         # macOS bash 3.2 doesn't have, so it needs a version gate like fish's.
-        PROMPT_COMMAND="_kooky_title_pwd;_kooky_osc7_pwd;_kooky_env_status${PROMPT_COMMAND:+;$PROMPT_COMMAND}"
+        PROMPT_COMMAND="_kooky_title_pwd;_kooky_osc7_pwd;_kooky_env_status;_kooky_shell_control_available${PROMPT_COMMAND:+;$PROMPT_COMMAND}"
         _kooky_osc7_pwd
         _kooky_env_status
 
@@ -2244,6 +2246,8 @@ enum KookyShellIntegration {
 
         \(osc133Block)
 
+        \(ShellCommandIntegration.zsh)
+
         \(agentLaunchBlock)
         """
 
@@ -2313,6 +2317,8 @@ enum KookyShellIntegration {
     # reads as "terminate the shell" — fish happens to scope it to the snippet,
     # but `return` is the correct, version-robust way to bail).
     status is-interactive; or return
+
+    \(ShellCommandIntegration.fish)
 
     set -g __kooky_host (hostname 2>/dev/null)
 

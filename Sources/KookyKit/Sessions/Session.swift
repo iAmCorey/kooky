@@ -169,6 +169,47 @@ final class Session: Identifiable {
     /// other sensitive arguments and are never persisted.
     var lastCommandText: String?
 
+    var shellControlPID: pid_t?
+    private var shellCommandRunning = false
+    @ObservationIgnored private var pendingShellCommand: (payload: String, deadline: ContinuousClock.Instant)?
+
+    var canRunShellCommand: Bool {
+        guard let shellControlPID, effectiveRemoteHost == nil, !shellCommandRunning,
+              pendingShellCommand.map({ ContinuousClock.now >= $0.deadline }) ?? true else { return false }
+        return engine.foregroundPid == shellControlPID
+    }
+
+    @discardableResult
+    func runShellCommand(_ command: String, now: ContinuousClock.Instant = .now) -> Bool {
+        guard canRunShellCommand, let payload = ShellCommandIntegration.payload(for: command) else { return false }
+        pendingShellCommand = (payload, now + .seconds(1))
+        engine.sendInput(ShellCommandIntegration.keySequence)
+        return true
+    }
+
+    func consumeShellControlTitle(_ title: String, now: ContinuousClock.Instant = .now) -> Bool {
+        guard title.hasPrefix(ShellCommandIntegration.titlePrefix) else { return false }
+        guard let marker = ShellCommandIntegration.parseTitle(title) else { return true }
+        switch marker.event {
+        case .available:
+            if shellControlPID != marker.pid || shellCommandRunning { pendingShellCommand = nil }
+            shellControlPID = marker.pid
+            shellCommandRunning = false
+        case .ready:
+            guard marker.pid == shellControlPID, engine.foregroundPid == marker.pid,
+                  effectiveRemoteHost == nil, !shellCommandRunning else { return true }
+            let pending = pendingShellCommand
+            pendingShellCommand = nil
+            shellCommandRunning = true
+            // An unsolicited/late acknowledgment gets an empty frame, never
+            // command text. The deadline is shorter than the widget's read timeout.
+            engine.sendInput(pending.map { now < $0.deadline ? $0.payload : "\0" } ?? "\0")
+        case .finished:
+            if marker.pid == shellControlPID { shellCommandRunning = false }
+        }
+        return true
+    }
+
     /// The host this session's shell is on, when remote: the spawn-pinned
     /// SSH-workspace host, else the ssh wrapper's login-marker host. The one
     /// derivation for every surface that names a session's location (agent

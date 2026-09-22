@@ -29,7 +29,7 @@ final class TestEngine: TerminalEngine {
     var onSearchSelected: ((Int) -> Void)?
     var pasteUploadHostProvider: (() -> String?)?
     var isRemoteSessionProvider: (() -> Bool)?
-    var foregroundPid: pid_t? { nil }
+    var foregroundPid: pid_t?
 
     private(set) var startedConfigs: [TerminalSessionConfig] = []
     private(set) var terminateCount = 0

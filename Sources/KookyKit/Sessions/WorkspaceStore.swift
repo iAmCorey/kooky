@@ -2211,6 +2211,7 @@ final class WorkspaceStore {
         }
         engine.onTitleChange = { [weak self, weak session] title in
             guard let session else { return }
+            if session.consumeShellControlTitle(title) { return }
             // A `kooky-command:*` title is the preexec-reported command line,
             // not a visible title. Checked first: it's by far the most frequent
             // marker (one per command). Riding this stream rather than the

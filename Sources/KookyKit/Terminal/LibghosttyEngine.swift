@@ -1543,8 +1543,12 @@ final class GhosttySurfaceView: NSView {
         // rather than at each caller. Encoder-routed keys (`sendKey`) and
         // paste (`ghostty_surface_text`) fire it at their own sites.
         onUserInput?()
+        Self.writeInputBytes(bytes, to: surface)
+    }
+
+    nonisolated static func writeInputBytes(_ bytes: String, to surface: ghostty_surface_t) {
         bytes.withCString { cstr in
-            ghostty_surface_text_input(surface, cstr, UInt(strlen(cstr)))
+            ghostty_surface_text_input(surface, cstr, UInt(bytes.utf8.count))
         }
     }
 
