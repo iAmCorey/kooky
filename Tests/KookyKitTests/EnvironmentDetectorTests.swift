@@ -181,6 +181,23 @@ final class EnvironmentDetectorTests: XCTestCase {
 
     // MARK: - Proxy
 
+    func testProxyUnsetIsLimitedToKnownVariablesAndClearsBothCases() {
+        for name in ["https_proxy", "http_proxy", "all_proxy"] {
+            let expected = "_kooky_unset_proxy \(name) \(name.uppercased())"
+            XCTAssertEqual(ProxyInfo.unsetCommand(for: name), expected)
+            XCTAssertEqual(ProxyInfo.unsetCommand(for: name.uppercased()), expected)
+        }
+        for name in ["PATH", "", "http_proxy=value", "http_proxy; echo injected"] {
+            XCTAssertNil(ProxyInfo.unsetCommand(for: name))
+        }
+    }
+
+    func testNodeCommandKeepsShellSyntaxInsideOneArgument() {
+        XCTAssertEqual(NodeVersionInventory.shellUseCommand(version: "lts/*"), "nvm use 'lts/*'\r")
+        XCTAssertEqual(NodeVersionInventory.shellUseCommand(version: "v22; echo 'injected'"),
+                       "nvm use 'v22; echo '\\''injected'\\'''\r")
+    }
+
     func testProxyAbsentWhenAllVarsEmpty() {
         let env = EnvironmentDetector.extract(
             shellEnv: ["https_proxy": "", "http_proxy": "", "all_proxy": ""],

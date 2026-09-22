@@ -46,6 +46,19 @@ final class ShellCommandIntegrationTests: XCTestCase {
         XCTAssertTrue(engine.sentInputs.isEmpty)
     }
 
+    func testProxyUnsetUsesEditorHandshakeAndCannotReachForegroundApplications() throws {
+        let (session, engine) = fixture()
+        let command = try XCTUnwrap(ProxyInfo.unsetCommand(for: "https_proxy"))
+        engine.foregroundPid = 456
+        XCTAssertFalse(session.runShellCommand(command))
+        XCTAssertTrue(engine.sentInputs.isEmpty)
+        engine.foregroundPid = 123
+        XCTAssertTrue(session.runShellCommand(command))
+        XCTAssertEqual(engine.sentInputs, [ShellCommandIntegration.keySequence])
+        session.consumeShellControlTitle("kooky-shell-control:ready:123")
+        XCTAssertEqual(engine.sentInputs.last, "_kooky_unset_proxy https_proxy HTTPS_PROXY\0")
+    }
+
     func testUnknownShellDoesNotFallBackToTypingTheCommand() {
         let (session, engine) = fixture()
         session.shellControlPID = nil

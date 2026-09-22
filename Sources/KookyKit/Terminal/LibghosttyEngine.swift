@@ -1554,8 +1554,8 @@ final class GhosttySurfaceView: NSView {
 
     func sendInput(_ text: String) {
         guard let surface, !text.isEmpty else { return }
-        // Pill-injected commands (nvm use, git checkout, unset proxy) are the
-        // next command too; sendInputBytes fires onUserInput to clear the dot.
+        // Includes the shell-control handshake / payload and composer Return;
+        // sendInputBytes fires onUserInput to clear the old command's dot.
         sendInputBytes(text, to: surface)
     }
 

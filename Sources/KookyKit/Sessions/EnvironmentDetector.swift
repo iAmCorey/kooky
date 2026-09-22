@@ -33,6 +33,15 @@ struct ProjectEnvironment: Equatable {
 struct ProxyInfo: Equatable {
     let summary: String
     let entries: [String]
+
+    static let variableNames = ["https_proxy", "http_proxy", "all_proxy"]
+
+    /// The shell integration supplies the shell-specific implementation.
+    static func unsetCommand(for name: String) -> String? {
+        let name = name.lowercased()
+        guard variableNames.contains(name) else { return nil }
+        return "_kooky_unset_proxy \(name) \(name.uppercased())"
+    }
 }
 
 /// Extracts status-bar env from a shell env snapshot, then falls back to
@@ -62,8 +71,7 @@ enum EnvironmentDetector {
     /// the raw `name=value` for every non-empty var so the popover can show
     /// the full picture.
     private static func detectProxy(shellEnv: [String: String]) -> ProxyInfo? {
-        let names = ["https_proxy", "http_proxy", "all_proxy"]
-        let pairs = names.compactMap { name -> (name: String, value: String)? in
+        let pairs = ProxyInfo.variableNames.compactMap { name -> (name: String, value: String)? in
             guard let value = normalizedNonEmpty(shellEnv[name]) else { return nil }
             return (name, value)
         }
@@ -226,11 +234,10 @@ enum NodeVersionInventory {
         }
     }
 
-    /// Shell command injected when the user picks a version from the popover.
-    /// `\r` is the carriage return a real keyboard sends to a PTY in cooked
-    /// mode — `\n` would skip zsh's ZLE accept-line under default `stty`.
+    /// Executed through the shell editor bridge, with the version kept as one
+    /// literal argument even when an installed directory contains shell syntax.
     static func shellUseCommand(version: String) -> String {
-        "nvm use \(version)\r"
+        "nvm use \(KookyShellIntegration.quote(version))\r"
     }
 
     private static func normalizedNvmDirectory(_ nvmDirectory: String?) -> String {

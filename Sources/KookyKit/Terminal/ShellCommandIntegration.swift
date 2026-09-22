@@ -25,6 +25,7 @@ enum ShellCommandIntegration {
     // The widgets run in that shell, so nvm's environment changes survive
     // without accepting or replacing the user's editing buffer.
     static let zsh = #"""
+    _kooky_unset_proxy() { unset "$@"; }
     _kooky_shell_control_available() { printf '\e]2;kooky-shell-control:available:%s\a' "$$"; }
     _kooky_shell_control() {
         local _kooky_control_text='' _kooky_control_char
@@ -52,6 +53,7 @@ enum ShellCommandIntegration {
     """#
 
     static let bash = #"""
+    _kooky_unset_proxy() { unset "$@"; }
     _kooky_shell_control_available() { printf '\e]2;kooky-shell-control:available:%s\a' "$$"; }
     _kooky_shell_control() {
         local _kooky_control_text
@@ -71,6 +73,17 @@ enum ShellCommandIntegration {
     """#
 
     static let fish = #"""
+    function _kooky_unset_proxy
+        for _kooky_proxy in $argv
+            set -eg $_kooky_proxy
+            # An exported empty global masks an exported universal value in
+            # child processes; an unexported global still leaks the universal.
+            # Keep the persistent value intact for other terminals.
+            if set -qU $_kooky_proxy
+                set -gx $_kooky_proxy ''
+            end
+        end
+    end
     function __kooky_shell_control
         printf '\e]2;kooky-shell-control:ready:%s\a' $fish_pid
         if read -lz _kooky_control_text; and test -n "$_kooky_control_text"

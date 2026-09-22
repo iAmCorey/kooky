@@ -11,7 +11,7 @@ import Foundation
 enum KookyShellIntegration {
     /// POSIX single-quote wrap (escape internal `'` by `'\''`). Safe for
     /// arbitrary file paths and argv-style values; reused by anyone that
-    /// builds a shell-command string for `engine.sendInput` or PTY spawn.
+    /// builds a shell-command string for `Session.runShellCommand` or PTY spawn.
     static func quote(_ s: String) -> String {
         "'\(s.replacingOccurrences(of: "'", with: "'\\''"))'"
     }

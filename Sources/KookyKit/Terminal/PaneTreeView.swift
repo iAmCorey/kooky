@@ -1091,9 +1091,8 @@ private struct GitDiffFileRow: View {
     }
 }
 
-/// Each row click-copies the `name=value` to the pasteboard. No PTY
-/// injection: `unset` semantics differ per shell and across already-launched
-/// child processes, so kooky doesn't pretend to switch proxies for you.
+/// Row text copies `name=value`; Unset changes the current shell through the
+/// editor bridge, preserving unfinished input just like Node / Git switching.
 private struct ProxyStatusSegment: View {
     let info: ProxyInfo
     let session: Session
@@ -1108,7 +1107,7 @@ private struct ProxyStatusSegment: View {
             loadSnapshot: { info.entries }
         ) { entries, dismiss in
             ForEach(entries, id: \.self) { entry in
-                ProxyEntryRow(entry: entry) {
+                ProxyEntryRow(entry: entry, canUnset: session.canRunShellCommand) {
                     // Click entry text → copy raw `name=value` to clipboard.
                     writeToGeneralPasteboard(entry)
                     dismiss()
@@ -1116,8 +1115,8 @@ private struct ProxyStatusSegment: View {
                     // `unset` lowercase + uppercase together — corporate
                     // shells often export both forms; clearing just one
                     // leaves the other in effect.
-                    let upper = name.uppercased()
-                    session.engine.sendInput("unset \(name) \(upper)\r")
+                    guard let command = ProxyInfo.unsetCommand(for: name),
+                          session.runShellCommand(command) else { NSSound.beep(); return }
                     dismiss()
                 }
             }
@@ -1127,6 +1126,7 @@ private struct ProxyStatusSegment: View {
 
 private struct ProxyEntryRow: View {
     let entry: String
+    let canUnset: Bool
     let onCopy: () -> Void
     let onUnset: (String) -> Void
 
@@ -1152,6 +1152,7 @@ private struct ProxyEntryRow: View {
             .buttonStyle(.plain)
             .help(String(localized: "Copy", bundle: .kookyResources))
             Button(String(localized: "Unset", bundle: .kookyResources)) { onUnset(name) }
+                .disabled(!canUnset)
                 .buttonStyle(.plain)
                 .font(.system(size: 11, weight: .medium))
                 .foregroundStyle(Theme.chromeForeground)

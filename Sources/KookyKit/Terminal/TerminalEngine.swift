@@ -157,6 +157,8 @@ protocol TerminalEngine: AnyObject {
     @discardableResult
     func performAction(_ name: String) -> Bool
     /// Sends committed text into the PTY as if the user typed it.
+    /// App-generated commands must use `Session.runShellCommand` instead,
+    /// so they cannot append to unfinished input or reach another program.
     func sendInput(_ text: String)
     /// Routes `text` through the engine's paste path — wrapped in
     /// bracketed-paste sequences when the shell has enabled them so
