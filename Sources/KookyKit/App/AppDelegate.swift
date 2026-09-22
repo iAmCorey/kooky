@@ -265,6 +265,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
         )
         let controller = KookyWindowController(windowId: windowId, store: store)
         persistence.frameProvider = { [weak controller] in controller?.persistableFrame }
+        controller.onShouldClose = { [weak self] in self?.shouldCloseWindow($0) ?? true }
         controller.onWillClose = { [weak self] in self?.handleWindowWillClose($0) }
         controller.onDidBecomeKey = { [weak self] in self?.lastKeyController = $0 }
         // The window a frame-less newcomer copies its size from: the key
@@ -323,16 +324,29 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
         }
     }
 
+    /// No other window is on screen. Evaluated against the live array, which
+    /// still holds a closing controller until the next-tick drop — so it is
+    /// correct from inside both `windowShouldClose` and `windowWillClose`.
+    private func isLastWindow(_ controller: KookyWindowController) -> Bool {
+        !windowControllers.contains { $0 !== controller && !$0.hiddenOnClose }
+    }
+
+    /// User-initiated close of the last window hides it instead — PTYs, agents
+    /// and scrollback stay as they are; the next Dock click brings the same
+    /// window back. One of several windows, or any window during ⌘Q, really closes.
+    private func shouldCloseWindow(_ controller: KookyWindowController) -> Bool {
+        guard isLastWindow(controller), !isTerminating else { return true }
+        controller.hideInsteadOfClose()
+        return false
+    }
+
     private func handleWindowWillClose(_ controller: KookyWindowController) {
-        // Keep the persisted slot (restore next launch) when this is the
-        // last window — closing it is effectively a quit, matching kooky's
-        // long-standing single-window behaviour — or when ⌘Q is closing
+        // Keep the persisted slot when this is the last window (it only gets
+        // here programmatically — its final workspace went — and the slot is
+        // what the next Dock click / launch restores) or when ⌘Q is closing
         // every window. Closing one of several open windows discards just
-        // that one. `contains` is evaluated synchronously against the live
-        // array, so it's correct regardless of the deferred removal below
-        // and doesn't depend on `isTerminating` having been set yet.
-        let isLastWindow = !windowControllers.contains { $0 !== controller }
-        if isTerminating || isLastWindow {
+        // that one.
+        if isTerminating || isLastWindow(controller) {
             controller.store.flushPersistence()
         } else {
             appPersistence.removeWindow(controller.windowId)
@@ -444,8 +458,13 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
     /// window to the user" path (tab reveal, menu-bar open, deep link), so a
     /// future fronting fix (Spaces, activation ordering) lands everywhere.
     private func front(_ window: NSWindow) {
+        controller(for: window)?.markPresented()
         if window.isMiniaturized { window.deminiaturize(nil) }
         window.makeKeyAndOrderFront(nil)
+        // The app may already be active (last window closed, kooky still
+        // frontmost), so `applicationDidBecomeActive` won't fire — clear the
+        // active tab's unread here, it is on screen now.
+        markVisibleSessionRead()
     }
 
     // MARK: - Deep links
@@ -692,6 +711,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
     /// subtly wrong: `activeController` can still find a controller in the
     /// window between a close and its deallocation).
     private func deepLinkController() -> (controller: KookyWindowController, builtWindow: Bool)? {
+        revealHiddenWindow()
         if let controller = activeController { return (controller, false) }
         guard !isTerminating else { return nil }
         return (addWindow(), true)
@@ -896,6 +916,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
 
     /// Toggle the agent inbox panel — from the top-chrome bell or ⇧⌘I.
     @objc func handleShowInbox() {
+        revealHiddenWindow()
         InboxWindowController.shared.toggle(
             anchor: activeController?.window,
             onActivate: { [weak self] event in self?.activateFromInbox(event) }
@@ -934,6 +955,21 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
         // is already terminated is still in the array, and handing it to a
         // deep link or the CLI fallback would spawn into a dying store.
         return windowControllers.first { !$0.store.isTerminated }
+    }
+
+    /// A close-hidden window is still the user's window. Every path that is
+    /// about to show UI in it (⌘T, ⌘O's sheet, ⌘P, the inbox, a deep link,
+    /// menu-bar Open, Dock reopen) calls this first so it acts on a window
+    /// the user can see. Pure queries — `activeController`, the CLI's
+    /// `windows()`, menu validation — never do, so `kooky-cli list` or a
+    /// background `rename` can't pop the window. Returns whether one was shown.
+    @discardableResult
+    private func revealHiddenWindow() -> Bool {
+        guard let window = windowControllers
+            .first(where: { $0.hiddenOnClose && !$0.store.isTerminated })?.window
+        else { return false }
+        front(window)
+        return true
     }
 
     /// The `WorkspaceStore` of the key window — the target for menu actions.
@@ -983,8 +1019,21 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
         }
     }
 
+    /// Terminal-style: the last window hides instead of closing
+    /// (`shouldCloseWindow`); ⌘Q quits.
     public func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
-        true
+        false
+    }
+
+    /// Dock click / `open -a` with nothing on screen: bring the close-hidden
+    /// window back (AppKit's default reopen only un-minimizes), or, with no
+    /// window at all, restore the persisted set as a relaunch would.
+    public func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows: Bool) -> Bool {
+        guard !isTerminating, !hasVisibleWindows else { return true }
+        if revealHiddenWindow() { return false }
+        guard windowControllers.isEmpty else { return true }
+        restoreWindows()
+        return false
     }
 
     public func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
@@ -1291,10 +1340,12 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
         // kooky is in the background — without activating, the new window opens
         // behind whatever app is frontmost.
         NSApp.activate(ignoringOtherApps: true)
+        revealHiddenWindow()
         addWindow()
     }
 
     @objc private func handleNewTab() {
+        revealHiddenWindow()
         guard let store = activeStore, let workspace = store.active else { return }
         // Keyboard convention: ⌘T is deterministic — open the user's default
         // agent if set, otherwise Terminal. The visual `+` button keeps the
@@ -1304,6 +1355,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
     }
 
     @objc private func handleNewWorkspace() {
+        revealHiddenWindow()
         activeStore?.addWorkspace()
     }
 
@@ -1311,6 +1363,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
     /// a hidden sidebar; the animation wrap keeps the reveal from snapping
     /// (matches the palette's worktree-create routing).
     @objc private func handleNewSSHWorkspace() {
+        revealHiddenWindow()
         guard let store = activeStore else { return }
         withAnimation(Theme.chromeTransition) {
             store.requestCreateSSHWorkspace()
@@ -1356,6 +1409,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
     /// instead of adding a duplicate — can't land in one and not the other
     /// (the `revealTab` precedent).
     private func openRecentFolder(atPath path: String) {
+        revealHiddenWindow()
         activeStore?.addWorkspace(workingDirectory: URL(fileURLWithPath: path, isDirectory: true))
     }
 
@@ -1371,6 +1425,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
     /// Internal (not `private`) so `#selector` in `ContentView` can typecheck.
     /// The runtime dispatch goes through Obj-C selectors either way.
     @objc func handleQuickOpen() {
+        revealHiddenWindow()
         // Built fresh every open so a workspace added / tab renamed since
         // the panel was last shown reflects in the index without us
         // tracking invalidations. `toggle` makes ⌘P symmetric — press to
@@ -1436,6 +1491,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
     }
 
     @objc private func handleOpenFolder() {
+        revealHiddenWindow()
         let panel = NSOpenPanel()
         panel.canChooseFiles = false
         panel.canChooseDirectories = true
@@ -1770,6 +1826,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
 
     private func openKookyFromMenuBar() {
         NSApp.activate(ignoringOtherApps: true)
+        if revealHiddenWindow() { return }
         guard let window = activeController?.window else { return }
         front(window)
     }

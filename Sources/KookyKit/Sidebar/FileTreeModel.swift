@@ -199,7 +199,13 @@ final class FileTreeModel {
     private var watchers: [String: DirectoryWatcher] = [:]
     /// False while the tree isn't showing (workspaces mode / sidebar hidden)
     /// — no watchers run and refreshes are skipped; caches survive.
-    private var isActive = false
+    private var isMounted = false
+    /// True while the window is ordered out (closed-but-alive): the Files
+    /// page stays mounted, so `deactivate` never fires — this is the second
+    /// reason to drop watchers. Orthogonal to the mount token on purpose:
+    /// the view's later `deactivate(token:)` must still match.
+    private var isSuspended = false
+    private var isActive: Bool { isMounted && !isSuspended }
     /// Bumped by every `activate`; lets a stale `deactivate` be ignored.
     private var activationToken = 0
     /// Cross-thread active mount identity. A queued listing must not touch
@@ -285,7 +291,7 @@ final class FileTreeModel {
         activationToken += 1
         let token = activationToken
         liveActivationToken.withLock { $0 = token }
-        isActive = true
+        isMounted = true
         let root = root.map(Self.canonicalRoot)
         if rootURL?.path != root?.path {
             resetState(to: root)
@@ -301,10 +307,28 @@ final class FileTreeModel {
     /// newer activation superseded it; nil deactivates unconditionally.
     func deactivate(token: Int? = nil) {
         if let token, token != activationToken { return }
-        isActive = false
+        isMounted = false
         liveActivationToken.withLock { $0 = 0 }
         isLoading = false
         cancelAllWatchers()
+    }
+
+    /// Window ordered out: drop the kqueue watchers (up to 64 fds) and stop
+    /// re-listing on disk churn nobody can see. Rows and expansion survive.
+    func suspend() {
+        guard !isSuspended else { return }
+        isSuspended = true
+        isLoading = false
+        cancelAllWatchers()
+    }
+
+    /// Window back on screen: re-arm and re-list, exactly like a fresh mount.
+    func resume() {
+        guard isSuspended else { return }
+        isSuspended = false
+        guard isMounted else { return }
+        scheduleListing(start: rootURL)
+        rebuildRows()
     }
 
     /// Full teardown for `WorkspaceStore.terminate()`.
