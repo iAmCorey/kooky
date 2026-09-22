@@ -150,6 +150,13 @@ final class KookySettingsModel {
     /// `terminal.background-opacity` (0...1). Drives both libghostty's surface
     /// alpha and kooky's glass tint. `nil` = unset (libghostty default).
     var backgroundOpacity: Double? = nil
+    /// Maximum width of a tab item in pixels. The setting is app-specific and
+    /// capped so a long title cannot consume the whole tab strip.
+    var tabMaxWidth: Int = KookySettingsModel.defaultTabMaxWidth
+
+    /// Dark chrome background mix toward black. Stored under
+    /// `appearance.chromeBackgroundMix`; 0.16 preserves the existing default.
+    var chromeBackgroundMix: Double = KookySettingsModel.defaultChromeBackgroundMix
     /// Window-control appearance and terminal palettes are separate choices.
     /// System follows macOS, while Light/Dark pin that appearance; the active
     /// side then selects its own terminal theme.
@@ -361,6 +368,8 @@ final class KookySettingsModel {
         terminalThemeChoices = KookyTerminalTheme.availableThemes()
         let terminal = parsed["terminal"] as? [String: Any] ?? [:]
         let appearance = parsed["appearance"] as? [String: Any] ?? [:]
+        let tab = parsed["tab"] as? [String: Any] ?? [:]
+        tabMaxWidth = Self.resolvedTabMaxWidth(tab["maxWidth"])
         fontFamily = (terminal["font-family"] as? String) ?? ""
         fontSize = nil
         if let n = terminal["font-size"] as? Int {
@@ -593,6 +602,11 @@ final class KookySettingsModel {
         if pairedThemeSchemaEnabled {
             terminal.removeValue(forKey: "theme")
         }
+
+        var tab = parsed["tab"] as? [String: Any] ?? [:]
+        tab["maxWidth"] = min(max(tabMaxWidth, Self.minimumTabMaxWidth), Self.defaultTabMaxWidth)
+        parsed["tab"] = tab
+
         parsed["terminal"] = terminal
 
         let nonEmptyOptions = agentOptions.filter { !$0.value.isEmpty }
@@ -767,6 +781,9 @@ final class KookySettingsModel {
     /// Retained for the raw-theme codec and migration tests. The new UI always
     /// has a concrete default on each side rather than an unstyled sentinel.
     static let defaultThemeSelection = "__kooky-default-theme"
+    static let defaultChromeBackgroundMix = 0.16
+    static let defaultTabMaxWidth = 200
+    static let minimumTabMaxWidth = 100
     static let customThemeSelection = "__kooky-custom-theme"
 
     struct ThemePreferences: Equatable {
@@ -784,6 +801,26 @@ final class KookySettingsModel {
         (appearance["showSearchPill"] as? Bool)
             ?? (legacyGeneral["showSearchPill"] as? Bool)
             ?? true
+    }
+
+    static func resolvedTabMaxWidth(_ rawValue: Any?) -> Int {
+        let value: Int
+        if let number = rawValue as? NSNumber {
+            value = number.intValue
+        } else {
+            value = defaultTabMaxWidth
+        }
+        return min(max(value, minimumTabMaxWidth), defaultTabMaxWidth)
+    }
+
+    static func resolvedChromeBackgroundMix(_ rawValue: Any?) -> Double {
+        let value: Double
+        if let number = rawValue as? NSNumber {
+            value = number.doubleValue
+        } else {
+            value = defaultChromeBackgroundMix
+        }
+        return min(max(value, 0), 1)
     }
 
     /// The importer stores repeated ghostty config lines as a JSON array and
@@ -1120,7 +1157,29 @@ struct KookySettingsView: View {
         .onChange(of: model.fileLinkAppId) { _, _ in model.scheduleSave() }
         .onChange(of: model.webLinkAppId) { _, _ in model.scheduleSave() }
 
-        return core
+        let firstAutosave = core
+            .onChange(of: model.fontFamily) { _, _ in model.scheduleSave() }
+            .onChange(of: model.fontSize) { _, _ in model.scheduleSave() }
+            .onChange(of: model.cursorStyle) { _, _ in model.scheduleSave() }
+            .onChange(of: model.appearanceMode) { _, _ in model.activatePairedThemeSchemaAndSave() }
+            .onChange(of: model.lightTerminalThemeSelection) { _, _ in model.activatePairedThemeSchemaAndSave() }
+            .onChange(of: model.darkTerminalThemeSelection) { _, _ in model.activatePairedThemeSchemaAndSave() }
+            .onChange(of: model.backgroundBlur) { _, _ in model.flushSave() }
+            .onChange(of: model.backgroundOpacity) { _, _ in model.scheduleSave() }
+            .onChange(of: model.tabMaxWidth) { _, _ in model.scheduleSave() }
+
+        let secondAutosave = firstAutosave
+            .onChange(of: model.chromeBackgroundMix) { _, _ in model.scheduleSave() }
+            .onChange(of: model.agentOrder) { _, _ in model.scheduleSave() }
+            .onChange(of: model.hiddenAgents) { _, _ in model.scheduleSave() }
+            .onChange(of: model.agentOptions) { _, _ in model.scheduleSave() }
+            .onChange(of: model.defaultAgentId) { _, _ in model.scheduleSave() }
+            .onChange(of: model.openInAppOrder) { _, _ in model.scheduleSave() }
+            .onChange(of: model.hiddenOpenInApps) { _, _ in model.scheduleSave() }
+            .onChange(of: model.fileLinkAppId) { _, _ in model.scheduleSave() }
+            .onChange(of: model.webLinkAppId) { _, _ in model.scheduleSave() }
+
+        return secondAutosave
             .onChange(of: model.customAgents) { _, _ in model.scheduleSave() }
             .onChange(of: model.resumeConversations) { _, _ in model.scheduleSave() }
             .onChange(of: model.sshRemoteAgentDetection) { _, _ in model.scheduleSave() }
@@ -1317,7 +1376,20 @@ struct KookySettingsView: View {
                             .frame(width: 140)
                     }
                 }
-                SettingsCaption("Window translucency — takes effect with liquid-glass or a numeric background-blur; opaque otherwise.")
+                SettingsCaption("Window translucency — below 100% the whole terminal window becomes see-through on every macOS; liquid-glass and background-blur add frosting on top.")
+                SettingsHairline()
+                SettingsRow(label: "max-tab-width") {
+                    HStack(spacing: 8) {
+                        Text("\(model.tabMaxWidth)px")
+                            .font(Theme.mono(12))
+                            .foregroundStyle(Theme.chromeForeground)
+                            .monospacedDigit()
+                            .frame(width: 48, alignment: .trailing)
+                        Stepper("", value: $model.tabMaxWidth, in: KookySettingsModel.minimumTabMaxWidth...KookySettingsModel.defaultTabMaxWidth)
+                            .labelsHidden()
+                    }
+                }
+                SettingsCaption("Maximum tab width in pixels. Values are capped at 200px.")
                 terminalRestartCallout
             }
             .padding(.top, 22)

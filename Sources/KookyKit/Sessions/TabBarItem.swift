@@ -38,6 +38,7 @@ struct TabBarItem: View {
         .foregroundStyle(isActive ? Theme.chromeForeground : Theme.chromeForeground.opacity(0.62))
         .padding(.horizontal, 11)
         .padding(.vertical, 8)
+        .frame(maxWidth: CGFloat(KookySettingsModel.shared.tabMaxWidth), alignment: .leading)
         .background(rowBackground)
         .clipShape(RoundedRectangle(cornerRadius: Theme.chromeSelectionCornerRadius, style: .continuous))
         .contentShape(Rectangle())
