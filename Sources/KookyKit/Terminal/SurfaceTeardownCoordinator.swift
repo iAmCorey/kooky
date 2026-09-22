@@ -2,9 +2,9 @@ import Darwin
 import Foundation
 import GhosttyKit
 
-/// Starts process shutdown synchronously, then moves the blocking native free
-/// off the main actor. The native request retires the surface from app routing,
-/// so no surface API may be called after `enqueue`.
+/// Keeps terminal IO alive through foreground shutdown, then moves the blocking
+/// native free off the main actor. The caller must stop using the surface before
+/// `enqueue` and retain its callback host until native teardown finishes.
 final class SurfaceTeardownCoordinator: @unchecked Sendable {
     typealias NativeAction = @Sendable (UInt) -> Void
     typealias BeginForegroundTermination = @Sendable (pid_t, @escaping @Sendable () -> Void) -> Void
@@ -20,7 +20,7 @@ final class SurfaceTeardownCoordinator: @unchecked Sendable {
             guard let surface = UnsafeMutableRawPointer(bitPattern: bits) else { return }
             ghostty_surface_free(surface)
         },
-        beginForegroundTermination: ForegroundProcessGroupTerminator.begin,
+        beginForegroundTermination: { ForegroundProcessGroupTerminator.begin($0, completion: $1) },
         releaseHost: { bits in
             guard let pointer = UnsafeRawPointer(bitPattern: bits) else { return }
             Unmanaged<GhosttySurfaceView>.fromOpaque(pointer).release()
@@ -147,12 +147,15 @@ final class SurfaceTeardownCoordinator: @unchecked Sendable {
     }
 }
 
-private enum ForegroundProcessGroupTerminator {
+enum ForegroundProcessGroupTerminator {
     private static let pollInterval = Duration.milliseconds(50)
-    private static let sighupGrace = Duration.seconds(12)
-    private static let sigkillGrace = Duration.seconds(3)
 
-    static func begin(_ processGroup: pid_t, completion: @escaping @Sendable () -> Void) {
+    static func begin(
+        _ processGroup: pid_t,
+        sighupGrace: Duration = .seconds(12),
+        sigkillGrace: Duration = .seconds(3),
+        completion: @escaping @Sendable () -> Void
+    ) {
         guard processGroup > 1, processGroup != getpgrp() else {
             completion()
             return
@@ -164,12 +167,9 @@ private enum ForegroundProcessGroupTerminator {
         }
 
         Task.detached(priority: .utility) {
-            if await waitUntilLeaderGone(processGroup, timeout: sighupGrace) {
-                // The process-group leader is the foreground job's root
-                // process (the bash launcher for Kooky's agent tabs). Its exit
-                // marks the owning command as done; descendants it spawned
-                // (for example MCP servers) must not keep Kooky waiting.
-                _ = killpg(processGroup, SIGTERM)
+            // The bash launcher can die on SIGHUP while its agent is still
+            // saving state. Keep IO and the grace period for the whole group.
+            if await waitUntilGone(processGroup, timeout: sighupGrace) {
                 completion()
                 return
             }
@@ -177,16 +177,6 @@ private enum ForegroundProcessGroupTerminator {
             _ = await waitUntilGone(processGroup, timeout: sigkillGrace)
             completion()
         }
-    }
-
-    private static func waitUntilLeaderGone(_ processGroup: pid_t, timeout: Duration) async -> Bool {
-        let clock = ContinuousClock()
-        let deadline = clock.now.advanced(by: timeout)
-        while processExists(processGroup) {
-            guard clock.now < deadline else { return false }
-            try? await Task.sleep(for: pollInterval)
-        }
-        return true
     }
 
     private static func waitUntilGone(_ processGroup: pid_t, timeout: Duration) async -> Bool {
@@ -197,11 +187,6 @@ private enum ForegroundProcessGroupTerminator {
             try? await Task.sleep(for: pollInterval)
         }
         return true
-    }
-
-    private static func processExists(_ process: pid_t) -> Bool {
-        if kill(process, 0) == 0 { return true }
-        return errno == EPERM
     }
 
     private static func processGroupExists(_ processGroup: pid_t) -> Bool {
