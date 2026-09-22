@@ -1,0 +1,22 @@
+# Kooky theme: Ghostty Dark
+background = #282C34
+foreground = #FFFFFF
+cursor-color = #FFFFFF
+selection-background = #FFFFFF
+selection-foreground = #282C34
+palette = 0=#1D1F21
+palette = 1=#CC6666
+palette = 2=#B5BD68
+palette = 3=#F0C674
+palette = 4=#81A2BE
+palette = 5=#B294BB
+palette = 6=#8ABEB7
+palette = 7=#C5C8C6
+palette = 8=#666666
+palette = 9=#D54E53
+palette = 10=#B9CA4A
+palette = 11=#E7C547
+palette = 12=#7AA6DA
+palette = 13=#C397D8
+palette = 14=#70C0B1
+palette = 15=#EAEAEA

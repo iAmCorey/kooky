@@ -1,0 +1,22 @@
+# Kooky theme: Catppuccin Macchiato
+background = #24273A
+foreground = #CAD3F5
+cursor-color = #F4DBD6
+selection-background = #5B6078
+selection-foreground = #CAD3F5
+palette = 0=#494D64
+palette = 1=#ED8796
+palette = 2=#A6DA95
+palette = 3=#EED49F
+palette = 4=#8AADF4
+palette = 5=#F5BDE6
+palette = 6=#8BD5CA
+palette = 7=#A5ADCB
+palette = 8=#5B6078
+palette = 9=#EC7486
+palette = 10=#8CCF7F
+palette = 11=#E1C682
+palette = 12=#78A1F6
+palette = 13=#F2A9DD
+palette = 14=#63CBC0
+palette = 15=#B8C0E0

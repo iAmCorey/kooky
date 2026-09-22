@@ -1,0 +1,22 @@
+# Kooky theme: Night Owl
+background = #011627
+foreground = #D6DEEB
+cursor-color = #80A4C2
+selection-background = #093B5E
+selection-foreground = #D6DEEB
+palette = 0=#011627
+palette = 1=#EF5350
+palette = 2=#22DA6E
+palette = 3=#C5E478
+palette = 4=#82AAFF
+palette = 5=#C792EA
+palette = 6=#21C7A8
+palette = 7=#FFFFFF
+palette = 8=#575656
+palette = 9=#EF5350
+palette = 10=#22DA6E
+palette = 11=#FFEB95
+palette = 12=#82AAFF
+palette = 13=#C792EA
+palette = 14=#7FDBCA
+palette = 15=#FFFFFF

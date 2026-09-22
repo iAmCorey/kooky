@@ -1,0 +1,22 @@
+# Kooky theme: Material Palenight
+background = #292D3E
+foreground = #BABED8
+cursor-color = #FFCB6B
+selection-background = #404663
+selection-foreground = #BABED8
+palette = 0=#000000
+palette = 1=#F07178
+palette = 2=#C3E88D
+palette = 3=#FFCB6B
+palette = 4=#82AAFF
+palette = 5=#C792EA
+palette = 6=#89DDFF
+palette = 7=#FFFFFF
+palette = 8=#676E95
+palette = 9=#F07178
+palette = 10=#C3E88D
+palette = 11=#FFCB6B
+palette = 12=#82AAFF
+palette = 13=#C792EA
+palette = 14=#89DDFF
+palette = 15=#FFFFFF

@@ -1,0 +1,22 @@
+# Kooky theme: Rosé Pine Moon
+background = #232136
+foreground = #E0DEF4
+cursor-color = #6E6A86
+selection-background = #312F45
+selection-foreground = #E0DEF4
+palette = 0=#393552
+palette = 1=#EB6F92
+palette = 2=#3E8FB0
+palette = 3=#F6C177
+palette = 4=#9CCFD8
+palette = 5=#C4A7E7
+palette = 6=#EA9A97
+palette = 7=#E0DEF4
+palette = 8=#908CAA
+palette = 9=#EB6F92
+palette = 10=#3E8FB0
+palette = 11=#F6C177
+palette = 12=#9CCFD8
+palette = 13=#C4A7E7
+palette = 14=#EA9A97
+palette = 15=#E0DEF4

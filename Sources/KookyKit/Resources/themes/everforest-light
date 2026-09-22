@@ -1,0 +1,22 @@
+# Kooky theme: Everforest Light
+background = #FDF6E3
+foreground = #5C6A72
+cursor-color = #5C6A72
+selection-background = #EFE9D5
+selection-foreground = #5C6A72
+palette = 0=#5C6A72
+palette = 1=#F85552
+palette = 2=#8DA101
+palette = 3=#DFA000
+palette = 4=#3A94C5
+palette = 5=#DF69BA
+palette = 6=#35A77C
+palette = 7=#939F91
+palette = 8=#5C6A72
+palette = 9=#F85552
+palette = 10=#8DA101
+palette = 11=#DFA000
+palette = 12=#3A94C5
+palette = 13=#DF69BA
+palette = 14=#35A77C
+palette = 15=#F4F0D9

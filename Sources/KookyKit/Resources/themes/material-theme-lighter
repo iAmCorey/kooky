@@ -1,0 +1,22 @@
+# Kooky theme: Material Lighter
+background = #FAFAFA
+foreground = #90A4AE
+cursor-color = #E2931D
+selection-background = #DBEEEC
+selection-foreground = #90A4AE
+palette = 0=#000000
+palette = 1=#E53935
+palette = 2=#91B859
+palette = 3=#E2931D
+palette = 4=#6182B8
+palette = 5=#9C3EDA
+palette = 6=#39ADB5
+palette = 7=#FFFFFF
+palette = 8=#90A4AE
+palette = 9=#E53935
+palette = 10=#91B859
+palette = 11=#E2931D
+palette = 12=#6182B8
+palette = 13=#9C3EDA
+palette = 14=#39ADB5
+palette = 15=#FFFFFF

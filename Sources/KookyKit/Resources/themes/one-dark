@@ -1,0 +1,22 @@
+# Kooky theme: One Dark
+background = #282C34
+foreground = #ABB2BF
+cursor-color = #ABB2BF
+selection-background = #3E4451
+selection-foreground = #ABB2BF
+palette = 0=#282C34
+palette = 1=#E06C75
+palette = 2=#98C379
+palette = 3=#E5C07B
+palette = 4=#61AFEF
+palette = 5=#C678DD
+palette = 6=#56B6C2
+palette = 7=#ABB2BF
+palette = 8=#5C6370
+palette = 9=#E06C75
+palette = 10=#98C379
+palette = 11=#E5C07B
+palette = 12=#61AFEF
+palette = 13=#C678DD
+palette = 14=#56B6C2
+palette = 15=#FFFFFF

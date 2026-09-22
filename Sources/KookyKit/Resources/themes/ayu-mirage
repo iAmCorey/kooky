@@ -1,0 +1,22 @@
+# Kooky theme: Ayu Mirage
+background = #1F2430
+foreground = #CCCAC2
+cursor-color = #FFCC66
+selection-background = #274364
+selection-foreground = #CCCAC2
+palette = 0=#171B24
+palette = 1=#F28273
+palette = 2=#87D96C
+palette = 3=#FCCA60
+palette = 4=#6ACDFF
+palette = 5=#DDBBFF
+palette = 6=#93E2C8
+palette = 7=#C7C7C7
+palette = 8=#686868
+palette = 9=#F28779
+palette = 10=#D5FF80
+palette = 11=#FFCD66
+palette = 12=#73D0FF
+palette = 13=#DFBFFF
+palette = 14=#95E6CB
+palette = 15=#FFFFFF

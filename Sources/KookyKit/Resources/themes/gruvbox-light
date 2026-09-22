@@ -1,0 +1,22 @@
+# Kooky theme: Gruvbox Light
+background = #FBF1C7
+foreground = #3C3836
+cursor-color = #3C3836
+selection-background = #D5C4A1
+selection-foreground = #3C3836
+palette = 0=#FBF1C7
+palette = 1=#CC241D
+palette = 2=#98971A
+palette = 3=#D79921
+palette = 4=#458588
+palette = 5=#B16286
+palette = 6=#689D6A
+palette = 7=#7C6F64
+palette = 8=#928374
+palette = 9=#9D0006
+palette = 10=#79740E
+palette = 11=#B57614
+palette = 12=#076678
+palette = 13=#8F3F71
+palette = 14=#427B58
+palette = 15=#3C3836

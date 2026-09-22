@@ -1,0 +1,22 @@
+# Kooky theme: Ayu Dark
+background = #0D1017
+foreground = #BFBDB6
+cursor-color = #E6B450
+selection-background = #172E51
+selection-foreground = #BFBDB6
+palette = 0=#1B1F29
+palette = 1=#F06B73
+palette = 2=#70BF56
+palette = 3=#FDB04C
+palette = 4=#4FBFFF
+palette = 5=#D0A1FF
+palette = 6=#93E2C8
+palette = 7=#C7C7C7
+palette = 8=#686868
+palette = 9=#F07178
+palette = 10=#AAD94C
+palette = 11=#FFB454
+palette = 12=#59C2FF
+palette = 13=#D2A6FF
+palette = 14=#95E6CB
+palette = 15=#FFFFFF
