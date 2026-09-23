@@ -36,6 +36,16 @@ guard !surface.isEmpty else { exit(0) }
 
 let socketPath = KookyHookKit.socketPath
 
+// Do not read stdin here: it belongs to the shell editor and may already
+// contain the user's next keystrokes. The reply travels over the socket.
+if CommandLine.arguments.count == 3, CommandLine.arguments[1] == "shell-command" {
+    guard let surface = UUID(uuidString: surface),
+          let pid = Int32(CommandLine.arguments[2]),
+          let command = KookyHookKit.fetchShellCommand(surface: surface, shellPID: pid) else { exit(1) }
+    print(command)
+    exit(0)
+}
+
 // Drain stdin once up-front so the tool parser and conversation-id mirror
 // don't double-read a single-pass stream. The explicit marker is essential:
 // bracket-wrapper pings inherit the agent invocation's stdin, which may be a

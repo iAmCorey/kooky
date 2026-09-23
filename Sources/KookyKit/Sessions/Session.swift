@@ -1,4 +1,5 @@
 import Foundation
+import KookyHookKit
 
 /// Coarse "what's the agent doing" status, surfaced as a sidebar dot. Stage 1
 /// is UI-only; Stage 2 will drive these from real agent hooks (Claude Code's
@@ -171,7 +172,7 @@ final class Session: Identifiable {
 
     var shellControlPID: pid_t?
     private var shellCommandRunning = false
-    @ObservationIgnored private var pendingShellCommand: (payload: String, deadline: ContinuousClock.Instant)?
+    @ObservationIgnored private var pendingShellCommand: (command: String, deadline: ContinuousClock.Instant)?
 
     var canRunShellCommand: Bool {
         guard let shellControlPID, effectiveRemoteHost == nil, !shellCommandRunning,
@@ -181,13 +182,23 @@ final class Session: Identifiable {
 
     @discardableResult
     func runShellCommand(_ command: String, now: ContinuousClock.Instant = .now) -> Bool {
-        guard canRunShellCommand, let payload = ShellCommandIntegration.payload(for: command) else { return false }
-        pendingShellCommand = (payload, now + .seconds(1))
+        guard canRunShellCommand, let command = KookyHookKit.normalizedShellCommand(command) else { return false }
+        pendingShellCommand = (command, now + .seconds(1))
         engine.sendInput(ShellCommandIntegration.keySequence)
         return true
     }
 
-    func consumeShellControlTitle(_ title: String, now: ContinuousClock.Instant = .now) -> Bool {
+    func takeShellCommand(shellPID: pid_t, now: ContinuousClock.Instant = .now) -> String? {
+        guard shellPID == shellControlPID, engine.foregroundPid == shellPID,
+              effectiveRemoteHost == nil, !shellCommandRunning else { return nil }
+        let pending = pendingShellCommand
+        pendingShellCommand = nil
+        guard let pending, now < pending.deadline else { return nil }
+        shellCommandRunning = true
+        return pending.command
+    }
+
+    func consumeShellControlTitle(_ title: String) -> Bool {
         guard title.hasPrefix(ShellCommandIntegration.titlePrefix) else { return false }
         guard let marker = ShellCommandIntegration.parseTitle(title) else { return true }
         switch marker.event {
@@ -195,17 +206,11 @@ final class Session: Identifiable {
             if shellControlPID != marker.pid || shellCommandRunning { pendingShellCommand = nil }
             shellControlPID = marker.pid
             shellCommandRunning = false
-        case .ready:
-            guard marker.pid == shellControlPID, engine.foregroundPid == marker.pid,
-                  effectiveRemoteHost == nil, !shellCommandRunning else { return true }
-            let pending = pendingShellCommand
-            pendingShellCommand = nil
-            shellCommandRunning = true
-            // An unsolicited/late acknowledgment gets an empty frame, never
-            // command text. The deadline is shorter than the widget's read timeout.
-            engine.sendInput(pending.map { now < $0.deadline ? $0.payload : "\0" } ?? "\0")
         case .finished:
-            if marker.pid == shellControlPID { shellCommandRunning = false }
+            if marker.pid == shellControlPID {
+                pendingShellCommand = nil
+                shellCommandRunning = false
+            }
         }
         return true
     }

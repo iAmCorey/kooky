@@ -1554,7 +1554,7 @@ final class GhosttySurfaceView: NSView {
 
     func sendInput(_ text: String) {
         guard let surface, !text.isEmpty else { return }
-        // Includes the shell-control handshake / payload and composer Return;
+        // Includes the shell-control trigger key and composer Return;
         // sendInputBytes fires onUserInput to clear the old command's dot.
         sendInputBytes(text, to: surface)
     }

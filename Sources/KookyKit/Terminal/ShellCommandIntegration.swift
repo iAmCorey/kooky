@@ -4,7 +4,7 @@ enum ShellCommandIntegration {
     static let keySequence = "\u{18}\u{1F}"
     static let titlePrefix = "kooky-shell-control:"
 
-    enum Event: String { case available, ready, finished }
+    enum Event: String { case available, finished }
 
     static func parseTitle(_ title: String) -> (event: Event, pid: pid_t)? {
         guard title.hasPrefix(titlePrefix) else { return nil }
@@ -14,31 +14,33 @@ enum ShellCommandIntegration {
         return (event, pid)
     }
 
-    static func payload(for command: String) -> String? {
-        let command = command.trimmingCharacters(in: .newlines)
-        guard !command.isEmpty, command.utf8.count <= 4096,
-              !command.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains) else { return nil }
-        return command + "\0"
-    }
-
-    // Only send command text after the shell's editor acknowledges the key.
-    // The widgets run in that shell, so nvm's environment changes survive
-    // without accepting or replacing the user's editing buffer.
+    // The key invokes an editor widget; its helper fetches the command over
+    // the hook socket, never from stdin. Keystrokes remain queued for the
+    // editor while the widget runs, so they cannot become part of an eval.
     static let zsh = #"""
     _kooky_unset_proxy() { unset "$@"; }
     _kooky_shell_control_available() { printf '\e]2;kooky-shell-control:available:%s\a' "$$"; }
+    _kooky_shell_control_status() { return "$1"; }
     _kooky_shell_control() {
-        local _kooky_control_text='' _kooky_control_char
-        printf '\e]2;kooky-shell-control:ready:%s\a' "$$"
-        while IFS= read -rk 1 -t 3 _kooky_control_char; do
-            [[ "$_kooky_control_char" == $'\0' ]] && break
-            _kooky_control_text+="$_kooky_control_char"
-        done
-        if [[ "$_kooky_control_char" == $'\0' && -n "$_kooky_control_text" ]]; then
+        local _kooky_control_text _kooky_control_hook _kooky_control_status
+        local _kooky_control_buffer=$BUFFER _kooky_control_cursor=$CURSOR
+        if _kooky_control_text=$("$KOOKY_HOOK_BIN" shell-command "$$" </dev/null) && [[ -n "$_kooky_control_text" ]]; then
             zle -I
             eval "$_kooky_control_text"
+            _kooky_control_status=$?
+            # Rebuild cached prompts (vcs_info / Starship / p10k) before
+            # repainting. Skip our own prompt/command markers: the draft
+            # was not submitted and this is not a new command boundary.
+            for _kooky_control_hook in precmd "${precmd_functions[@]}"; do
+                [[ $_kooky_control_hook == _kooky_* || $_kooky_control_hook == __kooky_* ]] && continue
+                (( ${+functions[$_kooky_control_hook]} )) || continue
+                _kooky_shell_control_status "$_kooky_control_status"
+                "$_kooky_control_hook" || break
+            done
             _kooky_env_status
             _kooky_osc7_pwd
+            BUFFER=$_kooky_control_buffer
+            CURSOR=$_kooky_control_cursor
             zle reset-prompt
         fi
         printf '\e]2;kooky-shell-control:finished:%s\a' "$$"
@@ -57,13 +59,14 @@ enum ShellCommandIntegration {
     _kooky_shell_control_available() { printf '\e]2;kooky-shell-control:available:%s\a' "$$"; }
     _kooky_shell_control() {
         local _kooky_control_text
-        printf '\e]2;kooky-shell-control:ready:%s\a' "$$"
-        if IFS= read -r -d '' -t 3 _kooky_control_text && [[ -n "$_kooky_control_text" ]]; then
+        if _kooky_control_text=$("$KOOKY_HOOK_BIN" shell-command "$$" </dev/null) && [[ -n "$_kooky_control_text" ]]; then
             printf '\n'
             eval "$_kooky_control_text"
             _kooky_env_status
             _kooky_osc7_pwd
         fi
+        # Bash 3.2 caches Readline's expanded prompt during bind -x. Keep
+        # the draft intact; its next normal prompt refreshes PS1 as usual.
         printf '\e]2;kooky-shell-control:finished:%s\a' "$$"
     }
     for _kooky_keymap in emacs-standard vi-insert vi-command; do
@@ -85,8 +88,8 @@ enum ShellCommandIntegration {
         end
     end
     function __kooky_shell_control
-        printf '\e]2;kooky-shell-control:ready:%s\a' $fish_pid
-        if read -lz _kooky_control_text; and test -n "$_kooky_control_text"
+        set -l _kooky_control_text ("$KOOKY_HOOK_BIN" shell-command $fish_pid </dev/null)
+        if test -n "$_kooky_control_text"
             printf '\n'
             eval $_kooky_control_text
             __kooky_env_status

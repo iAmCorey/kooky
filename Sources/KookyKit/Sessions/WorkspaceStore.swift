@@ -1867,6 +1867,10 @@ final class WorkspaceStore {
         return nil
     }
 
+    func takeShellCommand(sessionId: UUID, shellPID: pid_t) -> String? {
+        hookSession(id: sessionId)?.takeShellCommand(shellPID: shellPID)
+    }
+
     private func findSession(id: UUID) -> Session? {
         location(ofSessionId: id)?.pane.tabs.first { $0.id == id }
     }

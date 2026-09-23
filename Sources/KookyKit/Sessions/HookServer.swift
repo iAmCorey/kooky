@@ -94,6 +94,7 @@ final class HookServer {
     /// Set before `start()`. Nil (never wired) answers CLI requests with a
     /// refusal rather than silence, so a misassembled build still fails loud.
     var onCLIRequest: CLIHandler?
+    var onShellCommandRequest: ((KookyShellCommandRequest) -> String?)?
 
     /// `socketPath` is injectable so integration tests can bind a throwaway
     /// path instead of racing a live kooky's production socket.
@@ -269,6 +270,17 @@ final class HookServer {
 
         guard let dict = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
 
+        if dict["kind"] as? String == KookyShellCommandRequest.kind {
+            ownsFd = false
+            let request = KookyCLIProtocol.decodeLine(KookyShellCommandRequest.self, from: data)
+            let command = !Self.peerHasHungUp(clientFd)
+                ? request.flatMap { onShellCommandRequest?($0) } : nil
+            Self.writeResponseAndClose(
+                KookyCLIProtocol.encodeLine(KookyShellCommandResponse(command: command)), fd: clientFd
+            )
+            return
+        }
+
         if dict["kind"] as? String == KookyCLIProtocol.kind {
             // Request/response branch: fd ownership moves to the response
             // writer; the handler's completion is what closes it.
@@ -348,8 +360,12 @@ final class HookServer {
     }
 
     private static func writeCLIResponseAndClose(_ response: KookyCLIResponse, fd: Int32) {
+        writeResponseAndClose(response.encodedLine(), fd: fd)
+    }
+
+    private static func writeResponseAndClose(_ line: Data?, fd: Int32) {
         defer { close(fd) }
-        guard let line = response.encodedLine() else { return }
+        guard let line else { return }
         let deadline = ContinuousClock.now + .seconds(3)
         let bytes = [UInt8](line)
         var offset = 0

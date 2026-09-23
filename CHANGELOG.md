@@ -2,9 +2,10 @@
 
 Notable changes per release. Tagged commits use `vX.Y.Z` shortform.
 
-## Unreleased
+## v0.51.11 — 2026-09-23
 
-- Fixed: switching Node versions or Git branches, or unsetting proxy variables from the status bar preserves unfinished shell input and the cursor position. Actions run in the current zsh, bash, or fish session without appending commands to the text being edited. Proxy unsetting clears both lowercase and uppercase variables, supports fish, and leaves other terminals' settings alone.
+- Fixed: switching Node versions or Git branches, or unsetting proxy variables from the status bar preserves unfinished shell input and the cursor position, even when you keep typing during the switch. Actions run in the current zsh, bash, or fish session without mixing commands with your input or executing unfinished text. Proxy unsetting clears both lowercase and uppercase variables, supports fish, and leaves other terminals' settings alone.
+- Fixed: zsh prompts refresh after a status-bar switch, so cached version and branch information stays current. macOS Bash 3.2 preserves your input but refreshes its cached prompt on the next normal command submission.
 - Changed: bundled themes now live in individual Ghostty-style files, making new themes easier to add while preserving all existing colors and theme selections. Palette entries keep their explicit color indices regardless of line order. Thanks @kaijianding for the refactor. (#77)
 - Fixed: closing an agent tab or quitting kooky keeps terminal I/O available while the foreground processes finish their shutdown hooks and cleanup, avoiding unnecessary waits caused by stopping I/O first. Cleanup waits for the whole foreground process group, with a bounded grace period and forced termination for unresponsive processes. Thanks @kaijianding for the diagnosis and initial fix. (#76)
 

@@ -77,6 +77,41 @@ final class HookServerCLITests: XCTestCase {
         XCTAssertEqual(response.appVersion, "test-1.0")
     }
 
+    func testShellCommandTravelsOverTheSocketInsteadOfThePTY() throws {
+        let engine = TestEngine()
+        engine.foregroundPid = 123
+        let session = Session(engine: engine, currentDirectory: URL(fileURLWithPath: "/tmp"), agent: .terminal)
+        session.consumeShellControlTitle("kooky-shell-control:available:123")
+        startServer(onCLIRequest: nil)
+        server?.onShellCommandRequest = { request in
+            guard request.surface == session.id else { return nil }
+            return session.takeShellCommand(shellPID: request.shellPID)
+        }
+        XCTAssertTrue(session.runShellCommand("git switch '中文'"))
+        engine.sendInput("X")
+        let wrongSession = KookyShellCommandRequest(surface: UUID(), shellPID: 123)
+        let wrongReply = try XCTUnwrap(roundTrip(XCTUnwrap(KookyCLIProtocol.encodeLine(wrongSession)))).get()
+        XCTAssertNil(KookyCLIProtocol.decodeLine(KookyShellCommandResponse.self, from: wrongReply)?.command)
+        let line = try XCTUnwrap(KookyCLIProtocol.encodeLine(KookyShellCommandRequest(surface: session.id, shellPID: 123)))
+        let reply = try XCTUnwrap(roundTrip(line)).get()
+        XCTAssertEqual(KookyCLIProtocol.decodeLine(KookyShellCommandResponse.self, from: reply)?.command, "git switch '中文'")
+        let duplicate = try XCTUnwrap(roundTrip(line)).get()
+        XCTAssertNil(KookyCLIProtocol.decodeLine(KookyShellCommandResponse.self, from: duplicate)?.command)
+        XCTAssertEqual(engine.sentInputs, [ShellCommandIntegration.keySequence, "X"])
+    }
+
+    func testShellCommandWithMissingHandlerOrMalformedRequestGetsEmptyReply() throws {
+        startServer(onCLIRequest: nil)
+        for line in [
+            try XCTUnwrap(KookyCLIProtocol.encodeLine(KookyShellCommandRequest(surface: UUID(), shellPID: 123))),
+            Data("{\"kind\":\"shellCommand\",\"surface\":\"not-a-uuid\",\"shellPID\":123}\n".utf8),
+        ] {
+            let reply = try XCTUnwrap(roundTrip(line)).get()
+            let response = try XCTUnwrap(KookyCLIProtocol.decodeLine(KookyShellCommandResponse.self, from: reply))
+            XCTAssertNil(response.command)
+        }
+    }
+
     func testRequestLineLargerThanOneReadBufferSurvives() throws {
         // 4 KiB is the server's per-read buffer; a long `open -e` command
         // must cross it intact via the read-to-newline loop.

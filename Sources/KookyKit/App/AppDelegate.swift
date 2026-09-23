@@ -167,6 +167,15 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
                 completion: completion
             )
         }
+        hookServer.onShellCommandRequest = { [weak self] request in
+            guard let self, !self.isTerminating else { return nil }
+            for controller in self.windowControllers {
+                if let command = controller.store.takeShellCommand(sessionId: request.surface, shellPID: request.shellPID) {
+                    return command
+                }
+            }
+            return nil
+        }
         hookServer.start()
         // Mirror kooky-cli into Application Support (same Gatekeeper story
         // as KookyHook: /Applications exec-assessment kills fresh-cdhash
