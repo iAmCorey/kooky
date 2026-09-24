@@ -137,6 +137,66 @@ final class CLIControllerTests: XCTestCase {
         XCTAssertEqual(agentTab.id, workspace.activeSession?.id.uuidString)
     }
 
+    func testListReportsTheTabsConversationId() async throws {
+        let store = makeStore()
+        let workspace = store.workspaces[0]
+        store.addTab(in: workspace, template: .claudeCode)
+        let agent = try XCTUnwrap(workspace.activeSession)
+        agent.conversationId = "3f2a9c1e-0000-4000-8000-000000000001"
+        let controller = makeController(stores: [store])
+        let response = await respond(controller, KookyCLIRequest(verb: .list))
+        let tabs = try XCTUnwrap(response.windows?.first?.workspaces.first?.tabs)
+        XCTAssertNil(tabs[0].conversationId)
+        XCTAssertEqual(tabs[1].conversationId, "3f2a9c1e-0000-4000-8000-000000000001")
+    }
+
+    // MARK: send
+
+    func testSendPastesTheTextThenSubmits() async throws {
+        let store = makeStore()
+        let session = try XCTUnwrap(store.workspaces[0].activeSession)
+        let controller = makeController(stores: [store])
+        let response = await respond(controller, KookyCLIRequest(
+            verb: .send, tab: session.id.uuidString, text: "line one\nline two"
+        ))
+        XCTAssertTrue(response.ok)
+        XCTAssertEqual(response.note, "sent")
+        XCTAssertEqual(engine(session).pastedTexts, ["line one\nline two"])
+        XCTAssertEqual(engine(session).sentInputs, ["\r"])
+        XCTAssertTrue(revealed.isEmpty, "send must not move focus")
+    }
+
+    func testSendWithoutEnterOnlyPastes() async throws {
+        let store = makeStore()
+        let session = try XCTUnwrap(store.workspaces[0].activeSession)
+        let controller = makeController(stores: [store])
+        let response = await respond(controller, KookyCLIRequest(
+            verb: .send, tab: session.id.uuidString, text: "draft", submit: false
+        ))
+        XCTAssertTrue(response.ok)
+        XCTAssertEqual(response.note, "pasted")
+        XCTAssertEqual(engine(session).pastedTexts, ["draft"])
+        XCTAssertTrue(engine(session).sentInputs.isEmpty)
+    }
+
+    func testSendRefusesAMissingTabOrText() async throws {
+        let store = makeStore()
+        let session = try XCTUnwrap(store.workspaces[0].activeSession)
+        let controller = makeController(stores: [store])
+
+        let unknown = await respond(controller, KookyCLIRequest(
+            verb: .send, tab: UUID().uuidString, text: "hi"
+        ))
+        XCTAssertFalse(unknown.ok)
+        XCTAssertTrue(unknown.error?.contains("no tab with id") == true)
+
+        let empty = await respond(controller, KookyCLIRequest(
+            verb: .send, tab: session.id.uuidString, text: ""
+        ))
+        XCTAssertFalse(empty.ok)
+        XCTAssertTrue(engine(session).pastedTexts.isEmpty)
+    }
+
     // MARK: open
 
     func testOpenPlainTerminalTab() async throws {

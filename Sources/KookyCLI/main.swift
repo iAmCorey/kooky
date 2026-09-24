@@ -83,7 +83,7 @@ func printSuccess(_ response: KookyCLIResponse, for command: KookyCLICommand) {
         // One line either way; the id stays the third word for scripts.
         let head = response.tabId.map { "opened tab \(KookyHookKit.plain($0))" } ?? "opened"
         print(response.note.map { "\(head) — \(KookyHookKit.plain($0))" } ?? head)
-    case .resume, .focus, .close, .rename:
+    case .resume, .focus, .close, .rename, .send:
         print(KookyHookKit.plain(response.note ?? "ok"))
     case .help:
         break

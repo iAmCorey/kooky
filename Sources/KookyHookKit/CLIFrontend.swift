@@ -21,6 +21,9 @@ public enum KookyCLICommand: Equatable, Sendable {
     case focus(tab: String)
     case close(tab: String)
     case rename(tab: String, title: String)
+    /// Types `text` into a running tab as a paste, then Return unless
+    /// `submit` is false — the ⌘L composer's two steps, driven from outside.
+    case send(tab: String, text: String, submit: Bool)
     case status(json: Bool)
     case help
 }
@@ -76,11 +79,16 @@ extension KookyHookKit {
             boolFlags: ["--json"],
             usage: "usage: kooky-cli status [--json]"
         ),
+        "send": VerbSpec(
+            valueFlags: ["--tab", "--text"],
+            boolFlags: ["--no-enter"],
+            usage: "usage: kooky-cli send --tab <session-uuid> --text <text> [--no-enter]"
+        ),
     ]
 
     private static func unknownVerbFailure(_ verb: String) -> KookyCLIParseFailure {
         KookyCLIParseFailure(
-            "unknown command '\(verb)' — one of: open, resume, list, focus, close, rename, status. Run `kooky-cli --help`."
+            "unknown command '\(verb)' — one of: open, resume, list, focus, close, rename, send, status. Run `kooky-cli --help`."
         )
     }
 
@@ -190,6 +198,12 @@ extension KookyHookKit {
                     .rename(tab: tab, title: title)
                 }
             }
+        case "send":
+            return requireTab().flatMap { tab in
+                require("--text").map { text in
+                    .send(tab: tab, text: text, submit: !bools.contains("--no-enter"))
+                }
+            }
         case "status":
             return .success(.status(json: bools.contains("--json")))
         default:
@@ -226,6 +240,9 @@ extension KookyHookKit {
             return KookyCLIRequest(verb: .close, tab: tab)
         case .rename(let tab, let title):
             return KookyCLIRequest(verb: .rename, tab: tab, title: title)
+        case .send(let tab, let text, let submit):
+            // `submit` ships only when false, keeping the common request lean.
+            return KookyCLIRequest(verb: .send, tab: tab, text: text, submit: submit ? nil : false)
         case .status:
             return KookyCLIRequest(verb: .status)
         case .help:
@@ -273,6 +290,9 @@ extension KookyHookKit {
           close --tab <uuid>      close a tab (in-app confirmation rules apply)
           rename --tab <uuid> --title <title>
                                   set a tab's title (clear it in-app)
+          send --tab <uuid> --text <text> [--no-enter]
+                                  type <text> into a running tab as a paste,
+                                  then Return (skip it with --no-enter)
           status [--json]         app version + protocol; exits 1 when
                                   kooky isn't running
 

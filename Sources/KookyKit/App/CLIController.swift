@@ -190,6 +190,8 @@ final class KookyCLIController {
             completion(handleClose(request))
         case .rename:
             completion(handleRename(request))
+        case .send:
+            completion(handleSend(request))
         case .open:
             handleOpen(request, isCallerWaiting: isCallerWaiting, completion: completion)
         case .resume:
@@ -279,6 +281,25 @@ final class KookyCLIController {
         }
         hit.context.store.renameTab(hit.session, to: title)
         return ok(note: "renamed")
+    }
+
+    /// Same two steps as the ⌘L composer: paste (bracketed, newlines intact),
+    /// then a carriage return to submit. Local socket only, like `open -e`.
+    private func handleSend(_ request: KookyCLIRequest) -> KookyCLIResponse {
+        guard let id = sessionUUID(request) else {
+            return refuse("send needs --tab <session-uuid>")
+        }
+        guard let text = request.text, !text.isEmpty else {
+            return refuse("send needs --text <text>")
+        }
+        guard let hit = locate(id) else {
+            return refuse("no tab with id \(id.uuidString) — run `kooky-cli list`")
+        }
+        hit.session.engine.paste(text)
+        if request.submit != false {
+            hit.session.engine.sendInput("\r")
+        }
+        return ok(note: request.submit == false ? "pasted" : "sent")
     }
 
     private func handleOpen(
@@ -684,7 +705,8 @@ final class KookyCLIController {
                                     agent: tab.displayAgent.isShell ? "terminal" : tab.displayAgent.id,
                                     agentState: tab.displayAgent.isShell
                                         ? nil
-                                        : Self.stateString(AgentMonitor.state(of: tab))
+                                        : Self.stateString(AgentMonitor.state(of: tab)),
+                                    conversationId: tab.conversationId
                                 )
                             }
                         }

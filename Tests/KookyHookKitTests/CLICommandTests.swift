@@ -145,6 +145,26 @@ final class CLICommandTests: XCTestCase {
         XCTAssertNotNil(parseError(["rename", "--tab", uuid, "--title", "  "]))
     }
 
+    func testParseSend() {
+        let uuid = "6BA7B810-9DAD-11D1-80B4-00C04FD430C8"
+        XCTAssertEqual(
+            parsed(["send", "--tab", uuid, "--text", "check your inbox"]),
+            .send(tab: uuid, text: "check your inbox", submit: true)
+        )
+        XCTAssertEqual(
+            parsed(["send", "--tab", uuid, "--text", "draft", "--no-enter"]),
+            .send(tab: uuid, text: "draft", submit: false)
+        )
+        // A dash-leading value is taken verbatim, like `open -e`.
+        XCTAssertEqual(
+            parsed(["send", "--tab", uuid, "--text", "--help"]),
+            .send(tab: uuid, text: "--help", submit: true)
+        )
+        XCTAssertNotNil(parseError(["send", "--tab", uuid]), "missing --text")
+        XCTAssertNotNil(parseError(["send", "--text", "x"]), "missing --tab")
+        XCTAssertNotNil(parseError(["send", "--tab", "not-a-uuid", "--text", "x"]))
+    }
+
     // MARK: parse — failures
 
     func testParseFailsOnUnknownVerbAndFlag() {
@@ -223,6 +243,17 @@ final class CLICommandTests: XCTestCase {
         XCTAssertEqual(rename?.verb, "rename")
         XCTAssertEqual(rename?.tab, "ID")
         XCTAssertEqual(rename?.title, "new name")
+    }
+
+    func testRequestMappingForSend() {
+        let send = KookyHookKit.cliRequest(for: .send(tab: "ID", text: "hi", submit: true))
+        XCTAssertEqual(send?.verb, "send")
+        XCTAssertEqual(send?.tab, "ID")
+        XCTAssertEqual(send?.text, "hi")
+        // Submitting is the default, so it ships no field at all.
+        XCTAssertNil(send?.submit)
+        let pasteOnly = KookyHookKit.cliRequest(for: .send(tab: "ID", text: "hi", submit: false))
+        XCTAssertEqual(pasteOnly?.submit, false)
     }
 
     // MARK: wire round-trip
