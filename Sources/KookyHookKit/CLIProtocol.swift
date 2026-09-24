@@ -71,6 +71,7 @@ public enum KookyCLIVerb: String, Sendable {
     case close
     case status
     case rename
+    case send
 }
 
 public struct KookyCLIRequest: Codable, Equatable, Sendable {
@@ -99,6 +100,12 @@ public struct KookyCLIRequest: Codable, Equatable, Sendable {
     /// activation, no window fronting, and the tab is not made its pane's
     /// active tab.
     public var noFocus: Bool?
+    /// `send --text`: typed into the tab as a paste. OPTIONAL on the wire,
+    /// like `title`, so older requests still decode.
+    public var text: String?
+    /// `send`: false = paste without the trailing Return (`--no-enter`).
+    /// Absent means submit.
+    public var submit: Bool?
 
     public init(
         verb: KookyCLIVerb,
@@ -108,7 +115,9 @@ public struct KookyCLIRequest: Codable, Equatable, Sendable {
         conversationId: String? = nil,
         tab: String? = nil,
         title: String? = nil,
-        noFocus: Bool? = nil
+        noFocus: Bool? = nil,
+        text: String? = nil,
+        submit: Bool? = nil
     ) {
         self.kind = KookyCLIProtocol.kind
         self.protocolVersion = KookyCLIProtocol.version
@@ -120,6 +129,8 @@ public struct KookyCLIRequest: Codable, Equatable, Sendable {
         self.tab = tab
         self.title = title
         self.noFocus = noFocus
+        self.text = text
+        self.submit = submit
     }
 }
 
@@ -205,14 +216,18 @@ public struct KookyCLITabInfo: Codable, Equatable, Sendable {
     public var agent: String
     /// running / waiting / failed / idle — only for agent tabs.
     public var agentState: String?
+    /// The agent's own conversation id when kooky knows it (the one
+    /// `resume --id` takes). OPTIONAL so older app replies still decode.
+    public var conversationId: String?
 
-    public init(id: String, title: String, cwd: String, isActive: Bool, agent: String, agentState: String?) {
+    public init(id: String, title: String, cwd: String, isActive: Bool, agent: String, agentState: String?, conversationId: String? = nil) {
         self.id = id
         self.title = title
         self.cwd = cwd
         self.isActive = isActive
         self.agent = agent
         self.agentState = agentState
+        self.conversationId = conversationId
     }
 }
 
