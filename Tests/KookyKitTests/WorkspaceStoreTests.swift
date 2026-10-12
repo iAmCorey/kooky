@@ -611,6 +611,18 @@ final class WorkspaceStoreTests: XCTestCase {
         XCTAssertEqual(ws.title, "corey@web-prod: ~/srv")
     }
 
+    func testLocalTerminalTitleDropsUserAndHostPrefix() {
+        let store = makeStore()
+        let ws = store.addWorkspace(workingDirectory: projectA)
+        let session = firstPane(ws).tabs[0]
+        let host = ProcessInfo.processInfo.hostName
+
+        engine(session).emitTitle("\(NSUserName())@\(host): ~/srv")
+
+        XCTAssertEqual(session.title, "~/srv")
+        XCTAssertEqual(ws.title, "~/srv")
+    }
+
     func testAgentStatusTitleMarkerSurfacesRemoteAgentWithoutChangingLaunchTemplate() {
         let persistence = InMemoryPersistence()
         let store = WorkspaceStore(

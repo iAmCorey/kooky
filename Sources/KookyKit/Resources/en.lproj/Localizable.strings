@@ -2,3 +2,13 @@
 "Restart Kooky" = "Restart Kooky";
 "Follow System" = "System";
 "Clear Glass" = "Clear";
+"DELETE-SESSION" = "DELETE SESSION";
+"delete session" = "Delete session";
+"deleting…" = "Deleting…";
+"couldn't delete session" = "Couldn't delete session";
+"Window" = "Window";
+"newline-shortcut" = "Newline shortcut";
+"chrome-background-mix" = "Chrome background mix";
+"Dark chrome background mix toward black. 0% uses the theme background unchanged; 16% is the default." = "Dark chrome background mix toward black. 0% uses the theme background unchanged; 16% is the default.";
+"max-tab-width" = "Max tab width";
+"Maximum tab width in pixels. Values are capped at 200px." = "Maximum tab width in pixels. Values are capped at 200px.";

@@ -39,6 +39,9 @@ enum KookySettings {
       // "sidebar": {
       //   "mode": "full"
       // },
+      // "tab": {
+      //   "maxWidth": 200
+      // },
       "appearance": {
         "themeSchemaVersion": 2,
         "mode": "system",
