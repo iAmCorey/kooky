@@ -24,6 +24,10 @@ struct AgentSessionRecord: Identifiable, Hashable, Sendable {
     let cwdPath: String
     /// Session file's modification date — "when this conversation last moved".
     let lastActivity: Date
+    /// `agentId:conversationId`, built once like `cwdPath` — the filter and
+    /// `ForEach` read it per record per evaluation. Also the key the
+    /// hidden-sessions file stores, so its shape is wire format.
+    let id: String
 
     init(agentId: String, conversationId: String, title: String, cwd: URL, lastActivity: Date) {
         self.agentId = agentId
@@ -32,9 +36,8 @@ struct AgentSessionRecord: Identifiable, Hashable, Sendable {
         self.cwd = cwd
         self.cwdPath = cwd.path
         self.lastActivity = lastActivity
+        self.id = "\(agentId):\(conversationId)"
     }
-
-    var id: String { "\(agentId):\(conversationId)" }
 }
 
 // MARK: - Scanner
@@ -411,8 +414,20 @@ enum AgentSessionScanner {
 @MainActor
 @Observable
 final class AgentSessionHistory {
-    static let shared = AgentSessionHistory()
-    init() {}
+    static let shared = AgentSessionHistory(
+        hiddenFileURL: KookyShellIntegration.kookyAppSupport("hidden-sessions.json", isDirectory: false)
+    )
+
+    /// `hiddenFileURL` nil keeps hidden ids in memory only — the default, so
+    /// a test building its own model can never write the user's real list.
+    init(hiddenFileURL: URL? = nil) {
+        self.hiddenFileURL = hiddenFileURL
+        if let hiddenFileURL,
+           let data = try? Data(contentsOf: hiddenFileURL),
+           let ids = try? JSONDecoder().decode([String].self, from: data) {
+            hiddenIds = Set(ids)
+        }
+    }
     /// Appear-triggered refreshes within this window reuse the last result —
     /// every panel remount (agents↔history flip, hidden↔full) fires one, and
     /// a full rescan is ~75MB of file-head I/O. The header's rescan button
@@ -428,6 +443,28 @@ final class AgentSessionHistory {
     /// state.
     private(set) var isScanning = false
     private var lastScanCompleted: Date?
+
+    /// Sessions the user hid from the pane, by `AgentSessionRecord.id`.
+    /// kooky-side only — the agent's own data is never touched, so hiding is
+    /// always reversible. Ids whose session drops out of a scan are kept: the
+    /// scan is capped per agent, so absence doesn't mean the session is gone.
+    /// The cap applies before hiding, so hidden sessions still take slots.
+    private(set) var hiddenIds: Set<String> = []
+    private let hiddenFileURL: URL?
+
+    func setHidden(_ hidden: Bool, for record: AgentSessionRecord) {
+        // Check first: `insert`/`remove` mutate in place, which notifies
+        // observers even when nothing changes (only plain assignment is
+        // same-value gated).
+        guard hiddenIds.contains(record.id) != hidden else { return }
+        if hidden { hiddenIds.insert(record.id) } else { hiddenIds.remove(record.id) }
+        guard let hiddenFileURL else { return }
+        try? FileManager.default.createDirectory(
+            at: hiddenFileURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try? JSONEncoder().encode(hiddenIds.sorted()).write(to: hiddenFileURL, options: .atomic)
+    }
 
     func refresh(force: Bool = false) {
         guard !isScanning else { return }
@@ -486,12 +523,12 @@ private let monthDayFormatter: DateFormatter = {
 
 // MARK: - Filter
 
-/// The History pane's three filters as one pure value, so the row list, the
-/// agent chips, and the header count all derive from one pass. Location
-/// scopes FIRST, and the chip set is taken from the scoped records BEFORE
-/// agent + query narrow them: a chip for an agent with no sessions in this
-/// workspace would click through to an empty list, while an agent hidden
-/// only by the current chip/query must keep its chip so it can be picked.
+/// The History pane's filters as one pure value, so the row list, the agent
+/// chips, and the header count all derive from one pass. Location and hiding
+/// scope FIRST, and the chip set is taken from what's left BEFORE agent +
+/// query narrow it: a chip for an agent with nothing listable here would
+/// click through to an empty list, while an agent hidden only by the current
+/// chip/query must keep its chip so it can be picked.
 struct SessionHistoryFilter {
     /// Every spelling of the workspace root a record's cwd may carry
     /// (`WorkspaceStore.historyWorkspaceRootPaths`); empty = every location.
@@ -499,11 +536,17 @@ struct SessionHistoryFilter {
     /// nil = every agent.
     var agentId: String?
     var query: String
+    /// `AgentSessionHistory.hiddenIds`; dropped unless `showHidden`.
+    var hiddenIds: Set<String> = []
+    var showHidden = false
 
     struct Result {
         var visible: [AgentSessionRecord] = []
-        /// Agents with at least one session in scope.
+        /// Agents with at least one listable session in this location.
         var presentAgentIds: Set<String> = []
+        /// Hidden sessions matching every other filter — what turning
+        /// "show hidden" on would add (or, while on, what it shows dimmed).
+        var hiddenCount = 0
     }
 
     func apply(_ records: [AgentSessionRecord]) -> Result {
@@ -513,12 +556,17 @@ struct SessionHistoryFilter {
                !workspaceRootPaths.contains(where: { pathIsInside(record.cwdPath, root: $0) }) {
                 continue
             }
-            result.presentAgentIds.insert(record.agentId)
+            let isHidden = hiddenIds.contains(record.id)
+            if !isHidden || showHidden { result.presentAgentIds.insert(record.agentId) }
             if let agentId, record.agentId != agentId { continue }
             if !query.isEmpty,
                !record.title.localizedCaseInsensitiveContains(query),
                !record.cwdPath.localizedCaseInsensitiveContains(query) {
                 continue
+            }
+            if isHidden {
+                result.hiddenCount += 1
+                if !showHidden { continue }
             }
             result.visible.append(record)
         }
@@ -528,9 +576,9 @@ struct SessionHistoryFilter {
 
 // MARK: - View
 
-/// Right sidebar's History pane: workspace / agent / search filters over the
-/// on-disk session list; a click resumes that conversation in a new tab of
-/// the active workspace.
+/// Right sidebar's History pane: workspace / agent / search / hidden filters
+/// over the on-disk session list; a click resumes that conversation in a new
+/// tab of the active workspace.
 struct SessionHistoryView: View {
     @Bindable var store: WorkspaceStore
     var history = AgentSessionHistory.shared
@@ -550,7 +598,9 @@ struct SessionHistoryView: View {
         let filtered = SessionHistoryFilter(
             workspaceRootPaths: store.historyWorkspaceRootPaths,
             agentId: store.historyFilterAgentId,
-            query: store.historySearchQuery
+            query: store.historySearchQuery,
+            hiddenIds: history.hiddenIds,
+            showHidden: store.historyShowHidden
         ).apply(history.records)
         let visible = filtered.visible
         VStack(spacing: 0) {
@@ -559,7 +609,7 @@ struct SessionHistoryView: View {
             }
             searchField
             filterChips(present: filtered.presentAgentIds)
-            workspaceFilterRow
+            filterToggles(hiddenCount: filtered.hiddenCount)
             resumeErrorBanner
             if visible.isEmpty {
                 PanelEmptyState(
@@ -570,17 +620,22 @@ struct SessionHistoryView: View {
                 ScrollView {
                     LazyVStack(spacing: 0) {
                         ForEach(visible) { record in
-                            SessionHistoryRow(record: record) {
-                                switch store.resumeAgentSession(record) {
-                                case .success:
-                                    resumeError = nil
-                                case .failure(let refusal):
-                                    resumeError = refusal.message(
-                                        agentId: record.agentId,
-                                        conversationId: record.conversationId
-                                    )
-                                }
-                            }
+                            SessionHistoryRow(
+                                record: record,
+                                isHidden: history.hiddenIds.contains(record.id),
+                                onResume: {
+                                    switch store.resumeAgentSession(record) {
+                                    case .success:
+                                        resumeError = nil
+                                    case .failure(let refusal):
+                                        resumeError = refusal.message(
+                                            agentId: record.agentId,
+                                            conversationId: record.conversationId
+                                        )
+                                    }
+                                },
+                                onSetHidden: { history.setHidden($0, for: record) }
+                            )
                         }
                     }
                     .padding(.vertical, 4)
@@ -673,8 +728,9 @@ struct SessionHistoryView: View {
         .padding(.top, 8)
     }
 
-    /// `present` is the agent set of the workspace-scoped records: with the
-    /// workspace filter on, only agents that have sessions HERE get a chip.
+    /// `present` is the agent set of the listable records here (workspace-
+    /// scoped, hidden ones out unless shown): with the workspace filter on,
+    /// only agents that have sessions HERE get a chip.
     private func filterChips(present: Set<String>) -> some View {
         // The full scanned roster can't fit a 230pt panel — chips show only
         // the agents PRESENT in the scoped results (in roster order), which
@@ -694,22 +750,34 @@ struct SessionHistoryView: View {
         }
     }
 
-    /// Location is its own axis, so it gets its own row under the agent
-    /// chips — a checkbox, not a member of the radio group. Shown exactly
-    /// when the store has something local to scope to.
+    /// Location and hidden sessions are their own axes, so they're
+    /// checkboxes, not members of the chip radio group. "show hidden" stays
+    /// up while on, so it can be unchecked after its last session is restored.
     @ViewBuilder
-    private var workspaceFilterRow: some View {
+    private func filterToggles(hiddenCount: Int) -> some View {
         if store.historyScopeAnchor != nil {
-            KookyCheckbox(
-                title: String(localized: "only this workspace", bundle: .kookyResources),
-                isOn: $store.historyFilterCurrentWorkspace,
-                size: 10
+            filterToggle(
+                String(localized: "only this workspace", bundle: .kookyResources),
+                isOn: $store.historyFilterCurrentWorkspace
             )
+        }
+        if hiddenCount > 0 || store.historyShowHidden {
+            filterToggle(
+                String.localizedStringWithFormat(
+                    String(localized: "show hidden (%d)", bundle: .kookyResources),
+                    hiddenCount
+                ),
+                isOn: $store.historyShowHidden
+            )
+        }
+    }
+
+    private func filterToggle(_ title: String, isOn: Binding<Bool>) -> some View {
+        KookyCheckbox(title: title, isOn: isOn, size: 10)
             .controlSize(.small)
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, 14)
             .padding(.bottom, 6)
-        }
     }
 
     private func filterChip(_ agentId: String?, label: String) -> some View {
@@ -754,31 +822,42 @@ private struct HistoryFilterChip: View {
 
 private struct SessionHistoryRow: View {
     let record: AgentSessionRecord
+    let isHidden: Bool
     let onResume: () -> Void
-    private let template: AgentTemplate?
+    let onSetHidden: (Bool) -> Void
 
     @State private var isHovered = false
 
-    init(record: AgentSessionRecord, onResume: @escaping () -> Void) {
-        self.record = record
-        self.onResume = onResume
-        self.template = AgentTemplate.builtin(id: record.agentId)
-    }
+    private var template: AgentTemplate? { AgentTemplate.builtin(id: record.agentId) }
 
     var body: some View {
-        HStack(spacing: 10) {
-            AgentIconView(asset: template?.iconAsset, fallbackSymbol: template?.symbol ?? "sparkles", size: 16)
-            VStack(alignment: .leading, spacing: 1) {
-                Text(record.title.isEmpty ? String(localized: "untitled", bundle: .kookyResources) : record.title)
-                    .font(Theme.mono(12, weight: .medium))
-                    .foregroundStyle(record.title.isEmpty ? Theme.chromeMuted : Theme.chromeForeground)
-                    .lineLimit(1)
-                Text("\(record.cwd.lastPathComponent) · \(relativeActivityLabel(record.lastActivity))")
-                    .font(Theme.mono(10))
-                    .foregroundStyle(Theme.chromeMuted.opacity(0.75))
-                    .lineLimit(1)
+        HStack(spacing: 6) {
+            HStack(spacing: 10) {
+                AgentIconView(asset: template?.iconAsset, fallbackSymbol: template?.symbol ?? "sparkles", size: 16)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(record.title.isEmpty ? String(localized: "untitled", bundle: .kookyResources) : record.title)
+                        .font(Theme.mono(12, weight: .medium))
+                        .foregroundStyle(record.title.isEmpty ? Theme.chromeMuted : Theme.chromeForeground)
+                        .lineLimit(1)
+                    Text("\(record.cwd.lastPathComponent) · \(relativeActivityLabel(record.lastActivity))")
+                        .font(Theme.mono(10))
+                        .foregroundStyle(Theme.chromeMuted.opacity(0.75))
+                        .lineLimit(1)
+                }
+                Spacer(minLength: 0)
             }
-            Spacer(minLength: 0)
+            .opacity(isHidden ? 0.45 : 1)
+            // On the content, not the row: a row-level `.help` would win over
+            // the hide button's own (SwiftUI resolves `.help` outermost-first).
+            .help(hoverText)
+            HoverableIconButton(
+                systemName: isHidden ? "eye" : "eye.slash",
+                fontSize: 10,
+                size: Theme.chromeContextButtonSize,
+                help: isHidden ? "show in history" : "hide from history",
+                action: { onSetHidden(!isHidden) }
+            )
+            .revealed(isHovered)
         }
         .padding(.horizontal, 14)
         .frame(height: 46)
@@ -786,7 +865,6 @@ private struct SessionHistoryRow: View {
         .contentShape(Rectangle())
         .onTapGesture(perform: onResume)
         .onHover { isHovered = $0 }
-        .help(hoverText)
     }
 
     private var hoverText: String {

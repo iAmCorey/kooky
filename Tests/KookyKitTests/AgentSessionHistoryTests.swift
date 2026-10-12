@@ -1,4 +1,5 @@
 import SQLite3
+import Observation
 import XCTest
 @testable import KookyKit
 
@@ -707,8 +708,95 @@ final class SessionHistoryFilterTests: XCTestCase {
         SessionStoreFixtures.record(agentId: agentId, cwd: URL(fileURLWithPath: cwd), title: title, conversationId: UUID().uuidString)
     }
 
-    private func filter(roots: [String] = [], agentId: String? = nil, query: String = "") -> SessionHistoryFilter {
-        SessionHistoryFilter(workspaceRootPaths: roots, agentId: agentId, query: query)
+    private func filter(
+        roots: [String] = [],
+        agentId: String? = nil,
+        query: String = "",
+        hidden: Set<String> = [],
+        showHidden: Bool = false
+    ) -> SessionHistoryFilter {
+        SessionHistoryFilter(
+            workspaceRootPaths: roots,
+            agentId: agentId,
+            query: query,
+            hiddenIds: hidden,
+            showHidden: showHidden
+        )
+    }
+
+    // MARK: Hidden sessions
+
+    func testHiddenSessionsDropOutUntilShown() {
+        let hidden = record(cwd: "/a"), kept = record(cwd: "/a")
+        let ids: Set = [hidden.id]
+
+        let off = filter(hidden: ids).apply([hidden, kept])
+        XCTAssertEqual(off.visible.map(\.id), [kept.id])
+        XCTAssertEqual(off.hiddenCount, 1)
+
+        let on = filter(hidden: ids, showHidden: true).apply([hidden, kept])
+        XCTAssertEqual(on.visible.map(\.id), [hidden.id, kept.id])
+        XCTAssertEqual(on.hiddenCount, 1, "the toggle keeps counting while it's on")
+    }
+
+    func testAnAgentWhoseSessionsAreAllHiddenLosesItsChip() {
+        let codex = record("codex", cwd: "/a")
+        let claude = record(AgentTemplate.claudeCodeID, cwd: "/a")
+        XCTAssertEqual(
+            filter(hidden: [codex.id]).apply([codex, claude]).presentAgentIds,
+            [AgentTemplate.claudeCodeID]
+        )
+        XCTAssertEqual(
+            filter(hidden: [codex.id], showHidden: true).apply([codex, claude]).presentAgentIds,
+            ["codex", AgentTemplate.claudeCodeID]
+        )
+    }
+
+    func testHiddenCountFollowsEveryOtherFilter() {
+        // The count says what "show hidden" would add to THIS list.
+        let claude = record(AgentTemplate.claudeCodeID, cwd: "/a/b", title: "alpha")
+        let codex = record("codex", cwd: "/a/b", title: "beta")
+        let outside = record(AgentTemplate.claudeCodeID, cwd: "/x", title: "alpha")
+        let hidden: Set = [claude.id, codex.id, outside.id]
+        let all = [claude, codex, outside]
+        XCTAssertEqual(filter(roots: ["/a/b"], hidden: hidden).apply(all).hiddenCount, 2, "workspace")
+        XCTAssertEqual(filter(roots: ["/a/b"], agentId: "codex", hidden: hidden).apply(all).hiddenCount, 1, "agent chip")
+        XCTAssertEqual(filter(roots: ["/a/b"], query: "alpha", hidden: hidden).apply(all).hiddenCount, 1, "search")
+    }
+
+    func testHiddenSessionsFileIsALockedWireFormat() throws {
+        // The file stores `AgentSessionRecord.id`. Reshaping that id (it is
+        // also the ForEach identity) would silently un-hide every saved one.
+        let file = tempDir.appendingPathComponent("hidden-sessions.json")
+        let session = SessionStoreFixtures.record(
+            agentId: "codex", cwd: URL(fileURLWithPath: "/a"), title: "t", conversationId: "0199-abc"
+        )
+        AgentSessionHistory(hiddenFileURL: file).setHidden(true, for: session)
+        XCTAssertEqual(try String(contentsOf: file, encoding: .utf8), #"["codex:0199-abc"]"#)
+    }
+
+    func testHidingAgainOrRestoringAVisibleSessionDoesNotNotify() {
+        let history = AgentSessionHistory()
+        let session = record(cwd: "/a")
+        history.setHidden(true, for: session)
+        let notified = expectation(description: "hiddenIds change notification")
+        notified.isInverted = true
+        withObservationTracking { _ = history.hiddenIds } onChange: { notified.fulfill() }
+        history.setHidden(true, for: session)
+        history.setHidden(false, for: record(cwd: "/b"))
+        wait(for: [notified], timeout: 0.1)
+    }
+
+    func testHiddenSessionsPersistAcrossLaunches() {
+        let file = tempDir.appendingPathComponent("hidden-sessions.json")
+        let session = record(cwd: "/a")
+
+        AgentSessionHistory(hiddenFileURL: file).setHidden(true, for: session)
+        let relaunched = AgentSessionHistory(hiddenFileURL: file)
+        XCTAssertEqual(relaunched.hiddenIds, [session.id])
+
+        relaunched.setHidden(false, for: session)
+        XCTAssertEqual(AgentSessionHistory(hiddenFileURL: file).hiddenIds, [])
     }
 
     // MARK: Pure filter

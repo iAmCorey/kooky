@@ -7,6 +7,7 @@ Notable changes per release. Tagged commits use `vX.Y.Z` shortform.
 - New: keyboard shortcuts that match Ghostty, Warp and cmux. ⌥⌘ + arrow moves focus to the split in that direction, ⌃⌘ + arrow moves the nearest divider, and ⌘Home / ⌘End / ⌘Page Up / ⌘Page Down scroll the terminal to the top, to the bottom, or by a page — following your Ghostty config if you've rebound them.
 - New: ⌃⌘[ / ⌃⌘] step to the previous / next workspace, wrapping at the ends. The sidebar scrolls to the workspace you land on and unfolds its group if it was collapsed. Thanks @kaijianding for the idea and a draft implementation. (#84)
 - Changed: ⌘9 now jumps to the last tab, as in Ghostty, Warp and browsers.
+- New: hide sessions from the History panel. Hover a row and click the eye to hide it; "show hidden" brings them back so you can restore them. kooky only remembers what you hid — the agents' own conversation data is never touched. Thanks @kaijianding for the idea and a draft implementation. (#83)
 - Fixed: running `omp update` inside kooky now updates omp itself. omp used to mistake kooky's launcher for its own program and overwrite it, so the update didn't stick and the agent's status dot went dark until kooky restarted. Thanks @kaijianding for the diagnosis and a draft fix. (#82)
 
 ## v0.51.11 — 2026-09-23

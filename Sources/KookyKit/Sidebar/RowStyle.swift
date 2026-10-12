@@ -19,6 +19,12 @@ extension View {
         return background(color)
     }
 
+    /// Show-on-hover controls: invisible AND unclickable while hidden, but
+    /// still laid out so revealing one never shifts the row.
+    func revealed(_ visible: Bool) -> some View {
+        opacity(visible ? 1 : 0).allowsHitTesting(visible)
+    }
+
     /// Menu rows are single-state: hover === selected, so they use the active
     /// theme token instead of the quieter row-hover token.
     func menuRowHover(_ isHovered: Bool) -> some View {

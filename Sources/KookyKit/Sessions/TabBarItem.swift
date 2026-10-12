@@ -32,8 +32,7 @@ struct TabBarItem: View {
                 help: "Close tab",
                 action: onClose
             )
-            .opacity(isHovered || isActive ? 1 : 0)
-            .allowsHitTesting(isHovered || isActive)
+            .revealed(isHovered || isActive)
         }
         .foregroundStyle(isActive ? Theme.chromeForeground : Theme.chromeForeground.opacity(0.62))
         .padding(.horizontal, 11)

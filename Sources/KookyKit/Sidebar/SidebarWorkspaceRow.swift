@@ -382,8 +382,7 @@ struct SidebarWorkspaceRow: View {
                         help: "Create worktree",
                         action: onCreateWorktree
                     )
-                    .opacity(isHovered ? 1 : 0)
-                    .allowsHitTesting(isHovered)
+                    .revealed(isHovered)
                 }
                 ZStack {
                     if let dotColor {
@@ -397,8 +396,7 @@ struct SidebarWorkspaceRow: View {
                         help: workspace.worktreeParentId == nil ? "Close workspace" : "Close worktree",
                         action: onClose
                     )
-                    .opacity(isHovered ? 1 : 0)
-                    .allowsHitTesting(isHovered)
+                    .revealed(isHovered)
                 }
                 .frame(width: 20, alignment: .trailing)
             }

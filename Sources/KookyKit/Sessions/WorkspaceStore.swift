@@ -146,6 +146,10 @@ final class WorkspaceStore {
     /// like the agent chip — it isn't persisted, and a preference that
     /// reset to ON would need re-flipping every launch.
     var historyFilterCurrentWorkspace = false
+    /// The "show hidden" checkbox: bring sessions hidden from the pane back
+    /// into the list (dimmed) so they can be restored. Runtime-only like the
+    /// other history filters.
+    var historyShowHidden = false
     /// The directory the checkbox would scope to, or nil when there is
     /// nothing local to scope: no workspace, or an SSH workspace (its
     /// sessions live on the remote — the local spawn dir says nothing about

@@ -308,6 +308,9 @@
 "search sessions" = "搜索会话";
 "all" = "全部";
 "only this workspace" = "仅显示当前工作区";
+"show hidden (%d)" = "显示已隐藏（%d）";
+"hide from history" = "从历史中隐藏";
+"show in history" = "恢复显示";
 "untitled" = "未命名";
 "color" = "颜色";
 "no access" = "无访问权限";
