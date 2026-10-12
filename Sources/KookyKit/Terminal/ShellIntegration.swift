@@ -1516,21 +1516,25 @@ enum KookyShellIntegration {
     private static let remoteAgentMarkerSlugs = AgentTemplate.builtin.compactMap(\.initialCommand)
 
     /// Common bash header for every wrapper: locate the real binary on
-    /// `$PATH` skipping our own dir, abort if missing.
+    /// `$PATH` skipping our own dir (and keep that shim-free PATH as
+    /// `unshimmed_path` for `selfUpdatePathGuard`), abort if missing. Walks
+    /// PATH by slicing at each `:` rather than IFS splitting, which drops
+    /// empty entries — the current dir — that the shim-free PATH must keep.
     private static func wrapperPreamble(binary: String) -> String {
         """
         #!/usr/bin/env bash
         self_dir="$(cd "$(dirname "$0")" && pwd)"
         real=""
-        IFS=:
-        for dir in $PATH; do
+        unshimmed_path=""
+        rest="$PATH:"
+        while [[ -n "$rest" ]]; do
+            dir="${rest%%:*}"
+            rest="${rest#*:}"
             [[ "$dir" == "$self_dir" ]] && continue
-            if [[ -x "$dir/\(binary)" ]]; then
-                real="$dir/\(binary)"
-                break
-            fi
+            unshimmed_path="$unshimmed_path:$dir"
+            [[ -z "$real" && -x "$dir/\(binary)" ]] && real="$dir/\(binary)"
         done
-        unset IFS
+        unshimmed_path="${unshimmed_path#:}"
 
         if [[ -z "$real" ]]; then
             printf '\\n  \\033[33m%s is not installed.\\033[0m\\n\\n' "\(binary)" >&2
@@ -1553,14 +1557,33 @@ enum KookyShellIntegration {
     /// straight through, skipping instrumentation: a KookyHook ping, OSC
     /// markers, and `-c notify` / `--settings` injection would all perturb the
     /// agent it spawned. Gate on BOTH fds (not `||`) so `claude -p … | tee`
-    /// (stdin still a tty) keeps its sidebar dot. Each wrapper places this after
-    /// the preamble AND after any exec-safety check — antigravity must reject
-    /// the IDE-launcher shim first, else a background `agy` reopens the GUI.
+    /// (stdin still a tty) keeps its sidebar dot. Spliced via `agentEntryGuards`.
     private static let ttyPassthroughGuard = """
     if [[ ! -t 0 && ! -t 1 ]]; then
         exec "$real" "$@"
     fi
     """
+
+    /// Run an `update` invocation with this shim's dir off PATH. A self-updater
+    /// that finds itself through PATH (`omp update` does) would otherwise take
+    /// the shim for its own binary and overwrite it with the new release: the
+    /// real install stays old, and kooky's next launch rewrites the shim — so
+    /// the update silently vanishes. Any `update` argument counts, since global
+    /// flags may come first (`omp --profile=work update`, which omp's own
+    /// profile aliases expand to); over-matching only drops kooky's dir from
+    /// that one run's PATH. Only covers runs through the shim — an absolute
+    /// path or `bunx` still inherits kooky's dir on PATH.
+    private static let selfUpdatePathGuard = """
+    for arg in "$@"; do
+        [[ "$arg" == "update" ]] && { export PATH="$unshimmed_path"; break; }
+    done
+    """
+
+    /// What every agent wrapper body opens with, after the preamble AND after
+    /// any exec-safety check — antigravity must reject the IDE-launcher shim
+    /// first, else a background `agy` reopens the GUI. The update guard runs
+    /// first so a non-tty `update` is covered too.
+    private static let agentEntryGuards = selfUpdatePathGuard + "\n\n" + ttyPassthroughGuard
 
     /// Inside a kooky session ($KOOKY_SURFACE_ID set), injects --settings so
     /// Claude Code's hooks report state back to the app via the bundled
@@ -1570,7 +1593,7 @@ enum KookyShellIntegration {
     static let claudeWrapperScript = """
     \(wrapperPreamble(binary: "claude"))
 
-    \(ttyPassthroughGuard)
+    \(agentEntryGuards)
 
     if [[ -n "$KOOKY_SURFACE_ID" || -n "$KOOKY_AGENT_MARKERS" ]]; then
         \(agentMarkerCommand(slug: "claude", event: .running))
@@ -1608,7 +1631,7 @@ enum KookyShellIntegration {
     static let codexWrapperScript = """
     \(wrapperPreamble(binary: "codex"))
 
-    \(ttyPassthroughGuard)
+    \(agentEntryGuards)
 
     if [[ -n "$KOOKY_SURFACE_ID" || -n "$KOOKY_AGENT_MARKERS" ]]; then
         # Codex doesn't expose SessionStart / SessionEnd lifecycle hooks
@@ -1781,6 +1804,43 @@ enum KookyShellIntegration {
         """
     }
 
+    /// The marker-emitting shim `remoteAgentBootstrapScript` writes for every
+    /// agent binary on the remote (POSIX sh — remote login shells vary). Like
+    /// the local wrappers it hides its own dir from `<agent> update`; see
+    /// `selfUpdatePathGuard`.
+    static let remoteAgentShimScript = #"""
+    #!/bin/sh
+    _kooky_slug="${0##*/}"
+    _kooky_self_dir=$(CDPATH= cd "$(dirname "$0")" && pwd)
+    _kooky_real=""
+    _kooky_path=""
+    _kooky_rest="$PATH:"
+    while [ -n "$_kooky_rest" ]; do
+        _kooky_dir=${_kooky_rest%%:*}
+        _kooky_rest=${_kooky_rest#*:}
+        [ "$_kooky_dir" = "$_kooky_self_dir" ] && continue
+        _kooky_path="$_kooky_path:$_kooky_dir"
+        [ -z "$_kooky_real" ] && [ -x "$_kooky_dir/$_kooky_slug" ] && _kooky_real="$_kooky_dir/$_kooky_slug"
+    done
+    _kooky_path=${_kooky_path#:}
+
+    if [ -z "$_kooky_real" ]; then
+        printf '\033]2;kooky-agent:%s:ended\a' "$_kooky_slug" > /dev/tty 2>/dev/null
+        printf '\n  %s is not installed.\n\n' "$_kooky_slug" >&2
+        exit 127
+    fi
+
+    for _kooky_arg in "$@"; do
+        [ "$_kooky_arg" = update ] && { PATH=$_kooky_path; export PATH; break; }
+    done
+
+    printf '\033]2;kooky-agent:%s:running\a' "$_kooky_slug" > /dev/tty 2>/dev/null
+    "$_kooky_real" "$@"
+    _kooky_status=$?
+    printf '\033]2;kooky-agent:%s:ended\a' "$_kooky_slug" > /dev/tty 2>/dev/null
+    exit "$_kooky_status"
+    """#
+
     static let remoteAgentBootstrapScript: String = {
         let slugs = remoteAgentMarkerSlugs.map(quote).joined(separator: " ")
         return #"""
@@ -1797,31 +1857,7 @@ enum KookyShellIntegration {
         _kooky_write_agent_wrapper() {
             _kooky_slug="$1"
             cat > "$_kooky_bin/$_kooky_slug" <<'KOOKY_AGENT_WRAPPER'
-        #!/bin/sh
-        _kooky_slug="${0##*/}"
-        _kooky_self_dir=$(CDPATH= cd "$(dirname "$0")" && pwd)
-        _kooky_real=""
-        _kooky_old_ifs=$IFS
-        IFS=:
-        for _kooky_dir in $PATH; do
-            [ "$_kooky_dir" = "$_kooky_self_dir" ] && continue
-            [ -x "$_kooky_dir/$_kooky_slug" ] || continue
-            _kooky_real="$_kooky_dir/$_kooky_slug"
-            break
-        done
-        IFS=$_kooky_old_ifs
-
-        if [ -z "$_kooky_real" ]; then
-            printf '\033]2;kooky-agent:%s:ended\a' "$_kooky_slug" > /dev/tty 2>/dev/null
-            printf '\n  %s is not installed.\n\n' "$_kooky_slug" >&2
-            exit 127
-        fi
-
-        printf '\033]2;kooky-agent:%s:running\a' "$_kooky_slug" > /dev/tty 2>/dev/null
-        "$_kooky_real" "$@"
-        _kooky_status=$?
-        printf '\033]2;kooky-agent:%s:ended\a' "$_kooky_slug" > /dev/tty 2>/dev/null
-        exit "$_kooky_status"
+        \#(remoteAgentShimScript)
         KOOKY_AGENT_WRAPPER
             chmod +x "$_kooky_bin/$_kooky_slug"
         }
@@ -1928,7 +1964,7 @@ enum KookyShellIntegration {
     static let kiroWrapperScript = """
     \(wrapperPreamble(binary: "kiro-cli"))
 
-    \(ttyPassthroughGuard)
+    \(agentEntryGuards)
 
     if [[ -n "$KOOKY_SURFACE_ID" || -n "$KOOKY_AGENT_MARKERS" ]]; then
         \(agentMarkerCommand(slug: "kiro-cli", event: .running))
@@ -1970,7 +2006,7 @@ enum KookyShellIntegration {
     /// the binary from a plain Terminal.app shell.
     private static func bracketBody(slug: String) -> String {
         """
-        \(ttyPassthroughGuard)
+        \(agentEntryGuards)
 
         if [[ -n "$KOOKY_SURFACE_ID" || -n "$KOOKY_AGENT_MARKERS" ]]; then
             \(agentMarkerCommand(slug: slug, event: .running))

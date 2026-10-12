@@ -245,6 +245,53 @@ final class ShellIntegrationTests: XCTestCase {
         XCTAssertTrue(script.contains("exec \"$real\" \"$@\""))
     }
 
+    /// An updater that finds itself through PATH (`omp update`) must resolve
+    /// the real binary, not overwrite kooky's shim — also behind global flags
+    /// — while every other call keeps PATH byte-identical. Runs the generated
+    /// local and remote shims, on a plain PATH and on one with empty entries
+    /// (the current dir) at the start, middle and end, which must survive.
+    func testAgentUpdateResolvesTheRealBinaryNotTheShim() throws {
+        let fixture = try ShimFixture()
+        defer { fixture.remove() }
+        let (shimDir, realDir) = (fixture.shimDir, fixture.realDir)
+        for (path, unshimmed) in [
+            ("\(shimDir):\(realDir):/usr/bin:/bin", "real:/usr/bin:/bin"),
+            (":\(shimDir)::\(realDir):/usr/bin:/bin:", "::real:/usr/bin:/bin:"),
+        ] {
+            for (name, shim, interpreter) in [
+                ("local", KookyShellIntegration.bracketWrapperScript(slug: "omp"), "/bin/bash"),
+                ("remote", KookyShellIntegration.remoteAgentShimScript, "/bin/sh"),
+            ] {
+                for args in [["update"], ["--profile=work", "update"]] {
+                    XCTAssertEqual(
+                        try fixture.run(shim, interpreter, args, path: path),
+                        ["real/omp", unshimmed],
+                        "\(name) \(args) on \(fixture.relative(path)): only the shim dir leaves PATH"
+                    )
+                }
+                XCTAssertEqual(
+                    try fixture.run(shim, interpreter, ["chat"], path: path),
+                    ["kooky bin/omp", fixture.relative(path)],
+                    "\(name) on \(fixture.relative(path)): other calls keep PATH"
+                )
+            }
+        }
+    }
+
+    func testEveryAgentWrapperGuardsSelfUpdateButSshDoesNot() {
+        let updateGuard = #"[[ "$arg" == "update" ]]"#
+        for script in [
+            KookyShellIntegration.claudeWrapperScript,
+            KookyShellIntegration.codexWrapperScript,
+            KookyShellIntegration.kiroWrapperScript,
+            KookyShellIntegration.antigravityWrapperScript,
+            KookyShellIntegration.bracketWrapperScript(slug: "amp"),
+        ] {
+            XCTAssertTrue(script.contains(updateGuard))
+        }
+        XCTAssertFalse(KookyShellIntegration.sshWrapperScript.contains(updateGuard), "`ssh update` is a host name")
+    }
+
     func testRemoteAgentBootstrapWritesMarkerWrappers() {
         let script = KookyShellIntegration.remoteAgentBootstrapScript
 
@@ -264,6 +311,10 @@ final class ShellIntegrationTests: XCTestCase {
         XCTAssertTrue(script.contains(#"export PATH="$_kooky_bin:$PATH""#))
         XCTAssertTrue(script.contains("> /dev/tty"), "remote markers must target the tty, not the agent's redirected stdout")
         XCTAssertTrue(script.contains("export HISTFILE="), "remote zsh must reset HISTFILE off the ephemeral ZDOTDIR (else remote history is rm -rf'd on logout)")
+        XCTAssertTrue(
+            script.contains("<<'KOOKY_AGENT_WRAPPER'\n\(KookyShellIntegration.remoteAgentShimScript)\nKOOKY_AGENT_WRAPPER\n"),
+            "the shim must land verbatim at column 0, or its heredoc never terminates"
+        )
     }
 
     func testRemoteBootstrapLaunchesRequestedAgentInEveryShellBranch() {
@@ -1164,5 +1215,72 @@ final class ShellIntegrationTests: XCTestCase {
         )
         XCTAssertFalse(handled)
         XCTAssertTrue(delivered.isEmpty)
+    }
+}
+
+/// `<root>/kooky bin/omp` — the shim under test, read by its interpreter so
+/// no freshly written executable pays macOS's first-exec check — in front of
+/// a fake real `<root>/real/omp` that records which `omp` its PATH resolves
+/// and the PATH itself. Runs in its own session with stdio on /dev/null, so
+/// the remote shim's `/dev/tty` markers can't reach the terminal running the
+/// tests, and with `root` as its cwd (no `omp` there) so a PATH's empty
+/// entries can't pick up a stray `./omp`. Output paths come back relative to
+/// `root`.
+private struct ShimFixture {
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("kooky-shim-\(UUID().uuidString)").path
+    var shimDir: String { root + "/kooky bin" }
+    var realDir: String { root + "/real" }
+    var out: String { root + "/out" }
+
+    init() throws {
+        try FileManager.default.createDirectory(atPath: shimDir, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(atPath: realDir, withIntermediateDirectories: true)
+        try Self.install("#!/bin/sh\n{ command -v omp; printf '%s\\n' \"$PATH\"; } > \"$KOOKY_TEST_OUT\"\n", at: realDir + "/omp")
+    }
+
+    func remove() { try? FileManager.default.removeItem(atPath: root) }
+
+    func relative(_ text: String) -> String { text.replacingOccurrences(of: root + "/", with: "") }
+
+    func run(_ shim: String, _ interpreter: String, _ args: [String], path: String) throws -> [String] {
+        // Executable even though it's never exec'd: `command -v omp` skips a
+        // non-executable shim.
+        try Self.install(shim, at: shimDir + "/omp")
+        try? FileManager.default.removeItem(atPath: out)
+
+        var attributes: posix_spawnattr_t?
+        posix_spawnattr_init(&attributes)
+        defer { posix_spawnattr_destroy(&attributes) }
+        posix_spawnattr_setflags(&attributes, Int16(POSIX_SPAWN_SETSID))
+        var actions: posix_spawn_file_actions_t?
+        posix_spawn_file_actions_init(&actions)
+        defer { posix_spawn_file_actions_destroy(&actions) }
+        for fd: Int32 in [0, 1, 2] {
+            posix_spawn_file_actions_addopen(&actions, fd, "/dev/null", fd == 0 ? O_RDONLY : O_WRONLY, 0)
+        }
+        posix_spawn_file_actions_addchdir_np(&actions, root)
+        let argv = ([interpreter, shimDir + "/omp"] + args).map { (value: String) in strdup(value) } + [nil]
+        let envp = ["PATH=\(path)", "KOOKY_TEST_OUT=\(out)"]
+            .map { (value: String) in strdup(value) } + [nil]
+        defer { for value in argv + envp { free(value) } }
+        var pid: pid_t = 0
+        let spawned = argv.withUnsafeBufferPointer { a in
+            envp.withUnsafeBufferPointer { e in
+                posix_spawn(&pid, interpreter, &actions, &attributes, a.baseAddress!, e.baseAddress!)
+            }
+        }
+        guard spawned == 0 else { throw POSIXError(POSIXErrorCode(rawValue: spawned) ?? .EIO) }
+        var status: Int32 = 0
+        while waitpid(pid, &status, 0) == -1, errno == EINTR {}
+
+        return try String(contentsOfFile: out, encoding: .utf8)
+            .split(separator: "\n")
+            .map { relative(String($0)) }
+    }
+
+    private static func install(_ script: String, at path: String) throws {
+        try script.write(toFile: path, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: path)
     }
 }
