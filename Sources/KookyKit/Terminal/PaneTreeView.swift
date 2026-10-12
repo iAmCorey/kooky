@@ -1875,6 +1875,7 @@ private struct SplitContainer: View {
                     }
                 }
                 .clipped()
+                .onChange(of: usable, initial: true) { _, length in node.renderedUsableLength = length }
                 .onDisappear {
                     // Teardown backstop for the divider-drag suspend. `onEnded` is
                     // the normal un-suspend, but if this split is torn down MID-drag

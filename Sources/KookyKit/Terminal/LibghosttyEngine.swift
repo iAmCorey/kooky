@@ -1358,6 +1358,14 @@ final class GhosttySurfaceView: NSView {
             default:  break
             }
         }
+        // ⌘Home / End / PgUp / PgDn: the core binds these to viewport scrolling
+        // by default, so its binding table decides — a user's ghostty
+        // `keybind = super+home=…` (or unbind) wins. Scrolling isn't input,
+        // so no onUserInput.
+        if cmdOnly, Self.viewportKeyCodes.contains(event.keyCode),
+           Self.sendIfBound(Self.makeKeyEvent(for: event), to: surface) {
+            return
+        }
         if mods.contains(.option), !cmd, !mods.contains(.control), event.keyCode == 51 {
             sendInputBytes("\u{17}", to: surface)                    // Option+⌫ → ^W
             return
@@ -2093,6 +2101,18 @@ final class GhosttySurfaceView: NSView {
             key.text = cstr
             return ghostty_surface_key(surface, key)
         }
+    }
+
+    /// Home, End, Page Up, Page Down.
+    nonisolated static let viewportKeyCodes: Set<UInt16> = [115, 119, 116, 121]
+
+    /// Deliver `key` only when it triggers one of the core's keybinds; false
+    /// (nothing sent) otherwise, so an unbound ⌘ key never reaches the PTY.
+    @discardableResult
+    nonisolated static func sendIfBound(_ key: ghostty_input_key_s, to surface: ghostty_surface_t) -> Bool {
+        var flags = ghostty_binding_flags_e(rawValue: 0)
+        guard ghostty_surface_key_is_binding(surface, key, &flags) else { return false }
+        return send(key, text: nil, to: surface)
     }
 
     nonisolated static func mapModifiers(_ flags: NSEvent.ModifierFlags) -> ghostty_input_mods_e {

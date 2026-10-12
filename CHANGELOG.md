@@ -2,6 +2,12 @@
 
 Notable changes per release. Tagged commits use `vX.Y.Z` shortform.
 
+## v0.51.12 — 2026-10-12
+
+- New: keyboard shortcuts that match Ghostty, Warp and cmux. ⌥⌘ + arrow moves focus to the split in that direction, ⌃⌘ + arrow moves the nearest divider, and ⌘Home / ⌘End / ⌘Page Up / ⌘Page Down scroll the terminal to the top, to the bottom, or by a page — following your Ghostty config if you've rebound them.
+- New: ⌃⌘[ / ⌃⌘] step to the previous / next workspace, wrapping at the ends. The sidebar scrolls to the workspace you land on and unfolds its group if it was collapsed. Thanks @kaijianding for the idea and a draft implementation. (#84)
+- Changed: ⌘9 now jumps to the last tab, as in Ghostty, Warp and browsers.
+
 ## v0.51.11 — 2026-09-23
 
 - Fixed: switching Node versions or Git branches, or unsetting proxy variables from the status bar preserves unfinished shell input and the cursor position, even when you keep typing during the switch. Actions run in the current zsh, bash, or fish session without mixing commands with your input or executing unfinished text. Proxy unsetting clears both lowercase and uppercase variables, supports fish, and leaves other terminals' settings alone.

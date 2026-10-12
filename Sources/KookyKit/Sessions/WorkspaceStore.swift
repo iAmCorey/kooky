@@ -1579,6 +1579,14 @@ final class WorkspaceStore {
         activateTab(pane.tabs[pane.tabs.cyclicIndex(from: currentIdx, step: direction)], in: workspace)
     }
 
+    /// Step the active workspace through `workspaces` — the sidebar's order,
+    /// since worktrees are inserted right after their source and dragged
+    /// with it. `+1` next, `-1` previous; wraps at both ends.
+    func cycleWorkspace(direction: Int) {
+        guard let currentIdx = workspaces.firstIndex(where: { $0.id == activeWorkspaceId }) else { return }
+        activateWorkspace(workspaces[workspaces.cyclicIndex(from: currentIdx, step: direction)])
+    }
+
     func activateTab(_ session: Session, in workspace: Workspace) {
         // Switching to a tab counts as reading any notification that pointed at
         // it — clears the inbox entry + the bell dot without an explicit click.
@@ -1640,7 +1648,8 @@ final class WorkspaceStore {
 
     /// Suspend per-frame `ghostty_surface_set_size` across `engines` for the
     /// duration of a `withAnimation(Theme.chromeTransition)` layout change (pane
-    /// zoom, sidebar / agent-panel show-hide), then end + flush once it settles.
+    /// zoom, sidebar / agent-panel show-hide) or a run of keyboard divider
+    /// moves, then end + flush once it settles.
     /// Without this, SwiftUI re-frames each surface every animation frame → a
     /// SIGWINCH burst (conda scrollback wipe) AND — since the vsync render loop is
     /// driven by those per-frame `setNeedsRender`s racing the display-link tick —
@@ -1754,6 +1763,51 @@ final class WorkspaceStore {
         }
         invalidateStaleFileTreeRootOverride()
         if changed { scheduleSave() }
+    }
+
+    /// ⌥⌘ + arrow. No-op at the edge (no wrap). Leaving a zoomed pane drops
+    /// zoom through `focusPane`, same as ⌘[ / ⌘].
+    func focusPane(toward direction: PaneDirection, in workspace: Workspace) {
+        guard let current = workspace.activePaneId,
+              let target = workspace.root.neighbor(of: current, toward: direction)
+        else { return }
+        focusPane(target, in: workspace)
+    }
+
+    /// Points one ⌃⌘ + arrow press moves a divider — Ghostty's default
+    /// `resize_split` amount.
+    static let dividerKeyboardStep: CGFloat = 10
+
+    /// ⌃⌘ + arrow: move the innermost divider on that axis around the active
+    /// pane one step in `direction`, clamped like a drag. Ignored while
+    /// zoomed (the stored fraction isn't what's on screen) and before the
+    /// split has laid out (nothing on screen to move).
+    func moveDivider(toward direction: PaneDirection, in workspace: Workspace) {
+        guard workspace.zoomedPaneId == nil,
+              let active = workspace.activePaneId,
+              let node = workspace.root.nearestSplit(containingPane: active, orientation: direction.axis),
+              case .split(let orientation, let first, let second, let stored) = node.content,
+              node.renderedUsableLength > 0
+        else { return }
+        let usable = node.renderedUsableLength
+        let clamp = { proposed in
+            KookyWindowLayout.clampedSplitFraction(
+                proposed, orientation: orientation, first: first, second: second, usableLength: usable
+            )
+        }
+        // Step from what's on screen (the clamped value), as a drag does.
+        let step = Double(Self.dividerKeyboardStep / usable)
+        let start = clamp(stored)
+        let moved = clamp(start + (direction.towardFirst ? -step : step))
+        guard abs(moved - start) > .ulpOfOne else { return }
+        // Held arrow keys auto-repeat: suspend size propagation so a run
+        // doesn't SIGWINCH per repeat (the conda scrollback wipe a divider
+        // drag also guards against). The suspension settles 250ms after the
+        // last press, so a held key costs two — one before auto-repeat
+        // starts, one at release.
+        suspendSizePropagationForLayoutAnimation(node.allEngines)
+        node.setFraction(moved)
+        scheduleSave()
     }
 
     /// Routes a hook event to the named session. On `.ended`, drops the leaf

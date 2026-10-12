@@ -7,11 +7,51 @@ import SwiftUI
 /// sets identifiable from `menuNeedsUpdate`.
 private enum MenuTag {
     static let tabRange = 1...9
+    /// ⌘9 jumps to the last tab, not the ninth — Ghostty, Warp and browsers.
+    static let lastTab = 9
     static let workspaceRange = 101...109
     static func tab(_ n: Int) -> Int { n }
     static func workspace(_ n: Int) -> Int { 100 + n }
-    static func tabIndex(from tag: Int) -> Int { tag - 1 }
+    /// The tab a ⌘1–9 item targets, nil when the pane has no such tab.
+    static func tabIndex(from tag: Int, tabCount: Int) -> Int? {
+        let index = tag == lastTab ? tabCount - 1 : tag - 1
+        return (0..<tabCount).contains(index) ? index : nil
+    }
     static func workspaceIndex(from tag: Int) -> Int { tag - 101 }
+    static func direction(_ direction: PaneDirection) -> Int { 201 + direction.rawValue }
+    static func direction(from tag: Int) -> PaneDirection? { PaneDirection(rawValue: tag - 201) }
+}
+
+/// Menu presentation for the ⌥⌘ / ⌃⌘ + arrow rows — exhaustive, so a new
+/// direction can't ship as a blank, shortcut-less item.
+private extension PaneDirection {
+    /// NSEvent's arrow function-key codepoints.
+    var arrowKey: String {
+        switch self {
+        case .up: return "\u{F700}"
+        case .down: return "\u{F701}"
+        case .left: return "\u{F702}"
+        case .right: return "\u{F703}"
+        }
+    }
+
+    var focusPaneTitle: String {
+        switch self {
+        case .up: return "Pane Above"
+        case .down: return "Pane Below"
+        case .left: return "Pane on Left"
+        case .right: return "Pane on Right"
+        }
+    }
+
+    var moveDividerTitle: String {
+        switch self {
+        case .up: return "Up"
+        case .down: return "Down"
+        case .left: return "Left"
+        case .right: return "Right"
+        }
+    }
 }
 
 @MainActor
@@ -1173,7 +1213,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
 
         let tabSwitchRows: [MenuEntry] = MenuTag.tabRange.map { n in
             selfRow(
-                String.localizedStringWithFormat(
+                n == MenuTag.lastTab ? "Last Tab" : String.localizedStringWithFormat(
                     String(localized: "Tab %d", bundle: .kookyResources),
                     n
                 ),
@@ -1194,6 +1234,16 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
                 tag: MenuTag.workspace(n)
             )
         }
+        // ⌥⌘ / ⌃⌘ + arrow: Ghostty's (and Warp's / cmux's) pane navigation
+        // and divider keys.
+        let focusPaneMenu = buildMenu(title: "Focus Pane", entries: PaneDirection.allCases.map {
+            selfRow($0.focusPaneTitle, #selector(handleFocusPaneInDirection(_:)), $0.arrowKey,
+                    modifiers: [.command, .option], tag: MenuTag.direction($0))
+        })
+        let moveDividerMenu = buildMenu(title: "Move Divider", entries: PaneDirection.allCases.map {
+            selfRow($0.moveDividerTitle, #selector(handleMoveDivider(_:)), $0.arrowKey,
+                    modifiers: [.command, .control], tag: MenuTag.direction($0))
+        })
         let viewEntries: [MenuEntry] = [
             selfRow("Toggle Sidebar", #selector(handleToggleSidebar), "s", modifiers: [.command, .control]),
             .separator,
@@ -1215,16 +1265,24 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
             selfRow("Zoom Pane", #selector(handleToggleZoom), "e", modifiers: [.command, .shift]),
             selfRow("Focus Previous Pane", #selector(handleFocusPreviousPane), "["),
             selfRow("Focus Next Pane", #selector(handleFocusNextPane), "]"),
+            .sub(focusPaneMenu),
+            .sub(moveDividerMenu),
             .separator,
             // ⌃⇥ / ⌃⇧⇥ cycle within the focused pane's tab list — same gesture
-            // browsers use. Discrete from ⌘1-⌘9 below which jumps to a tab by
-            // ordinal; cycle wraps at the ends and doesn't need a digit key.
+            // browsers use. Discrete from ⌘1-⌘8 below which jump to a tab by
+            // ordinal (⌘9 = last tab); cycle wraps at the ends.
             selfRow("Next Tab", #selector(handleNextTab), "\t", modifiers: [.control]),
             selfRow("Previous Tab", #selector(handlePreviousTab), "\t", modifiers: [.control, .shift]),
             .separator,
         ]
         + tabSwitchRows
-        + [.separator]
+        + [
+            .separator,
+            // ⌃⌘[ / ⌃⌘] — cmux's keys for the same sidebar-level step; Ghostty
+            // has no workspace layer to align with. Wraps at the ends.
+            selfRow("Previous Workspace", #selector(handlePreviousWorkspace), "[", modifiers: [.command, .control]),
+            selfRow("Next Workspace", #selector(handleNextWorkspace), "]", modifiers: [.command, .control]),
+        ]
         + workspaceSwitchRows
         + [
             .separator,
@@ -1597,6 +1655,26 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
         cyclePaneFocus(forward: false)
     }
 
+    @objc private func handleFocusPaneInDirection(_ sender: NSMenuItem) {
+        guard let direction = MenuTag.direction(from: sender.tag),
+              let store = activeStore, let workspace = store.active else { return }
+        store.focusPane(toward: direction, in: workspace)
+    }
+
+    @objc private func handleMoveDivider(_ sender: NSMenuItem) {
+        guard let direction = MenuTag.direction(from: sender.tag),
+              let store = activeStore, let workspace = store.active else { return }
+        store.moveDivider(toward: direction, in: workspace)
+    }
+
+    @objc private func handleNextWorkspace() {
+        activeStore?.cycleWorkspace(direction: 1)
+    }
+
+    @objc private func handlePreviousWorkspace() {
+        activeStore?.cycleWorkspace(direction: -1)
+    }
+
     private func cyclePaneFocus(forward: Bool) {
         guard let store = activeStore, let workspace = store.active else { return }
         let panes = workspace.root.allPanes
@@ -1621,7 +1699,10 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
         let tabCount = store?.active?.activePane?.tabs.count ?? 0
         let workspaceCount = store?.workspaces.count ?? 0
         for item in menu.items {
-            if MenuTag.tabRange.contains(item.tag) {
+            if item.tag == MenuTag.lastTab {
+                // Redundant with Tab 1 until there's a second tab.
+                item.isHidden = tabCount < 2
+            } else if MenuTag.tabRange.contains(item.tag) {
                 item.isHidden = item.tag > tabCount
             } else if MenuTag.workspaceRange.contains(item.tag) {
                 item.isHidden = MenuTag.workspaceIndex(from: item.tag) >= workspaceCount
@@ -1680,10 +1761,26 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
         if menuItemMatches(
             menuItem,
             #selector(handleFocusPreviousPane),
-            #selector(handleFocusNextPane)
+            #selector(handleFocusNextPane),
+            #selector(handleFocusPaneInDirection(_:))
         ) {
             return terminalWindowIsKey
-                && (activeStore?.active?.root.allPanes.count ?? 0) > 1
+                && (activeStore?.active?.root.hasMultiplePanes ?? false)
+        }
+
+        if menuItemMatches(menuItem, #selector(handleMoveDivider(_:))) {
+            guard let workspace = activeStore?.active else { return false }
+            return terminalWindowIsKey
+                && workspace.root.hasMultiplePanes
+                && workspace.zoomedPaneId == nil
+        }
+
+        if menuItemMatches(
+            menuItem,
+            #selector(handlePreviousWorkspace),
+            #selector(handleNextWorkspace)
+        ) {
+            return terminalWindowIsKey && (activeStore?.workspaces.count ?? 0) > 1
         }
 
         if menuItemMatches(
@@ -1696,9 +1793,8 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
         }
 
         if menuItemMatches(menuItem, #selector(handleSwitchTab(_:))) {
-            let index = MenuTag.tabIndex(from: menuItem.tag)
             let count = activeStore?.active?.activePane?.tabs.count ?? 0
-            return terminalWindowIsKey && index >= 0 && index < count
+            return terminalWindowIsKey && MenuTag.tabIndex(from: menuItem.tag, tabCount: count) != nil
         }
 
         if menuItemMatches(menuItem, #selector(handleSwitchWorkspace(_:))) {
@@ -1849,10 +1945,10 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
     }
 
     @objc private func handleSwitchTab(_ sender: NSMenuItem) {
-        let index = MenuTag.tabIndex(from: sender.tag)
         guard let store = activeStore, let workspace = store.active,
               let pane = workspace.activePane,
-              index >= 0, index < pane.tabs.count else { return }
+              let index = MenuTag.tabIndex(from: sender.tag, tabCount: pane.tabs.count)
+        else { return }
         store.activateTab(pane.tabs[index], in: workspace)
     }
 

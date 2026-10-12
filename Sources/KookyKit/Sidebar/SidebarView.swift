@@ -553,6 +553,13 @@ struct SidebarView: View {
             revealWorkspaceForRename(using: proxy)
         }
         .onAppear { revealWorkspaceForRename(using: proxy) }
+        // Keyboard / palette / inbox selection can land on a row that's
+        // scrolled away or folded under a collapsed source — bring it on
+        // screen, including when the list remounts (sidebar shown again,
+        // files → workspaces).
+        .background {
+            ActiveWorkspaceRevealer(store: store) { reveal($0, using: proxy) }
+        }
     }
 
     @ViewBuilder
@@ -621,14 +628,21 @@ struct SidebarView: View {
     private func revealWorkspaceForRename(using proxy: ScrollViewProxy) {
         guard let workspace = store.pendingRenameWorkspace else { return }
         store.pendingRenameWorkspace = nil
+        workspace.renameRequested = true
+        reveal(workspace, anchor: .center, using: proxy)
+    }
+
+    /// Expand a collapsed source workspace hiding the row, then scroll to it.
+    /// A nil anchor scrolls the minimum needed, so a row that's already fully
+    /// visible doesn't move the list.
+    private func reveal(_ workspace: Workspace, anchor: UnitPoint? = nil, using proxy: ScrollViewProxy) {
         if let parentId = workspace.worktreeParentId, collapsedParents.contains(parentId) {
             collapsedParents.remove(parentId)
         }
-        workspace.renameRequested = true
         // Defer so a just-expanded subtree is laid out before scrolling to a
         // row that may have only now been inserted.
         DispatchQueue.main.async {
-            proxy.scrollTo(workspace.id, anchor: .center)
+            proxy.scrollTo(workspace.id, anchor: anchor)
         }
     }
 
@@ -698,5 +712,22 @@ private struct DraggableWorkspaceRow: View {
             }
             return true
         } isTargeted: { isTargeted = $0 }
+    }
+}
+
+/// Calls `reveal` with the active workspace on mount and whenever it changes.
+/// Its own leaf so only it reads `activeWorkspaceId`: hung on the list, that
+/// read would re-run every row closure (each one's `findGitDir` walk) on
+/// every switch.
+private struct ActiveWorkspaceRevealer: View {
+    let store: WorkspaceStore
+    let reveal: (Workspace) -> Void
+
+    var body: some View {
+        Color.clear
+            .frame(width: 0, height: 0)
+            .onChange(of: store.activeWorkspaceId, initial: true) { _, _ in
+                if let workspace = store.active { reveal(workspace) }
+            }
     }
 }

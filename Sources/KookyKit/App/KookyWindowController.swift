@@ -45,36 +45,21 @@ enum KookyWindowLayout {
             rebalanceHorizontalSplit(node)
             return true
         }
-        guard case .split(let orientation, let first, let second, let fraction) = node.content else {
+        guard case .split(let orientation, let first, let second, _) = node.content else {
             return false
         }
         let targetIsBelow = rebalanceHorizontalSplits(in: first, alongPathTo: target)
             || rebalanceHorizontalSplits(in: second, alongPathTo: target)
         guard targetIsBelow else { return false }
         if orientation == .horizontal {
-            let balanced = balancedFraction(first: first, second: second)
-            if abs(balanced - fraction) > .ulpOfOne {
-                node.content = .split(
-                    orientation: orientation,
-                    first: first,
-                    second: second,
-                    fraction: balanced
-                )
-            }
+            node.setFraction(balancedFraction(first: first, second: second))
         }
         return true
     }
 
     private static func rebalanceHorizontalSplit(_ node: PaneNode) {
-        guard case .split(.horizontal, let first, let second, let fraction) = node.content else { return }
-        let balanced = balancedFraction(first: first, second: second)
-        guard abs(balanced - fraction) > .ulpOfOne else { return }
-        node.content = .split(
-            orientation: .horizontal,
-            first: first,
-            second: second,
-            fraction: balanced
-        )
+        guard case .split(.horizontal, let first, let second, _) = node.content else { return }
+        node.setFraction(balancedFraction(first: first, second: second))
     }
 
     private static func balancedFraction(first: PaneNode, second: PaneNode) -> Double {

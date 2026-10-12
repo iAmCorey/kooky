@@ -278,6 +278,40 @@ final class TerminalKeyRoutingTests: XCTestCase {
     /// Pins the contract helper's config guard using a binding ghostty ships
     /// by default on macOS (`super+c` → copy), so a machine whose config
     /// binds a contract key gets a SKIP with a reason, never a red row.
+    /// ⌘Home / End / PgUp / PgDn are delivered through the core's binds (its
+    /// defaults scroll); an unbound combo (⌃⌘Home) is withheld and writes
+    /// nothing to the PTY. Skips where this machine's ghostty config rebinds
+    /// them — honouring that is the point of routing through the core.
+    func testViewportScrollKeysGoThroughCoreBindings() throws {
+        let keys: [(UInt16, Int)] = [
+            (115, NSHomeFunctionKey), (119, NSEndFunctionKey),
+            (116, NSPageUpFunctionKey), (121, NSPageDownFunctionKey),
+        ]
+        let home = String(UnicodeScalar(UInt32(NSHomeFunctionKey))!)
+        try withManualSurface { surface, output in
+            for (keyCode, function) in keys {
+                let chars = String(UnicodeScalar(UInt32(function))!)
+                let event = try Self.keyDownEvent(keyCode: keyCode, characters: chars, mods: [.command, .function])
+                let key = GhosttySurfaceView.makeKeyEvent(for: event)
+                try XCTSkipUnless(
+                    Self.isBinding(key, text: nil, on: surface),
+                    "this machine's ghostty config unbinds ⌘ + keyCode \(keyCode)"
+                )
+                XCTAssertTrue(GhosttySurfaceView.sendIfBound(key, to: surface))
+            }
+            _ = output.takeString()  // whatever a user's own rebinding wrote
+
+            let event = try Self.keyDownEvent(keyCode: 115, characters: home, mods: [.command, .control, .function])
+            let unbound = GhosttySurfaceView.makeKeyEvent(for: event)
+            try XCTSkipIf(
+                Self.isBinding(unbound, text: nil, on: surface),
+                "this machine's ghostty config binds ⌃⌘Home"
+            )
+            XCTAssertFalse(GhosttySurfaceView.sendIfBound(unbound, to: surface))
+            XCTAssertEqual(output.takeString(), "", "a withheld key must not reach the PTY")
+        }
+    }
+
     func testContractHelperSkipsKeysBoundByGhosttyConfig() throws {
         let cmdC = try Self.keyDownEvent(keyCode: 8, characters: "c", mods: [.command], requireUnshifted: "c")
         try withManualSurface { surface, output in
