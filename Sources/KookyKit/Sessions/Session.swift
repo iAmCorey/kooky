@@ -66,6 +66,10 @@ final class Session: Identifiable {
     /// with `remoteHost`'s marker/command-finished lifecycle. Not persisted —
     /// restore re-derives it from `Workspace.sshRemoteHost` at spawn.
     var sshWorkspaceHost: String?
+    /// Port pinned alongside `sshWorkspaceHost` when the workspace named one
+    /// (nil = ssh chose it). Runtime-only, like the host: restore re-derives
+    /// both from the workspace at spawn.
+    var sshWorkspacePort: Int?
     /// Latest Codex account rate-limit usage (5-hour + weekly windows), parsed
     /// from the active session's rollout file by `CodexUsageMonitor` and shown
     /// as a status-bar gauge. Only populated for Codex sessions; `nil` until
@@ -220,6 +224,20 @@ final class Session: Identifiable {
     /// derivation for every surface that names a session's location (agent
     /// panel, Session Info) — two spellings had already diverged once.
     var effectiveRemoteHost: String? { sshWorkspaceHost ?? remoteHost }
+
+    /// The spawn-pinned host + port pair pasted files upload to, or nil for a
+    /// local session. One value so a host and its port can never be read
+    /// separately (see `SSHRemoteTarget`).
+    var sshWorkspaceTarget: SSHRemoteTarget? {
+        sshWorkspaceHost.map { SSHRemoteTarget(host: $0, port: sshWorkspacePort) }
+    }
+
+    /// `effectiveRemoteHost` with the workspace's port appended — the spelling
+    /// Session Info shows. Kept separate from `effectiveRemoteHost` because
+    /// that one is an IDENTITY (thread titles, title de-duplication, the
+    /// remote-ask gate) and folding `:2222` into it would make one host read
+    /// as several.
+    var effectiveRemoteLabel: String? { sshWorkspaceTarget?.label ?? remoteHost }
 
     /// The most recently COMPLETED command, for the Session Info inspector.
     /// `lastCommandExit`/`lastCommandText` above are the red-dot pairing

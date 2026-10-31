@@ -234,8 +234,8 @@ struct SidebarView: View {
             switch current {
             case .createSSHWorkspace:
                 CreateSSHWorkspaceSheet(
-                    create: { host in
-                        store.addWorkspace(sshRemoteHost: host)
+                    create: { host, port in
+                        store.addWorkspace(sshRemoteHost: host, sshPort: port)
                         dismissCurrentSheet()
                     },
                     dismiss: dismissCurrentSheet

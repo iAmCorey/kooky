@@ -249,7 +249,7 @@ struct AgentTemplate: Identifiable, Hashable {
     /// `rawLaunchCommand` (CLI `open -e`) is a caller-supplied shell command
     /// line that becomes KOOKY_AGENT verbatim — the same eval channel agent
     /// templates use, minus the template composition. Local-only semantics:
-    /// when `sshHost` is also set the ssh composition wins and the raw
+    /// when `sshTarget` is also set the ssh composition wins and the raw
     /// command is dropped (running caller commands on a remote is not this
     /// parameter's job; the CLI targets local workspaces only).
     func makeSessionConfig(
@@ -257,17 +257,17 @@ struct AgentTemplate: Identifiable, Hashable {
         resumeId: String? = nil,
         newSessionId: String? = nil,
         initialPrompt: String? = nil,
-        sshHost: String? = nil,
+        sshTarget: SSHRemoteTarget? = nil,
         rawLaunchCommand: String? = nil
     ) -> TerminalSessionConfig {
         // Pick a shell that has a kooky integration wrapper. Plain terminal
         // sessions respect $SHELL where we have a wrapper (zsh/bash/fish); other
         // shells (nu/...) get $SHELL too, just without cwd tracking.
         // Any session that carries a KOOKY_AGENT launch command — an agent
-        // template, ANY template connecting to an `sshHost`, or a raw CLI
+        // template, ANY template connecting to an `sshTarget`, or a raw CLI
         // command — forces a wrapped shell so the auto-launch eval actually
         // runs; `.other` users get zsh as a working fallback.
-        let needsLaunch = initialCommand != nil || sshHost != nil || rawLaunchCommand != nil
+        let needsLaunch = initialCommand != nil || sshTarget != nil || rawLaunchCommand != nil
         var config: TerminalSessionConfig
         switch (KookyShellIntegration.detectedUserShell, needsLaunch) {
         case (.bash, _):
@@ -287,13 +287,16 @@ struct AgentTemplate: Identifiable, Hashable {
         case (.other, true):
             config = .zshShell()
         }
-        if let sshHost {
+        if let sshTarget {
             // SSH workspace tab: the local shell's one-shot launch is the
             // kooky-ssh connection; the template's own launch command rides
             // behind `--` and starts on the REMOTE via the ssh wrapper +
             // bootstrap. Built WITHOUT the resume id — conversation state
             // lives on this machine, so `--resume <local-id>` on the remote
-            // could only fail at launch.
+            // could only fail at launch. The port rides in front of the
+            // destination as ssh's own `-p` (the wrapper's option walk skips
+            // the pair, so `dest` stays the host): one destination string,
+            // never `host:port`.
             let agentSuffix = launchCommand(
                 extraOptions: extraOptions,
                 resumeId: nil,
@@ -301,7 +304,9 @@ struct AgentTemplate: Identifiable, Hashable {
                 initialPrompt: initialPrompt
             )
                 .map { " -- \($0)" } ?? ""
-            config.environment["KOOKY_AGENT"] = "kooky-ssh \(KookyShellIntegration.quote(sshHost))\(agentSuffix)"
+            let portArguments = sshTarget.sshPortArguments.joined(separator: " ")
+            let prefix = portArguments.isEmpty ? "kooky-ssh" : "kooky-ssh \(portArguments)"
+            config.environment["KOOKY_AGENT"] = "\(prefix) \(KookyShellIntegration.quote(sshTarget.host))\(agentSuffix)"
         } else if let rawLaunchCommand {
             config.environment["KOOKY_AGENT"] = rawLaunchCommand
         } else if let launch = launchCommand(

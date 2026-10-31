@@ -198,6 +198,8 @@
 "Every new tab in this workspace opens an SSH session to the same destination; agent tabs launch their agent on the remote." = "此工作区中的每个新标签页都会连接到同一 SSH 目标；智能体标签页会在远程主机上启动对应智能体。";
 "destination" = "目标";
 "anything your `ssh` accepts — host aliases from ~/.ssh/config work" = "可填写 `ssh` 接受的任意目标，也支持 ~/.ssh/config 中的主机别名";
+"port" = "端口";
+"leave empty for the port ssh would pick (22, or ~/.ssh/config's Port)" = "留空则使用 ssh 默认端口（22，或 ~/.ssh/config 中的 Port）";
 "create" = "创建";
 "CLOSE-TAB" = "关闭标签页";
 "Close “%@”?" = "关闭“%@”？";

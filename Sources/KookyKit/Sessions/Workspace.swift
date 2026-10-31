@@ -66,6 +66,20 @@ final class Workspace: Identifiable {
     /// instead of each new tab dropping back to the local machine.
     var sshRemoteHost: String? = nil
 
+    /// Port to connect on, when the user named one. nil means "let ssh decide"
+    /// (`~/.ssh/config`'s `Port`, else 22) — the overwhelmingly common case,
+    /// and the reason this is a separate field instead of a `host:port` parse:
+    /// ssh itself rejects that spelling, and folding it in would break the
+    /// `scp` side of paste upload.
+    var sshPort: Int? = nil
+
+    /// The host + port pair every spawn and paste path consumes, or nil when
+    /// this is a local workspace. Keeps the two fields from being read
+    /// independently (a port with no host is not a target).
+    var sshTarget: SSHRemoteTarget? {
+        sshRemoteHost.map { SSHRemoteTarget(host: $0, port: sshPort) }
+    }
+
     /// User-assigned marker drawn as a stripe down the row's leading edge, in
     /// both sidebar modes. Nil for every workspace until the user sets one from
     /// the row's right-click menu — the value of a marker here comes from most
@@ -104,7 +118,7 @@ final class Workspace: Identifiable {
         // SSH workspaces are "about" their remote, not the local cwd the
         // connection happened to spawn from. (`normalizedSSHHost` gates every
         // write, so non-nil implies non-blank.)
-        if let host = sshRemoteHost { return host }
+        if let target = sshTarget { return target.label }
         if workingDirectory.path == homeDirectoryPath { return "Home" }
         let last = workingDirectory.lastPathComponent
         return last.isEmpty ? workingDirectory.path : last
@@ -130,11 +144,12 @@ final class Workspace: Identifiable {
         var locationLines: [String] = []
         if let branch = worktreeBranch, !branch.isEmpty {
             locationLines = ["branch \(singleLine(branch))", diskPath.path]
-        } else if let host = sshRemoteHost {
+        } else if let target = sshTarget {
             // An un-renamed SSH workspace whose remote reported no title is
-            // already named after its host, so a location line would echo
-            // line 1 — fold them together instead.
-            if titleLine == host { titleLine = "ssh \(host)" } else { locationLines = ["ssh \(host)"] }
+            // already named after its destination, so a location line would
+            // echo line 1 — fold them together instead.
+            let destination = target.label
+            if titleLine == destination { titleLine = "ssh \(destination)" } else { locationLines = ["ssh \(destination)"] }
         } else {
             locationLines = [workingDirectory.path]
         }

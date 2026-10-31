@@ -68,6 +68,9 @@ struct PersistedWorkspace: Codable, Equatable {
     /// SSH destination of an SSH workspace. Decoded as optional so state
     /// files written before the field restore as plain local workspaces.
     var sshRemoteHost: String?
+    /// Port that destination connects on; nil means ssh picks it
+    /// (`~/.ssh/config` or 22). Optional for the same reason as the host.
+    var sshPort: Int?
     /// The workspace's tag. Exactly one of `tagPreset` (a `WorkspaceColorTag`
     /// raw value) and `tagCustomHex` is set, which keeps "the user picked this
     /// themselves" in the file rather than re-deriving it by comparing colours.
@@ -88,12 +91,13 @@ struct PersistedWorkspace: Codable, Equatable {
         self.worktreeBranch = ws.worktreeBranch
         self.worktreePath = ws.worktreePath?.path
         self.sshRemoteHost = ws.sshRemoteHost
+        self.sshPort = ws.sshPort
         self.tagPreset = ws.tag?.color.preset?.rawValue
         self.tagCustomHex = ws.tag?.color.customHex
         self.tagName = ws.tag?.name
     }
 
-    init(id: UUID, workingDirectoryPath: String, root: PersistedPaneNode, activePaneId: UUID? = nil, customTitle: String? = nil, worktreeParentId: UUID? = nil, worktreeBranch: String? = nil, worktreePath: String? = nil, sshRemoteHost: String? = nil, tagPreset: String? = nil, tagCustomHex: String? = nil, tagName: String? = nil) {
+    init(id: UUID, workingDirectoryPath: String, root: PersistedPaneNode, activePaneId: UUID? = nil, customTitle: String? = nil, worktreeParentId: UUID? = nil, worktreeBranch: String? = nil, worktreePath: String? = nil, sshRemoteHost: String? = nil, sshPort: Int? = nil, tagPreset: String? = nil, tagCustomHex: String? = nil, tagName: String? = nil) {
         self.id = id
         self.workingDirectoryPath = workingDirectoryPath
         self.root = root
@@ -103,6 +107,7 @@ struct PersistedWorkspace: Codable, Equatable {
         self.worktreeBranch = worktreeBranch
         self.worktreePath = worktreePath
         self.sshRemoteHost = sshRemoteHost
+        self.sshPort = sshPort
         self.tagPreset = tagPreset
         self.tagCustomHex = tagCustomHex
         self.tagName = tagName
@@ -110,7 +115,7 @@ struct PersistedWorkspace: Codable, Equatable {
 
     private enum CodingKeys: String, CodingKey {
         case id, workingDirectoryPath, root, activePaneId, customTitle
-        case worktreeParentId, worktreeBranch, worktreePath, sshRemoteHost, tagPreset, tagCustomHex, tagName
+        case worktreeParentId, worktreeBranch, worktreePath, sshRemoteHost, sshPort, tagPreset, tagCustomHex, tagName
         // Legacy keys
         case tabs, activeTabId
     }
@@ -126,6 +131,7 @@ struct PersistedWorkspace: Codable, Equatable {
         try c.encodeIfPresent(worktreeBranch, forKey: .worktreeBranch)
         try c.encodeIfPresent(worktreePath, forKey: .worktreePath)
         try c.encodeIfPresent(sshRemoteHost, forKey: .sshRemoteHost)
+        try c.encodeIfPresent(sshPort, forKey: .sshPort)
         try c.encodeIfPresent(tagPreset, forKey: .tagPreset)
         try c.encodeIfPresent(tagCustomHex, forKey: .tagCustomHex)
         try c.encodeIfPresent(tagName, forKey: .tagName)
@@ -140,6 +146,7 @@ struct PersistedWorkspace: Codable, Equatable {
         worktreeBranch = try c.decodeIfPresent(String.self, forKey: .worktreeBranch)
         worktreePath = try c.decodeIfPresent(String.self, forKey: .worktreePath)
         sshRemoteHost = try c.decodeIfPresent(String.self, forKey: .sshRemoteHost)
+        sshPort = try c.decodeIfPresent(Int.self, forKey: .sshPort)
         tagPreset = try c.decodeIfPresent(String.self, forKey: .tagPreset)
         tagCustomHex = try c.decodeIfPresent(String.self, forKey: .tagCustomHex)
         tagName = try c.decodeIfPresent(String.self, forKey: .tagName)

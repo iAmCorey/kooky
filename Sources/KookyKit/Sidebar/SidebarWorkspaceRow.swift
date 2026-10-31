@@ -446,10 +446,11 @@ struct SidebarWorkspaceRow: View {
             // pill carries — distinct from source rows without needing
             // an extra column or stripe.
             subtitleBadge(glyph: "arrow.triangle.branch", glyphSize: 6, text: branch)
-        } else if let host = workspace.sshRemoteHost {
-            // SSH workspace — same badge language, network glyph. The host
+        } else if let target = workspace.sshTarget {
+            // SSH workspace — same badge language, network glyph. The
+            // destination (host, plus the port when the user named one)
             // replaces the local path: these tabs live on the remote.
-            subtitleBadge(glyph: "network", glyphSize: 7, text: host)
+            subtitleBadge(glyph: "network", glyphSize: 7, text: target.label)
         } else {
             Text((workspace.workingDirectory.path as NSString).abbreviatingWithTildeInPath)
                 .font(Theme.mono(10.5))
