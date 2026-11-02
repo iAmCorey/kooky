@@ -2142,6 +2142,79 @@ final class WorkspaceStoreTests: XCTestCase {
         XCTAssertNil(engine(session).startedConfigs.last?.environment["KOOKY_AGENT"])
     }
 
+    func testAddWorkspaceWithSSHPortConnectsOnThatPort() {
+        let store = makeStore()
+
+        let ws = store.addWorkspace(
+            workingDirectory: projectA,
+            sshRemoteHost: "deploy@example.com",
+            sshPort: 2222
+        )
+
+        guard let session = ws.activeSession else { return XCTFail("expected initial session") }
+        XCTAssertEqual(ws.sshPort, 2222)
+        XCTAssertEqual(session.sshWorkspacePort, 2222)
+        XCTAssertEqual(session.sshWorkspaceTarget, SSHRemoteTarget(host: "deploy@example.com", port: 2222))
+        // ssh's own flag, ahead of the destination: the wrapper's option walk
+        // skips the pair, so the host stays a single argument and the OSC
+        // title marker still names it.
+        XCTAssertEqual(
+            engine(session).startedConfigs.last?.environment["KOOKY_AGENT"],
+            "kooky-ssh -p 2222 'deploy@example.com'"
+        )
+        XCTAssertEqual(ws.title, "deploy@example.com:2222")
+    }
+
+    func testSSHWorkspaceAgentTabKeepsThePort() {
+        let store = makeStore()
+        let ws = store.addWorkspace(
+            workingDirectory: projectA,
+            sshRemoteHost: "deploy@example.com",
+            sshPort: 2222
+        )
+
+        let session = store.addTab(in: ws, template: .claudeCode)
+
+        XCTAssertEqual(
+            engine(session).startedConfigs.last?.environment["KOOKY_AGENT"],
+            "kooky-ssh -p 2222 'deploy@example.com' -- claude"
+        )
+    }
+
+    func testAddWorkspaceDropsUnusablePort() {
+        // 0/70000 can only arrive from a hand-edited state file or a future
+        // build; ssh would reject them, so the port degrades to "ssh decides"
+        // instead of failing the workspace.
+        for bogus in [0, -1, 70_000] {
+            let store = makeStore()
+            let ws = store.addWorkspace(
+                workingDirectory: projectA,
+                sshRemoteHost: "deploy@example.com",
+                sshPort: bogus
+            )
+
+            XCTAssertNil(ws.sshPort, "\(bogus) is not a port")
+            XCTAssertEqual(
+                ws.activeSession.flatMap { engine($0).startedConfigs.last?.environment["KOOKY_AGENT"] },
+                "kooky-ssh 'deploy@example.com'"
+            )
+        }
+    }
+
+    /// The sheet's port field has to agree with the spawn gate: blank means
+    /// "ssh decides", junk blocks Create (nil), and surrounding spaces are the
+    /// user's clipboard's fault, not an error.
+    func testSSHPortFieldParsing() {
+        XCTAssertNil(WorkspaceStore.sshPort(fromField: ""))
+        XCTAssertNil(WorkspaceStore.sshPort(fromField: "   "))
+        XCTAssertEqual(WorkspaceStore.sshPort(fromField: "2222"), 2222)
+        XCTAssertEqual(WorkspaceStore.sshPort(fromField: " 22 "), 22)
+        XCTAssertEqual(WorkspaceStore.sshPort(fromField: "65535"), 65535)
+        for junk in ["0", "-1", "65536", "22a", "ssh", "2 2"] {
+            XCTAssertNil(WorkspaceStore.sshPort(fromField: junk), "\(junk) is not a port")
+        }
+    }
+
     func testSSHWorkspaceAgentTabLaunchesAgentBehindDoubleDash() {
         let store = makeStore()
         let ws = store.addWorkspace(workingDirectory: projectA, sshRemoteHost: "deploy@example.com")
@@ -2221,6 +2294,64 @@ final class WorkspaceStoreTests: XCTestCase {
             engine(session).startedConfigs.last?.environment["KOOKY_AGENT"],
             "kooky-ssh 'deploy@example.com'"
         )
+    }
+
+    func testRestoreSSHWorkspaceReconnectsOnPersistedPort() {
+        let wsId = UUID()
+        let paneId = UUID()
+        let leafId = UUID()
+        let initial = PersistedState(
+            workspaces: [
+                PersistedWorkspace(
+                    id: wsId,
+                    workingDirectoryPath: "/tmp/projectA",
+                    root: PersistedPaneNode(
+                        id: paneId,
+                        kind: .pane(PersistedPane(
+                            id: paneId,
+                            tabs: [PersistedTab(id: leafId, agentId: "terminal", currentDirectoryPath: "/tmp/projectA")],
+                            activeTabId: leafId
+                        ))
+                    ),
+                    activePaneId: paneId,
+                    sshRemoteHost: "deploy@example.com",
+                    sshPort: 2222
+                )
+            ],
+            activeWorkspaceId: wsId
+        )
+
+        let store = makeStore(initial: initial)
+
+        guard let ws = store.workspaces.first, let session = ws.activeSession else {
+            return XCTFail("expected restored workspace")
+        }
+        XCTAssertEqual(ws.sshPort, 2222)
+        XCTAssertEqual(session.sshWorkspacePort, 2222)
+        XCTAssertEqual(
+            engine(session).startedConfigs.last?.environment["KOOKY_AGENT"],
+            "kooky-ssh -p 2222 'deploy@example.com'"
+        )
+    }
+
+    /// The port has to survive the JSON round trip `state.json` does, or every
+    /// relaunch silently reconnects on 22.
+    func testSSHPortSurvivesStateFileRoundTrip() throws {
+        let tab = PersistedTab(id: UUID(), agentId: "terminal", currentDirectoryPath: projectA.path)
+        let pane = PersistedPane(id: UUID(), tabs: [tab], activeTabId: tab.id)
+        let workspace = PersistedWorkspace(
+            id: UUID(),
+            workingDirectoryPath: projectA.path,
+            root: PersistedPaneNode(id: pane.id, kind: .pane(pane)),
+            sshRemoteHost: "deploy@example.com",
+            sshPort: 2222
+        )
+        let persisted = PersistedState(workspaces: [workspace], activeWorkspaceId: workspace.id)
+        let data = try JSONEncoder().encode(persisted)
+        let decoded = try JSONDecoder().decode(PersistedState.self, from: data)
+
+        XCTAssertEqual(decoded.workspaces.first?.sshPort, 2222)
+        XCTAssertEqual(decoded.workspaces.first?.sshRemoteHost, "deploy@example.com")
     }
 
     // MARK: - Recent folders

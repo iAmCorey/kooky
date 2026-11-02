@@ -604,9 +604,9 @@ final class LibghosttyEngine: TerminalEngine {
         get { surfaceView.onSearchSelected }
         set { surfaceView.onSearchSelected = newValue }
     }
-    var pasteUploadHostProvider: (() -> String?)? {
-        get { surfaceView.pasteUploadHostProvider }
-        set { surfaceView.pasteUploadHostProvider = newValue }
+    var pasteUploadTargetProvider: (() -> SSHRemoteTarget?)? {
+        get { surfaceView.pasteUploadTargetProvider }
+        set { surfaceView.pasteUploadTargetProvider = newValue }
     }
     var isRemoteSessionProvider: (() -> Bool)? {
         get { surfaceView.isRemoteSessionProvider }
@@ -739,7 +739,7 @@ final class GhosttySurfaceView: NSView {
     var onSearchEnd: (() -> Void)?
     var onSearchTotal: ((Int) -> Void)?
     var onSearchSelected: ((Int) -> Void)?
-    var pasteUploadHostProvider: (() -> String?)?
+    var pasteUploadTargetProvider: (() -> SSHRemoteTarget?)?
     var isRemoteSessionProvider: (() -> Bool)?
     var currentDirectory: URL?
     var foregroundPid: pid_t? {
@@ -1328,7 +1328,7 @@ final class GhosttySurfaceView: NSView {
             // paste path (clipboard-paste-protection).
             if KookyShellIntegration.paste(
                 from: .general,
-                host: pasteUploadHostProvider?(),
+                target: pasteUploadTargetProvider?(),
                 plainText: .viaCore({ [weak self] in self?.pasteFromClipboardViaCore() ?? false }),
                 deliver: { [weak self] in self?.paste($0) }
             ) {

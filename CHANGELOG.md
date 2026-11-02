@@ -2,6 +2,10 @@
 
 Notable changes per release. Tagged commits use `vX.Y.Z` shortform.
 
+## Unreleased
+
+- New: SSH workspaces take an optional port. The create sheet's new `port` field (leave it empty for whatever `ssh` would pick) rides along as `kooky-ssh -p N`, so a host reachable only on a non-standard port no longer needs a `~/.ssh/config` alias; image pastes upload over the same port (`scp -P`). The sidebar, title, and Session Info show `host:port` when a port is set.
+
 ## v0.51.12 — 2026-10-12
 
 - New: keyboard shortcuts that match Ghostty, Warp and cmux. ⌥⌘ + arrow moves focus to the split in that direction, ⌃⌘ + arrow moves the nearest divider, and ⌘Home / ⌘End / ⌘Page Up / ⌘Page Down scroll the terminal to the top, to the bottom, or by a page — following your Ghostty config if you've rebound them.

@@ -127,8 +127,8 @@ enum KookyShellIntegration {
     /// can't read — and returns true. False = not a remote-upload paste;
     /// the caller falls through to its local paste path.
     @discardableResult
-    static func pasteViaRemoteUpload(from pb: NSPasteboard, host: String?, deliver: @escaping @MainActor (String) -> Void) -> Bool {
-        guard let host, let upload = remotePasteUpload(from: pb, host: host) else { return false }
+    static func pasteViaRemoteUpload(from pb: NSPasteboard, target: SSHRemoteTarget?, deliver: @escaping @MainActor (String) -> Void) -> Bool {
+        guard let target, let upload = remotePasteUpload(from: pb, target: target) else { return false }
         Task { @MainActor in
             if let text = await upload(), !text.isEmpty {
                 deliver(text)
@@ -179,11 +179,11 @@ enum KookyShellIntegration {
     @MainActor
     static func paste(
         from pb: NSPasteboard,
-        host: String?,
+        target: SSHRemoteTarget?,
         plainText: PlainTextHandling,
         deliver: @escaping @MainActor (String) -> Void
     ) -> Bool {
-        if pasteViaRemoteUpload(from: pb, host: host, deliver: deliver) { return true }
+        if pasteViaRemoteUpload(from: pb, target: target, deliver: deliver) { return true }
         // One pasteboard-server IPC for the whole local ladder — the image
         // tier, the plain-text fork, and the text tier all key on it.
         let fileURLs = pasteboardFileURLs(pb)
@@ -201,7 +201,7 @@ enum KookyShellIntegration {
         return true
     }
 
-    /// Image tier of `paste(from:host:deliver:)`: a clipboard IMAGE needs a
+    /// Image tier of `paste(from:target:deliver:)`: a clipboard IMAGE needs a
     /// TIFF decode + PNG encode + disk write that froze the main thread for
     /// its whole duration — hundreds of ms for a Retina screenshot. The raw
     /// bytes are snapshotted HERE (the pasteboard can change under the hop);
@@ -245,12 +245,12 @@ enum KookyShellIntegration {
     /// screenshot's PNG re-encode, then `ssh mkdir -p` + one `scp` per file
     /// into a fresh `/tmp/kooky-pastes-*` dir, resolving to the space-joined
     /// escaped remote paths (nil on any failure).
-    static func remotePasteUpload(from pb: NSPasteboard, host: String) -> (@Sendable () async -> String?)? {
+    static func remotePasteUpload(from pb: NSPasteboard, target: SSHRemoteTarget) -> (@Sendable () async -> String?)? {
         let remoteDir = "/tmp/kooky-pastes-\(pasteFilenameTimestamp.string(from: Date()))-\(UUID().uuidString.prefix(8))"
         let work: @Sendable () -> String?
         if let urls = pasteboardFileURLs(pb) {
             let files = remotePasteDestinations(for: urls, remoteDir: remoteDir)
-            work = { performRemotePasteUpload(files, to: host, remoteDir: remoteDir) }
+            work = { performRemotePasteUpload(files, target: target, remoteDir: remoteDir) }
         } else if let raw = pasteboardRawImage(pb) {
             work = {
                 // Transcode rides the same serial lane as local pastes —
@@ -260,7 +260,7 @@ enum KookyShellIntegration {
                 guard let cached = pasteTranscodeQueue.sync(execute: { writePasteImageToCache(raw) })
                 else { return nil }
                 let files = remotePasteDestinations(for: [cached], remoteDir: remoteDir)
-                return performRemotePasteUpload(files, to: host, remoteDir: remoteDir)
+                return performRemotePasteUpload(files, target: target, remoteDir: remoteDir)
             }
         } else {
             return nil
@@ -305,18 +305,18 @@ enum KookyShellIntegration {
         "find /tmp -maxdepth 1 -name 'kooky-pastes-*' -type d -mmin +60 -exec rm -rf {} + 2>/dev/null; mkdir -p -- \(quote(remoteDir))"
     }
 
-    private static func performRemotePasteUpload(_ files: [(local: URL, remotePath: String)], to host: String, remoteDir: String) -> String? {
+    private static func performRemotePasteUpload(_ files: [(local: URL, remotePath: String)], target: SSHRemoteTarget, remoteDir: String) -> String? {
         guard runRemotePasteProcess(
             "/usr/bin/ssh",
-            remotePasteSSHOptions + [host, remotePasteMkdirCommand(remoteDir)],
+            remotePasteSSHOptions + target.sshPortArguments + [target.host, remotePasteMkdirCommand(remoteDir)],
             timeout: 20
         ) else { return nil }
         for file in files {
             var isDirectory: ObjCBool = false
             FileManager.default.fileExists(atPath: file.local.path, isDirectory: &isDirectory)
-            var args = remotePasteSSHOptions
+            var args = remotePasteSSHOptions + target.scpPortArguments
             if isDirectory.boolValue { args.append("-r") }
-            args.append(contentsOf: [file.local.path, "\(host):\(file.remotePath)"])
+            args.append(contentsOf: [file.local.path, "\(target.host):\(file.remotePath)"])
             guard runRemotePasteProcess("/usr/bin/scp", args, timeout: 60) else { return nil }
         }
         return files.map { backslashEscape($0.remotePath) }.joined(separator: " ")

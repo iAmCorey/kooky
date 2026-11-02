@@ -86,13 +86,13 @@ protocol TerminalEngine: AnyObject {
     var onSearchEnd: (() -> Void)? { get set }
     var onSearchTotal: ((Int) -> Void)? { get set }
     var onSearchSelected: ((Int) -> Void)? { get set }
-    /// SSH destination pasted files should be uploaded to before their path
+    /// SSH host + port pasted files should be uploaded to before their path
     /// is injected, or nil for plain local paste. Wired by `WorkspaceStore`
-    /// to the session's spawn-pinned `sshWorkspaceHost` — NOT the marker-
+    /// to the session's spawn-pinned `sshWorkspaceTarget` — NOT the marker-
     /// driven `remoteHost` status-bar signal, which the name deliberately
     /// avoids. The engine asks at paste time instead of caching so tab moves
-    /// across panes/windows can't strand a stale host.
-    var pasteUploadHostProvider: (() -> String?)? { get set }
+    /// across panes/windows can't strand a stale target.
+    var pasteUploadTargetProvider: (() -> SSHRemoteTarget?)? { get set }
     /// Whether filesystem paths emitted by this surface belong to a remote
     /// machine. Plain URLs remain openable; only scheme-less/file URL targets
     /// are suppressed so an SSH path can never accidentally open a same-named

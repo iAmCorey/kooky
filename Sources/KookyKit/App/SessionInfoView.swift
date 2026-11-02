@@ -72,7 +72,10 @@ struct SessionInfoView: View {
                 SessionInfoSection(title: SessionInfoRules.contextTitle, store: store) {
                     InlineField(label: "Workspace", value: workspace.title)
                     BlockField(label: "Directory", value: abbreviatedPath(session.currentDirectory.path))
-                    if let remote = session.effectiveRemoteHost {
+                    // The LABEL (host:port), not `effectiveRemoteHost`: this
+                    // row's job is to tell the user what to type at a shell,
+                    // and the identity spelling drops the port.
+                    if let remote = session.effectiveRemoteLabel {
                         InlineField(label: "Remote", value: remote)
                     }
                 }
