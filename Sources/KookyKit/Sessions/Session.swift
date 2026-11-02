@@ -143,6 +143,17 @@ final class Session: Identifiable {
         terminalTitle = value
         lastTerminalTitleApply = ContinuousClock.now
     }
+    /// Launch config held until a restored tab is first activated. Keeping it
+    /// on the session avoids a store-level UUID map and lets explicit new tabs
+    /// retain their existing eager-start path.
+    @ObservationIgnored private var pendingLaunchConfig: TerminalSessionConfig?
+
+    func startIfNeeded() {
+        guard let config = pendingLaunchConfig else { return }
+        pendingLaunchConfig = nil
+        engine.start(config: config)
+    }
+
     /// Last resumable conversation id this tab's agent reported. Persisted
     /// via `PersistedTab.conversationId` so the next kooky launch can resume
     /// where the user left off. Per-Session because each tab owns its own
@@ -459,7 +470,8 @@ final class Session: Identifiable {
         currentDirectory: URL,
         agent: AgentTemplate,
         customTitle: String? = nil,
-        conversationId: String? = nil
+        conversationId: String? = nil,
+        launchConfig: TerminalSessionConfig? = nil
     ) {
         self.id = id
         self.engine = engine
@@ -467,5 +479,6 @@ final class Session: Identifiable {
         self.agent = agent
         self.customTitle = customTitle
         self.conversationId = conversationId
+        self.pendingLaunchConfig = launchConfig
     }
 }

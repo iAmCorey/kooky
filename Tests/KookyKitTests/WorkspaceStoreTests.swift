@@ -1231,6 +1231,46 @@ final class WorkspaceStoreTests: XCTestCase {
         XCTAssertEqual(engine(pane.tabs[0]).startedConfigs.last?.workingDirectory, "/tmp/projectA/deep")
     }
 
+    func testRestoreDefersInactiveTabUntilActivation() {
+        let wsId = UUID()
+        let paneId = UUID()
+        let activeId = UUID()
+        let deferredId = UUID()
+        let initial = PersistedState(
+            workspaces: [
+                PersistedWorkspace(
+                    id: wsId,
+                    workingDirectoryPath: "/tmp/projectA",
+                    root: PersistedPaneNode(
+                        id: paneId,
+                        kind: .pane(PersistedPane(
+                            id: paneId,
+                            tabs: [
+                                PersistedTab(id: activeId, agentId: "terminal", currentDirectoryPath: "/tmp/projectA"),
+                                PersistedTab(id: deferredId, agentId: "omp", currentDirectoryPath: "/tmp/projectA", conversationId: "omp-session")
+                            ],
+                            activeTabId: activeId
+                        ))
+                    ),
+                    activePaneId: paneId
+                )
+            ],
+            activeWorkspaceId: wsId
+        )
+        let store = makeStore(initial: initial)
+        let pane = firstPane(store.workspaces[0])
+        let deferred = pane.tabs[1]
+
+        XCTAssertEqual(engine(pane.tabs[0]).startedConfigs.count, 1)
+        XCTAssertTrue(engine(deferred).startedConfigs.isEmpty)
+
+        store.activateTab(deferred, in: store.workspaces[0])
+
+        XCTAssertEqual(engine(deferred).startedConfigs.count, 1)
+        store.activateTab(deferred, in: store.workspaces[0])
+        XCTAssertEqual(engine(deferred).startedConfigs.count, 1)
+    }
+
     func testRestoreSplitTreeReconstructsBothPanes() {
         let wsId = UUID()
         let rootId = UUID()
