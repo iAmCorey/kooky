@@ -6,6 +6,10 @@ import Foundation
 /// the saved cwd via `TerminalSessionConfig.workingDirectory`.
 struct PersistedState: Codable, Equatable {
     var workspaces: [PersistedWorkspace]
+    /// Sidebar projects, in display order. Optional so state.json files written
+    /// before projects existed still decode — nil means "derive one project per
+    /// distinct workspace disk path" (see `WorkspaceStore.restore`).
+    var projects: [PersistedProject]?
     var activeWorkspaceId: UUID?
     var sidebarMode: SidebarMode?
     var rightSidebarMode: SidebarMode?
@@ -25,6 +29,11 @@ struct PersistedState: Codable, Equatable {
     /// written before the inspector existed decode (nil → nothing collapsed);
     /// stored sorted so the saved file is byte-stable across saves.
     var collapsedInfoSections: [String]?
+    /// Sidebar projects the user folded. Optional so state files written
+    /// before folders remembered their state decode (nil → all expanded);
+    /// ids are filtered against the live project list on save, so a removed
+    /// folder never lingers here.
+    var collapsedProjectIds: [UUID]?
 }
 
 /// Root of the multi-window `state.json`. Each `PersistedWindow` is one
@@ -50,21 +59,49 @@ struct PersistedWindow: Codable, Equatable {
     var frame: PersistedFrame?
 }
 
+/// A project is a folder. Persisted so the sidebar keeps its grouping and
+/// display order across launches even for projects with no workspace left.
+struct PersistedProject: Codable, Equatable {
+    var id: UUID
+    /// Absolute path of the folder this project *is*. Never re-pointed. Empty
+    /// for the SSH group, whose root is a sentinel rebuilt on restore.
+    var rootPath: String
+    /// True for the project that owns every SSH workspace. Optional so state
+    /// files written before the SSH group existed decode (nil → a folder).
+    var isSSHGroup: Bool?
+
+    @MainActor
+    init(_ project: Project) {
+        self.id = project.id
+        self.rootPath = project.isSSHGroup ? "" : project.rootPath.path
+        self.isSSHGroup = project.isSSHGroup ? true : nil
+    }
+
+    init(id: UUID, rootPath: String, isSSHGroup: Bool? = nil) {
+        self.id = id
+        self.rootPath = rootPath
+        self.isSSHGroup = isSSHGroup
+    }
+}
+
 struct PersistedWorkspace: Codable, Equatable {
     var id: UUID
     var workingDirectoryPath: String
     var root: PersistedPaneNode
     var activePaneId: UUID?
     var customTitle: String?
-    /// nil = top-level workspace; non-nil = this is a git worktree whose
-    /// source workspace persisted with this id. Decoded with
-    /// `decodeIfPresent` so pre-worktree `state.json` files still load.
-    var worktreeParentId: UUID?
+    /// Owning project. Optional only so pre-project state.json files decode; a
+    /// file written by this build always carries it. Migration derives the
+    /// project from `workingDirectoryPath` / `legacyWorktreeParentId`.
+    var projectId: UUID?
+    /// Branch this workspace's worktree was created on, when it is a worktree.
     var worktreeBranch: String?
-    /// Disk root captured at worktree-create time. Separate from
-    /// `workingDirectoryPath` so the latter can drift with OSC 7 cwd
-    /// reports without breaking close/reconcile path lookups.
+    /// Disk root of the worktree; non-nil marks the workspace as a worktree.
     var worktreePath: String?
+    /// Legacy (pre-project) link from a worktree workspace to its source
+    /// workspace. Decoded only to migrate those files onto a derived project;
+    /// never written back.
+    var legacyWorktreeParentId: UUID?
     /// SSH destination of an SSH workspace. Decoded as optional so state
     /// files written before the field restore as plain local workspaces.
     var sshRemoteHost: String?
@@ -84,7 +121,7 @@ struct PersistedWorkspace: Codable, Equatable {
         self.root = PersistedPaneNode(ws.root)
         self.activePaneId = ws.activePaneId
         self.customTitle = ws.customTitle
-        self.worktreeParentId = ws.worktreeParentId
+        self.projectId = ws.projectId
         self.worktreeBranch = ws.worktreeBranch
         self.worktreePath = ws.worktreePath?.path
         self.sshRemoteHost = ws.sshRemoteHost
@@ -93,15 +130,16 @@ struct PersistedWorkspace: Codable, Equatable {
         self.tagName = ws.tag?.name
     }
 
-    init(id: UUID, workingDirectoryPath: String, root: PersistedPaneNode, activePaneId: UUID? = nil, customTitle: String? = nil, worktreeParentId: UUID? = nil, worktreeBranch: String? = nil, worktreePath: String? = nil, sshRemoteHost: String? = nil, tagPreset: String? = nil, tagCustomHex: String? = nil, tagName: String? = nil) {
+    init(id: UUID, workingDirectoryPath: String, root: PersistedPaneNode, activePaneId: UUID? = nil, customTitle: String? = nil, projectId: UUID? = nil, worktreeBranch: String? = nil, worktreePath: String? = nil, legacyWorktreeParentId: UUID? = nil, sshRemoteHost: String? = nil, tagPreset: String? = nil, tagCustomHex: String? = nil, tagName: String? = nil) {
         self.id = id
         self.workingDirectoryPath = workingDirectoryPath
         self.root = root
         self.activePaneId = activePaneId
         self.customTitle = customTitle
-        self.worktreeParentId = worktreeParentId
+        self.projectId = projectId
         self.worktreeBranch = worktreeBranch
         self.worktreePath = worktreePath
+        self.legacyWorktreeParentId = legacyWorktreeParentId
         self.sshRemoteHost = sshRemoteHost
         self.tagPreset = tagPreset
         self.tagCustomHex = tagCustomHex
@@ -110,9 +148,9 @@ struct PersistedWorkspace: Codable, Equatable {
 
     private enum CodingKeys: String, CodingKey {
         case id, workingDirectoryPath, root, activePaneId, customTitle
-        case worktreeParentId, worktreeBranch, worktreePath, sshRemoteHost, tagPreset, tagCustomHex, tagName
+        case projectId, worktreeBranch, worktreePath, sshRemoteHost, tagPreset, tagCustomHex, tagName
         // Legacy keys
-        case tabs, activeTabId
+        case worktreeParentId, tabs, activeTabId
     }
 
     func encode(to encoder: Encoder) throws {
@@ -122,7 +160,7 @@ struct PersistedWorkspace: Codable, Equatable {
         try c.encode(root, forKey: .root)
         try c.encodeIfPresent(activePaneId, forKey: .activePaneId)
         try c.encodeIfPresent(customTitle, forKey: .customTitle)
-        try c.encodeIfPresent(worktreeParentId, forKey: .worktreeParentId)
+        try c.encodeIfPresent(projectId, forKey: .projectId)
         try c.encodeIfPresent(worktreeBranch, forKey: .worktreeBranch)
         try c.encodeIfPresent(worktreePath, forKey: .worktreePath)
         try c.encodeIfPresent(sshRemoteHost, forKey: .sshRemoteHost)
@@ -136,9 +174,10 @@ struct PersistedWorkspace: Codable, Equatable {
         id = try c.decode(UUID.self, forKey: .id)
         workingDirectoryPath = try c.decode(String.self, forKey: .workingDirectoryPath)
         customTitle = try c.decodeIfPresent(String.self, forKey: .customTitle)
-        worktreeParentId = try c.decodeIfPresent(UUID.self, forKey: .worktreeParentId)
+        projectId = try c.decodeIfPresent(UUID.self, forKey: .projectId)
         worktreeBranch = try c.decodeIfPresent(String.self, forKey: .worktreeBranch)
         worktreePath = try c.decodeIfPresent(String.self, forKey: .worktreePath)
+        legacyWorktreeParentId = try c.decodeIfPresent(UUID.self, forKey: .worktreeParentId)
         sshRemoteHost = try c.decodeIfPresent(String.self, forKey: .sshRemoteHost)
         tagPreset = try c.decodeIfPresent(String.self, forKey: .tagPreset)
         tagCustomHex = try c.decodeIfPresent(String.self, forKey: .tagCustomHex)

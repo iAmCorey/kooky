@@ -116,6 +116,11 @@ enum RightSidebarContent: String, Codable, Equatable, Sendable, CaseIterable {
 @MainActor
 @Observable
 final class WorkspaceStore {
+    /// Sidebar projects (folders), in display order. Every workspace belongs to
+    /// exactly one; a project outlives its workspaces so an empty one stays as
+    /// a row the user can spawn a new tab from.
+    private(set) var projects: [Project] = []
+    /// Every workspace across every project, in sidebar order within a project.
     private(set) var workspaces: [Workspace] = []
     private(set) var activeWorkspaceId: UUID?
     /// Session id currently being dragged in any pane's tab bar. Shared across
@@ -218,6 +223,34 @@ final class WorkspaceStore {
         scheduleSave()
     }
 
+    /// Sidebar projects the user folded. Owned by the store for the same
+    /// reason as `collapsedInfoSections`: `SidebarView` unmounts whenever the
+    /// sidebar hides or switches to the file tree, so `@State` forgot every
+    /// fold the moment the user glanced elsewhere — and a relaunch reopened
+    /// all of them. Persisted per window, so a folder the user keeps shut
+    /// stays shut. Empty means "everything expanded".
+    var collapsedProjectIds: Set<UUID> = []
+
+    /// True while `removeProject` runs its own teardown. `closeWorkspace`
+    /// normally prunes an emptied SSH group and reports the window empty; both
+    /// would fire mid-loop while the project — and its removal — is still in
+    /// flight, so the caller mutes them and reports once when it is done.
+    private var isRemovingProject = false
+
+    func setProjectCollapsed(_ id: UUID, _ collapsed: Bool) {
+        guard collapsedProjectIds.contains(id) != collapsed else { return }
+        if collapsed {
+            collapsedProjectIds.insert(id)
+        } else {
+            collapsedProjectIds.remove(id)
+        }
+        scheduleSave()
+    }
+
+    func toggleProjectCollapsed(_ id: UUID) {
+        setProjectCollapsed(id, !collapsedProjectIds.contains(id))
+    }
+
     /// Full-mode sidebar width, user-draggable from the trailing edge.
     /// `SidebarView.fullWidth` is the floor (the design width — the sidebar
     /// can only grow); compact stays fixed at `compactWidth` and hidden is
@@ -280,7 +313,10 @@ final class WorkspaceStore {
         guard let override = fileTreeRootOverride,
               override.workspaceId == active?.id,
               override.sessionId == active?.activeSession?.id else {
-            return active?.diskPath
+            // Follows the active shell's cwd, not the workspace spawn root:
+            // `diskPath` is frozen at the project/worktree folder now, so
+            // using it alone would stop the file tree from tracking `cd`.
+            return active?.activeSession?.currentDirectory ?? active?.diskPath
         }
         return override.root
     }
@@ -517,8 +553,15 @@ final class WorkspaceStore {
         self.moveToNewWindow = moveToNewWindow
         self.onSessionAlert = onSessionAlert
         self.noteRecentFolder = noteRecentFolder
-        if let saved = persistence.load(), !saved.workspaces.isEmpty {
+        // A project outlives its workspaces. Restoring only when a workspace
+        // remains would drop an emptied-on-purpose project list and mint a
+        // Home workspace over it.
+        if let saved = persistence.load(),
+           !saved.workspaces.isEmpty || !(saved.projects ?? []).isEmpty {
             restore(from: saved)
+            // Restore can prune a stale SSH group and leave nothing at all —
+            // a window still needs something to type into.
+            if workspaces.isEmpty && projects.isEmpty { addWorkspace() }
         } else {
             addWorkspace()
         }
@@ -526,11 +569,59 @@ final class WorkspaceStore {
 
     // MARK: - Workspaces
 
+    /// Returns the project rooted at `root`, creating and appending one when
+    /// no project owns that folder yet. Identity is `canonicalDiskPath` so
+    /// `/tmp/x` and `/private/tmp/x` (or a symlinked checkout) resolve to the
+    /// same project — `standardizedFileURL` does not collapse that symlink.
+    /// `rootPath` is canonical by construction (`restore` included), so only
+    /// the argument is resolved here: a `realpath` per stored project on every
+    /// lookup would be a syscall per row on the palette's path.
+    @discardableResult
+    func project(forRoot root: URL) -> Project {
+        let path = canonicalDiskPath(root).path
+        if let existing = projects.first(where: { !$0.isSSHGroup && $0.rootPath.path == path }) {
+            return existing
+        }
+        let project = Project(rootPath: URL(fileURLWithPath: path))
+        projects.append(project)
+        scheduleSave()
+        return project
+    }
+
+    /// The project that owns every SSH workspace — one group, created on first
+    /// use. A remote host has no local folder to be a project, so before this
+    /// existed an SSH workspace was filed under whatever local folder it
+    /// happened to spawn from; the group keeps remote rows out of the folder
+    /// list while still giving them a parent to nest under.
+    func sshGroupProject() -> Project {
+        if let existing = projects.first(where: { $0.isSSHGroup }) { return existing }
+        let group = Project(rootPath: Project.sshGroupRoot, isSSHGroup: true)
+        projects.append(group)
+        scheduleSave()
+        return group
+    }
+
+    func project(withId id: UUID) -> Project? {
+        projects.first { $0.id == id }
+    }
+
+    /// The project's workspaces, in sidebar order.
+    func workspaces(in project: Project) -> [Workspace] {
+        workspaces(projectId: project.id)
+    }
+
+    /// Sidebar order is `workspaces` order, so grouping is a plain filter —
+    /// reordering inside a project rewrites only that project's slots.
+    func workspaces(projectId: UUID) -> [Workspace] {
+        workspaces.filter { $0.projectId == projectId }
+    }
+
+    /// Adds a workspace to `project` (created from `workingDirectory` when the
+    /// caller names a folder instead), spawning one terminal at its spawn root.
     @discardableResult
     func addWorkspace(
+        in project: Project? = nil,
         workingDirectory: URL? = nil,
-        worktreeParent: Workspace? = nil,
-        worktreeBranch: String? = nil,
         template: AgentTemplate = .terminal,
         sshRemoteHost: String? = nil,
         conversationId: String? = nil,
@@ -544,33 +635,141 @@ final class WorkspaceStore {
         // `noteRecentFolder` below is caught by `RecentFolders.note()`'s own
         // home exclusion — if this fallback ever becomes a configurable
         // default-projects dir, the recent list starts recording it silently.
-        // `inheritedFrom` is captured HERE, before `activeWorkspaceId` moves
+        // `inheritedDir` is captured HERE, before `activeWorkspaceId` moves
         // to the new workspace below — `active` later means the new one.
-        let inheritedFrom = workingDirectory == nil ? active : nil
+        let inheritedDir = workingDirectory == nil ? active?.workingDirectory : nil
         let dir = workingDirectory
-            ?? inheritedFrom?.workingDirectory
+            ?? project?.rootPath
+            ?? inheritedDir
             ?? URL(fileURLWithPath: NSHomeDirectory())
+        // ⌘N inherits the active workspace's directory, which for a worktree
+        // workspace is the worktree itself — a second workspace on the same
+        // checkout, not a new worktree.
+        // Normalized before the ownership decision: a whitespace-only host
+        // makes `makeWorkspace` build a local workspace, so it must not route
+        // into the SSH group either.
+        let sshHost = Self.normalizedSSHHost(sshRemoteHost)
+        let owner: Project
+        if sshHost != nil {
+            // Every SSH workspace lives in the one SSH group, whatever project
+            // is active — a remote has no folder to be filed under.
+            owner = sshGroupProject()
+        } else if let project {
+            owner = project
+        } else if workingDirectory == nil,
+                  active?.sshRemoteHost == nil,
+                  let activeProject = active.flatMap({ self.project(withId: $0.projectId) }) {
+            // An SSH row's project is the group, which must never hold a local
+            // workspace: ⌘N there falls through to the folder it inherits from
+            // the remote's spawn directory.
+            owner = activeProject
+        } else {
+            owner = self.project(forRoot: dir)
+        }
+        let workspace = makeWorkspace(
+            in: owner,
+            spawnRoot: dir,
+            worktreePath: nil,
+            worktreeBranch: nil,
+            template: template,
+            sshRemoteHost: sshHost,
+            conversationId: conversationId,
+            forceResume: forceResume,
+            rawLaunchCommand: rawLaunchCommand,
+            customTitle: customTitle,
+            activate: activate,
+            spawnInBackground: spawnInBackground
+        )
+        // Remember the project folder for Open Recent / ⌘P (issue #28) —
+        // never a secondary workspace's own directory and never an SSH
+        // workspace (the local cwd is not where the project lives). Resolved
+        // on both sides: `rootPath` is canonical and the spawn root keeps
+        // whatever spelling the caller picked (`/tmp/x` vs `/private/tmp/x`),
+        // and recents is a literal path list, so an unresolved pass-through
+        // would file the same folder twice.
+        let dirPath = canonicalDiskPath(workspace.workingDirectory).path
+        if workspace.sshRemoteHost == nil, dirPath == owner.rootPath.path {
+            noteRecentFolder(URL(fileURLWithPath: dirPath))
+        }
+        return workspace
+    }
+
+    /// Opens a folder from the recents list. A project IS its folder, so a
+    /// folder that already has one is unfolded and focused on its first
+    /// workspace instead of growing a second identical row; an unknown folder
+    /// becomes a project with one workspace. The palette's recent entries and
+    /// File → Open Recent share this seam. Lookup goes through
+    /// `project(forRoot:)` so symlink spellings of the same folder match.
+    @discardableResult
+    func openRecentFolder(_ url: URL) -> Workspace {
+        let project = project(forRoot: url)
+        setProjectCollapsed(project.id, false)
+        if let first = workspaces(in: project).first {
+            activateWorkspace(first)
+            return first
+        }
+        return addWorkspace(in: project)
+    }
+
+    /// Adds a git worktree of `project` — the worktree directory becomes a
+    /// workspace of that project, one level below it in the sidebar.
+    @discardableResult
+    func addWorktreeWorkspace(
+        in project: Project,
+        path: URL,
+        branch: String?,
+        template: AgentTemplate = .terminal,
+        customTitle: String? = nil,
+        activate: Bool = true
+    ) -> Workspace {
+        makeWorkspace(
+            in: project,
+            spawnRoot: path,
+            worktreePath: path.standardizedFileURL,
+            worktreeBranch: branch,
+            template: template,
+            sshRemoteHost: nil,
+            conversationId: nil,
+            forceResume: false,
+            rawLaunchCommand: nil,
+            customTitle: customTitle,
+            activate: activate,
+            spawnInBackground: false
+        )
+    }
+
+    @discardableResult
+    private func makeWorkspace(
+        in project: Project,
+        spawnRoot: URL,
+        worktreePath: URL?,
+        worktreeBranch: String?,
+        template: AgentTemplate,
+        sshRemoteHost: String?,
+        conversationId: String?,
+        forceResume: Bool,
+        rawLaunchCommand: String?,
+        customTitle: String?,
+        activate: Bool,
+        spawnInBackground: Bool
+    ) -> Workspace {
         let pane = Pane()
         let root = PaneNode(pane: pane)
-        let workspace = Workspace(workingDirectory: dir, root: root)
-        workspace.worktreeParentId = worktreeParent?.id
+        let workspace = Workspace(projectId: project.id, workingDirectory: spawnRoot, root: root)
+        // `worktreePath` is pinned at create time (and standardized: `/tmp` →
+        // `/private/tmp`) so `git worktree remove` always targets the disk
+        // root, no matter where the user cd's later, and so a later reconcile
+        // comparison against `git worktree list` (already realpath'd) lines up.
+        workspace.worktreePath = worktreePath
         workspace.worktreeBranch = worktreeBranch
         workspace.sshRemoteHost = Self.normalizedSSHHost(sshRemoteHost)
-        // Pin worktreePath at create time so `git worktree remove` always
-        // targets the disk root, no matter where the user cd's later.
-        // `.standardizedFileURL` resolves `/tmp` → `/private/tmp` etc. so
-        // a later reconcile comparison against `git worktree list`
-        // output (which is already realpath'd) lines up.
-        if worktreeParent != nil {
-            workspace.worktreePath = dir.standardizedFileURL
-        }
         // A new workspace always comes up with exactly one tab. The spawn
         // arguments are forwarded so that tab can BE what the caller wanted
         // (see `localSpawn`) instead of a default shell the caller then has
         // to open a second tab beside — one `open`, one PTY.
         let session = spawnSession(
             template: template,
-            initialCwd: dir,
+            initialCwd: spawnRoot,
             conversationId: conversationId,
             forceResume: forceResume,
             sshRemoteHost: workspace.sshRemoteHost,
@@ -581,47 +780,20 @@ final class WorkspaceStore {
         wireSessionCallbacks(engine: session.engine, session: session, workspace: workspace, codexRolloutId: session.resumedConversationId)
         pane.tabs.append(session)
         pane.activeTabId = session.id
-        // Worktrees insert right after their source (or after the source's
-        // existing worktrees) — compact-mode sidebar walks `workspaces`
-        // in array order, so this visual grouping is load-bearing there.
-        if let parent = worktreeParent,
-           let parentIdx = workspaces.firstIndex(where: { $0 === parent }) {
-            var insertAt = parentIdx + 1
-            while insertAt < workspaces.count
-                  && workspaces[insertAt].worktreeParentId == parent.id {
-                insertAt += 1
-            }
-            workspaces.insert(workspace, at: insertAt)
-        } else {
-            workspaces.append(workspace)
-        }
+        workspaces.append(workspace)
         if activate {
             activeWorkspaceId = workspace.id
-        }
-        // Remember the project folder for Open Recent / ⌘P (issue #28) —
-        // except worktree children (their dir dies with the worktree) and
-        // SSH workspaces (the local cwd is not where the project lives).
-        // The exclusion follows the DIRECTORY's provenance, not just this
-        // call's arguments: a dir inherited from such a workspace (⌘N with
-        // one active — `inheritedFrom` — or Duplicate on one — matched by
-        // path) keeps its source's exclusion.
-        let origin = inheritedFrom ?? workspaces.first(where: {
-            $0 !== workspace && $0.workingDirectory.standardizedFileURL.path == dir.standardizedFileURL.path
-        })
-        if worktreeParent == nil, workspace.sshRemoteHost == nil,
-           origin?.worktreeParentId == nil, origin?.sshRemoteHost == nil {
-            noteRecentFolder(dir)
         }
         scheduleSave()
         return workspace
     }
 
-    /// Creates a git worktree of `source` and adds the resulting directory
-    /// as a child workspace under it. `git worktree add` runs on a detached
-    /// task so the SwiftUI sheet stays responsive; on failure the stderr
-    /// goes back via the outcome so the sheet shows it inline.
+    /// Creates a git worktree of `project` and adds the resulting directory
+    /// as a workspace of it. `git worktree add` runs on a detached task so the
+    /// SwiftUI sheet stays responsive; on failure the stderr goes back via the
+    /// outcome so the sheet shows it inline.
     func createWorktree(
-        source: Workspace,
+        project: Project,
         request: CreateWorktreeSheet.Request
     ) async -> CreateWorktreeSheet.CreateOutcome {
         switch request.kind {
@@ -629,9 +801,9 @@ final class WorkspaceStore {
             // repoRoot runs inside the detached task too — it is a git
             // subprocess with a 2s timeout, and on the main actor it froze
             // the UI for that long on slow/network filesystems.
-            let sourceDir = source.workingDirectory
+            let repoDir = project.rootPath
             let failureMessage: String? = await Task.detached(priority: .userInitiated) {
-                guard let repoPath = WorktreeManager.repoRoot(near: sourceDir) else {
+                guard let repoPath = WorktreeManager.repoRoot(near: repoDir) else {
                     return "not inside a git repository"
                 }
                 if case .failure(let err) = WorktreeManager.add(repoPath: repoPath, path: path, mode: mode) {
@@ -642,23 +814,21 @@ final class WorkspaceStore {
             if let failureMessage {
                 return .failure(failureMessage)
             }
-            addWorkspace(
-                workingDirectory: path,
-                worktreeParent: source,
-                worktreeBranch: branchForDisplay,
+            addWorktreeWorkspace(
+                in: project,
+                path: path,
+                branch: branchForDisplay,
                 template: request.template
             )
             return .success
         case .adopt(let worktrees):
             // Pure sidebar materialization — no git command, the
-            // directories already exist on disk. One workspace per
-            // picked worktree, inserted after the source in array
-            // order so sidebar grouping stays correct.
+            // directories already exist on disk.
             for info in worktrees {
-                addWorkspace(
-                    workingDirectory: info.path,
-                    worktreeParent: source,
-                    worktreeBranch: info.branch,
+                addWorktreeWorkspace(
+                    in: project,
+                    path: info.path,
+                    branch: info.branch,
                     template: request.template
                 )
             }
@@ -678,7 +848,7 @@ final class WorkspaceStore {
     /// global entry points such as the command palette need to ask the
     /// sidebar to host the sheet, especially when the sidebar was hidden and
     /// has to be shown first.
-    var pendingCreateWorktreeRequest: Workspace?
+    var pendingCreateWorktreeRequest: Project?
 
     /// Cross-view SSH-workspace create request — File menu and command
     /// palette park it here for `SidebarView` to open the destination sheet
@@ -715,43 +885,74 @@ final class WorkspaceStore {
     /// handled.
     var pendingRenameWorkspace: Workspace?
 
-    /// Payload for the "close source workspace, take its worktrees with
-    /// it" confirm sheet. A source can't simply close on its own — its
-    /// worktrees would either show as orphan rows (the sidebar fallback)
-    /// or vanish silently. Either way the user's mental model breaks.
-    struct CloseSourceRequest {
-        let source: Workspace
-        let worktrees: [Workspace]
+    /// Payload for the "close project, take its workspaces with it" confirm
+    /// sheet. `worktrees` are the workspaces whose directories are git
+    /// worktrees — closing the project offers to delete those from disk too.
+    @MainActor
+    struct CloseProjectRequest {
+        let project: Project
+        let workspaces: [Workspace]
+
+        var worktrees: [Workspace] { workspaces.filter { $0.isWorktree } }
     }
 
-    /// Set when a top-level workspace with worktrees is being closed and
-    /// the sidebar should pop the bulk confirm sheet. Plain top-level
-    /// workspaces (no worktrees) close inline and never park here.
-    var pendingCloseSourceRequest: CloseSourceRequest?
+    /// Set when a project still holds workspaces and the sidebar should pop
+    /// the bulk confirm sheet. Empty projects remove immediately and never
+    /// park here.
+    var pendingCloseProjectRequest: CloseProjectRequest?
 
     /// UI-level close request. Callers from the sidebar (× button, right-
-    /// click menu) and the ⌘⇧W menu item both funnel here so the
-    /// confirm prompt only lives in one place.
+    /// click menu) and the ⌘⇧W menu item both funnel here so the confirm
+    /// prompt only lives in one place.
     func requestCloseWorkspace(_ workspace: Workspace) {
-        if workspace.worktreeParentId != nil {
+        if workspace.isWorktree {
             pendingRemovalRequest = workspace
             return
         }
-        let worktrees = workspaces.filter { $0.worktreeParentId == workspace.id }
-        if worktrees.isEmpty {
-            closeWorkspace(workspace)
-            return
-        }
-        pendingCloseSourceRequest = CloseSourceRequest(source: workspace, worktrees: worktrees)
+        closeWorkspace(workspace)
     }
 
-    /// Performs the deferred source-with-worktrees close from the sheet.
-    /// `alsoDelete = true` runs `git worktree remove --force` + branch-d
-    /// for each child before closing the source (the v0.18.x default
-    /// behaviour, now opt-in via the sheet's checkbox). First failing
-    /// git remove aborts and surfaces stderr. `alsoDelete = false` just
-    /// drops the workspaces from the sidebar — disk untouched.
-    func performCloseSource(_ request: CloseSourceRequest, alsoDelete: Bool) async -> String? {
+    /// Projects removed from the sidebar take every workspace under them —
+    /// worktree workspaces included, though their directories only go away
+    /// when the sheet's checkbox said so. Any project that still holds a
+    /// workspace asks first: removing it closes live terminals, and an empty
+    /// one is the only case with nothing to lose.
+    func requestRemoveProject(_ project: Project) {
+        let members = workspaces(in: project)
+        guard !members.isEmpty else {
+            removeProject(project)
+            return
+        }
+        pendingCloseProjectRequest = CloseProjectRequest(project: project, workspaces: members)
+    }
+
+    /// Drops the project and closes its workspaces. Disk is untouched — use
+    /// `performCloseProject(alsoDelete:)` when worktree directories should go.
+    func removeProject(_ project: Project) {
+        // Close members first: `closeWorkspace` only consults `workspaces`, so
+        // the project must outlive them to keep `onBecameEmpty` honest. The
+        // SSH group is the exception it cannot keep alive on its own — it
+        // prunes itself with its last row — so the loop runs with teardown
+        // muted and this method reports the emptied window below, once.
+        isRemovingProject = true
+        defer { isRemovingProject = false }
+        for ws in workspaces(in: project) {
+            closeWorkspace(ws)
+        }
+        projects.removeAll { $0.id == project.id }
+        collapsedProjectIds.remove(project.id)
+        pendingCloseProjectRequest = nil
+        scheduleSave()
+        if workspaces.isEmpty && projects.isEmpty { onBecameEmpty?() }
+    }
+
+    /// Performs the deferred project removal from the sheet. `alsoDelete = true`
+    /// runs `git worktree remove --force` + branch-d for each worktree
+    /// workspace before closing everything (the v0.18.x default behaviour, now
+    /// opt-in via the sheet's checkbox). First failing git remove aborts and
+    /// surfaces stderr. `alsoDelete = false` just drops the rows — disk
+    /// untouched.
+    func performCloseProject(_ request: CloseProjectRequest, alsoDelete: Bool) async -> String? {
         if alsoDelete {
             for worktree in request.worktrees {
                 if let message = await removeWorktreeDirectory(worktree) {
@@ -759,9 +960,7 @@ final class WorkspaceStore {
                 }
             }
         }
-        for worktree in request.worktrees { closeWorkspace(worktree) }
-        closeWorkspace(request.source)
-        pendingCloseSourceRequest = nil
+        removeProject(request.project)
         return nil
     }
 
@@ -783,17 +982,18 @@ final class WorkspaceStore {
     /// user with N source repos doesn't pay N × ~100ms blocked on launch.
     /// Results apply back on the main actor in source order.
     func reconcileWorktrees() async {
-        // Snapshot inputs on the main actor before hopping off — Workspace
-        // is @MainActor so the closure can't touch its properties from
+        // Snapshot inputs on the main actor before hopping off — Project and
+        // Workspace are @MainActor so the closure can't touch them from
         // background tasks.
-        let inputs: [(index: Int, sourceId: UUID, cwd: URL)] = workspaces.enumerated().compactMap { index, source in
-            guard source.worktreeParentId == nil else { return nil }
-            return (index, source.id, source.workingDirectory)
-        }
+        // The SSH group's root is a sentinel, not a folder: probing it would
+        // spawn a git process per launch that can only fail.
+        let inputs: [(index: Int, projectId: UUID, cwd: URL)] = projects.enumerated()
+            .filter { !$0.element.isSSHGroup }
+            .map { ($0.offset, $0.element.id, $0.element.rootPath) }
         guard !inputs.isEmpty else { return }
 
-        let results: [(index: Int, sourceId: UUID, repoRoot: URL, infos: [WorktreeManager.Info])] = await withTaskGroup(
-            of: (index: Int, sourceId: UUID, repoRoot: URL, infos: [WorktreeManager.Info])?.self
+        let results: [(index: Int, projectId: UUID, repoRoot: URL, infos: [WorktreeManager.Info])] = await withTaskGroup(
+            of: (index: Int, projectId: UUID, repoRoot: URL, infos: [WorktreeManager.Info])?.self
         ) { group in
             for input in inputs {
                 group.addTask {
@@ -801,32 +1001,30 @@ final class WorkspaceStore {
                           case .success(let infos) = WorktreeManager.list(repoPath: repoRoot) else {
                         return nil
                     }
-                    return (input.index, input.sourceId, repoRoot, infos)
+                    return (input.index, input.projectId, repoRoot, infos)
                 }
             }
-            var collected: [(index: Int, sourceId: UUID, repoRoot: URL, infos: [WorktreeManager.Info])] = []
+            var collected: [(index: Int, projectId: UUID, repoRoot: URL, infos: [WorktreeManager.Info])] = []
             for await result in group { if let result { collected.append(result) } }
             return collected.sorted { $0.index < $1.index }
         }
 
         for result in results {
-            guard let source = workspaces.first(where: { $0.id == result.sourceId }) else { continue }
-            reconcile(source: source, sourceRoot: result.repoRoot, diskWorktrees: result.infos)
+            guard let project = projects.first(where: { $0.id == result.projectId }) else { continue }
+            reconcile(project: project, sourceRoot: result.repoRoot, diskWorktrees: result.infos)
         }
     }
 
     /// `internal` so tests can drive it with synthetic `diskWorktrees`
     /// without spinning up a real git repo. `reconcileWorktrees` is the
     /// production entry point.
-    func reconcile(source: Workspace, sourceRoot: URL? = nil, diskWorktrees: [WorktreeManager.Info]) {
-        let sourceRootPath = (sourceRoot ?? WorktreeManager.repoRoot(near: source.workingDirectory) ?? source.workingDirectory)
+    func reconcile(project: Project, sourceRoot: URL? = nil, diskWorktrees: [WorktreeManager.Info]) {
+        let sourceRootPath = (sourceRoot ?? WorktreeManager.repoRoot(near: project.rootPath) ?? project.rootPath)
             .standardizedFileURL
             .path
-        // Drop the source workspace's own working-tree root so we're
-        // comparing only sibling worktrees against the sidebar. This must
-        // use a stable repo root, not `Workspace.workingDirectory`, because
-        // that property follows the active shell's cwd and may be `/repo/sub`.
-        let sidebar = workspaces.filter { $0.worktreeParentId == source.id }
+        // Compare only sibling worktrees against the sidebar, never the
+        // project's own working tree.
+        let sidebar = workspaces(in: project).filter(\.isWorktree)
         guard !sidebar.isEmpty else { return }
 
         // Precompute Set of disk satellite paths so the zombie check is
@@ -839,10 +1037,10 @@ final class WorkspaceStore {
                 .filter { $0 != sourceRootPath }
         )
 
-        // Compare against the pinned worktreePath, not workingDirectory —
-        // a sidebar row whose user cd'd to ~/Downloads still matches its
-        // disk root via worktreePath. Adopt-on-discovery is deliberately
-        // not handled — see method doc comment.
+        // Compare against the pinned worktreePath, not workingDirectory — a
+        // sidebar row whose user cd'd elsewhere still matches its disk root.
+        // Adopt-on-discovery is deliberately not handled — see method doc
+        // comment.
         for wt in sidebar where !satellitePaths.contains(wt.diskPath.standardizedFileURL.path) {
             closeWorkspace(wt)
         }
@@ -855,13 +1053,14 @@ final class WorkspaceStore {
     /// them back to terminal commands. Returns nil on success, otherwise
     /// the error message to surface inline in the sheet.
     func removeWorktreeDirectory(_ workspace: Workspace) async -> String? {
-        guard workspace.worktreeParentId != nil else {
+        guard workspace.isWorktree else {
             return "workspace is not a worktree"
         }
         let path = workspace.diskPath
-        let parentDir = workspace.worktreeParentId.flatMap { parentId in
-            workspaces.first(where: { $0.id == parentId })
-        }?.workingDirectory
+        // The project root is the repo the worktree hangs off; probing it first
+        // keeps the lookup inside the right repo even when the worktree lives
+        // outside the project folder.
+        let parentDir = project(withId: workspace.projectId)?.rootPath
         let normalizedPath = path.standardizedFileURL.path
         // nil = removed cleanly, or nothing on disk left to delete (repo
         // root unresolvable — parent and worktree directory already gone).
@@ -932,6 +1131,17 @@ final class WorkspaceStore {
         }
         guard let idx = workspaces.firstIndex(where: { $0.id == workspace.id }) else { return }
         workspaces.remove(at: idx)
+        // The SSH group is not a folder: it exists to hold remote rows, so it
+        // goes with the last one instead of lingering as an empty header.
+        // Folder projects stay — an emptied one is a folder the user opened.
+        // Skipped while a project removal is in flight: that path owns the
+        // group's lifetime and reports the window empty once at the end.
+        if !isRemovingProject,
+           let group = projects.first(where: \.isSSHGroup),
+           !workspaces.contains(where: { $0.projectId == group.id }) {
+            projects.removeAll { $0.id == group.id }
+            collapsedProjectIds.remove(group.id)
+        }
         if workspaces.isEmpty {
             activeWorkspaceId = nil
         } else if activeWorkspaceId == workspace.id {
@@ -939,7 +1149,9 @@ final class WorkspaceStore {
             activeWorkspaceId = workspaces[nextIdx].id
         }
         scheduleSave()
-        if workspaces.isEmpty { onBecameEmpty?() }
+        // A project outlives its workspaces, so an emptied window still has
+        // something to show — only a window with nothing left closes.
+        if !isRemovingProject, workspaces.isEmpty && projects.isEmpty { onBecameEmpty?() }
     }
 
     func activateWorkspace(_ workspace: Workspace) {
@@ -951,7 +1163,11 @@ final class WorkspaceStore {
 
     @discardableResult
     func duplicateWorkspace(_ workspace: Workspace) -> Workspace {
-        addWorkspace(workingDirectory: workspace.workingDirectory)
+        addWorkspace(
+            in: project(withId: workspace.projectId),
+            workingDirectory: workspace.workingDirectory,
+            sshRemoteHost: workspace.sshRemoteHost
+        )
     }
 
     /// Set or clear a user-provided workspace title. Empty / whitespace input
@@ -972,26 +1188,39 @@ final class WorkspaceStore {
         scheduleSave()
     }
 
-    /// Reorder workspaces in the sidebar — dragged workspace takes the
-    /// destination index, others shift.
-    func moveWorkspace(from sourceIndex: Int, to destIndex: Int) {
-        guard sourceIndex != destIndex,
-              (0..<workspaces.count).contains(sourceIndex),
-              (0..<workspaces.count).contains(destIndex) else { return }
-        let source = workspaces[sourceIndex]
-        let rootId = source.worktreeParentId ?? source.id
-        let movingIndices = workspaces.indices.filter { idx in
-            let ws = workspaces[idx]
-            return ws.id == rootId || ws.worktreeParentId == rootId
-        }
-        guard !movingIndices.contains(destIndex) else { return }
+    /// Reorder projects — the dragged row takes the destination row's slot and
+    /// the rest shift. Display order is the array order, and the snapshot
+    /// writes it as-is, so a drag survives relaunch. The SSH group is a row
+    /// like any other here: where the user parks it is where it stays.
+    func moveProject(_ source: Project, to dest: Project) {
+        guard source.id != dest.id,
+              let from = projects.firstIndex(where: { $0.id == source.id }),
+              let to = projects.firstIndex(where: { $0.id == dest.id }) else { return }
+        var order = projects
+        order.remove(at: from)
+        order.insert(source, at: min(to, order.count))
+        projects = order
+        scheduleSave()
+    }
 
-        let movingIds = Set(movingIndices.map { workspaces[$0].id })
-        let moving = workspaces.filter { movingIds.contains($0.id) }
-        var remaining = workspaces.filter { !movingIds.contains($0.id) }
-        let insertAt = min(max(destIndex, 0), remaining.count)
-        remaining.insert(contentsOf: moving, at: insertAt)
-        workspaces = remaining
+    /// Reorder a workspace inside its project — the dragged row takes the
+    /// destination row's slot, siblings shift. Cross-project drags are a
+    /// no-op: the project owns the folder, so a row can't change parents
+    /// without changing what it is.
+    func moveWorkspace(_ source: Workspace, to dest: Workspace) {
+        guard source.id != dest.id, source.projectId == dest.projectId else { return }
+        var order = workspaces.filter { $0.projectId == source.projectId }
+        guard let from = order.firstIndex(where: { $0.id == source.id }),
+              let to = order.firstIndex(where: { $0.id == dest.id }) else { return }
+        order.remove(at: from)
+        order.insert(source, at: min(to, order.count))
+        // Write the shuffled order back into this project's slots, leaving
+        // other projects' relative order untouched.
+        var cursor = order.startIndex
+        for index in workspaces.indices where workspaces[index].projectId == source.projectId {
+            workspaces[index] = order[cursor]
+            cursor = order.index(after: cursor)
+        }
         scheduleSave()
     }
 
@@ -1008,7 +1237,7 @@ final class WorkspaceStore {
         init(keeping: Workspace, others: [Workspace]) {
             self.keeping = keeping
             self.others = others
-            self.worktreeOthers = others.filter { $0.worktreeParentId != nil }
+            self.worktreeOthers = others.filter(\.isWorktree)
         }
     }
 
@@ -1019,20 +1248,13 @@ final class WorkspaceStore {
     var pendingCloseOthersRequest: BulkRemovalRequest?
 
     func closeOtherWorkspaces(keeping workspace: Workspace) {
-        // Keep the workspace's worktree family intact so we never strand
-        // a worktree without its source (and vice versa):
-        //  - keeping a source: also keep every worktree under it
-        //  - keeping a worktree: also keep its source (siblings still close)
-        var keepIds: Set<UUID> = [workspace.id]
-        if let parentId = workspace.worktreeParentId {
-            keepIds.insert(parentId)
-        } else {
-            for ws in workspaces where ws.worktreeParentId == workspace.id {
-                keepIds.insert(ws.id)
-            }
-        }
-        let others = workspaces.filter { !keepIds.contains($0.id) }
-        if others.contains(where: { $0.worktreeParentId != nil }) {
+        // Scoped to the project: the row sits inside a project section, and
+        // closing rows from unrelated folders would be a surprise. Keeping a
+        // single workspace no longer pins a worktree family together — every
+        // row under a project is an independent folder.
+        let others = workspaces(projectId: workspace.projectId).filter { $0.id != workspace.id }
+        guard !others.isEmpty else { return }
+        if others.contains(where: \.isWorktree) {
             pendingCloseOthersRequest = BulkRemovalRequest(keeping: workspace, others: others)
             return
         }
@@ -1375,9 +1597,6 @@ final class WorkspaceStore {
         if pane.activeTabId == session.id {
             let next = pane.tabs[min(idx, pane.tabs.count - 1)]
             pane.activeTabId = next.id
-            if workspace.activePane?.id == pane.id, workspace.workingDirectory != next.currentDirectory {
-                workspace.workingDirectory = next.currentDirectory
-            }
         }
         invalidateStaleFileTreeRootOverride()
         scheduleSave()
@@ -1390,12 +1609,6 @@ final class WorkspaceStore {
         destPane.tabs.insert(session, at: insertIndex)
         destPane.activeTabId = session.id
         workspace.activePaneId = destPane.id
-        // Promoting to active mirrors `activateTab` so the sidebar title and
-        // the next tab's spawn cwd follow the new focus without waiting for
-        // the next OSC 7.
-        if workspace.workingDirectory != session.currentDirectory {
-            workspace.workingDirectory = session.currentDirectory
-        }
         invalidateStaleFileTreeRootOverride()
         scheduleSave()
     }
@@ -1583,9 +1796,9 @@ final class WorkspaceStore {
         activateTab(pane.tabs[pane.tabs.cyclicIndex(from: currentIdx, step: direction)], in: workspace)
     }
 
-    /// Step the active workspace through `workspaces` — the sidebar's order,
-    /// since worktrees are inserted right after their source and dragged
-    /// with it. `+1` next, `-1` previous; wraps at both ends.
+    /// Cycle the active workspace. `direction` of `+1` advances to the next
+    /// workspace, `-1` to the previous; both wrap at the end. Order is
+    /// `workspaces` itself — the sidebar's display order.
     func cycleWorkspace(direction: Int) {
         guard let currentIdx = workspaces.firstIndex(where: { $0.id == activeWorkspaceId }) else { return }
         activateWorkspace(workspaces[workspaces.cyclicIndex(from: currentIdx, step: direction)])
@@ -1616,10 +1829,6 @@ final class WorkspaceStore {
             if let zoomed = workspace.zoomedPaneId, zoomed != pane.id {
                 workspace.zoomedPaneId = nil
             }
-            changed = true
-        }
-        if workspace.workingDirectory != session.currentDirectory {
-            workspace.workingDirectory = session.currentDirectory
             changed = true
         }
         invalidateStaleFileTreeRootOverride()
@@ -1713,7 +1922,7 @@ final class WorkspaceStore {
         // Worktree last-pane cascade — route through the confirm sheet
         // before any engines get terminated, so a sheet cancel leaves
         // the user's work intact.
-        if leafNode === workspace.root && workspace.worktreeParentId != nil {
+        if leafNode === workspace.root && workspace.isWorktree {
             requestCloseWorkspace(workspace)
             return
         }
@@ -1740,10 +1949,6 @@ final class WorkspaceStore {
         // After collapse, focus whichever pane is now nearest.
         if workspace.activePaneId == pane.id {
             workspace.activePaneId = info.sibling.firstPane?.id
-            if let session = workspace.activeSession,
-               workspace.workingDirectory != session.currentDirectory {
-                workspace.workingDirectory = session.currentDirectory
-            }
         }
         invalidateStaleFileTreeRootOverride()
         scheduleSave()
@@ -1759,10 +1964,6 @@ final class WorkspaceStore {
             if let zoomed = workspace.zoomedPaneId, zoomed != pane.id {
                 workspace.zoomedPaneId = nil
             }
-            changed = true
-        }
-        if let session = pane.activeTab, workspace.workingDirectory != session.currentDirectory {
-            workspace.workingDirectory = session.currentDirectory
             changed = true
         }
         invalidateStaleFileTreeRootOverride()
@@ -2011,18 +2212,86 @@ final class WorkspaceStore {
 
     private func restore(from state: PersistedState) {
         let fm = FileManager.default
+        projects = (state.projects ?? []).map { entry in
+            Project(
+                id: entry.id,
+                // Canonicalized like `project(forRoot:)` builds them: a state
+                // file written before that rule can spell the same folder two
+                // ways (`/tmp/x` vs `/private/tmp/x`), and every later lookup
+                // compares against `rootPath.path` verbatim.
+                rootPath: entry.isSSHGroup == true
+                    ? Project.sshGroupRoot
+                    : canonicalDiskPath(URL(fileURLWithPath: entry.rootPath)),
+                isSSHGroup: entry.isSSHGroup == true
+            )
+        }
+        // One folder can still arrive as two rows: a state file written before
+        // roots were canonicalized may spell it `/tmp/x` and `/private/tmp/x`.
+        // Both now resolve to the same `rootPath`, so `project(forRoot:)` would
+        // only ever reach the first while the sidebar showed two identical
+        // headers. Keep the first, repoint members at it. The SSH group is
+        // exempt — its sentinel is nobody's folder.
+        var keeperIdByPath: [String: UUID] = [:]
+        var foldedProjectIds: [UUID: UUID] = [:]
+        projects = projects.reduce(into: []) { kept, project in
+            guard !project.isSSHGroup else {
+                kept.append(project)
+                return
+            }
+            if let keeper = keeperIdByPath[project.rootPath.path] {
+                foldedProjectIds[project.id] = keeper
+            } else {
+                keeperIdByPath[project.rootPath.path] = project.id
+                kept.append(project)
+            }
+        }
+        // State files written before projects existed carry no project list.
+        // Group their workspaces the way the pre-project sidebar already read:
+        // a top-level workspace owns its folder, and its worktrees join that
+        // folder's project, so the user's grouping survives the upgrade.
+        var folderByWorkspace: [UUID: URL] = [:]
+        for ws in state.workspaces where ws.legacyWorktreeParentId == nil {
+            folderByWorkspace[ws.id] = URL(fileURLWithPath: ws.workingDirectoryPath)
+        }
+        // Persisted membership per project, split by kind: migration moves the
+        // SSH rows into the group, and a folder project that only ever held
+        // them must not survive as an empty row.
+        var localMembers: [UUID: Int] = [:]
+        var sshMembers: [UUID: Int] = [:]
+        for ws in state.workspaces {
+            guard let projectId = ws.projectId else { continue }
+            if Self.normalizedSSHHost(ws.sshRemoteHost) != nil {
+                sshMembers[projectId, default: 0] += 1
+            } else {
+                localMembers[projectId, default: 0] += 1
+            }
+        }
         for ws in state.workspaces {
             let sshHost = Self.normalizedSSHHost(ws.sshRemoteHost)
             guard let root = restorePane(ws.root, fm: fm, sshRemoteHost: sshHost) else { continue }
+            let spawnRoot = URL(fileURLWithPath: ws.workingDirectoryPath)
+            let owner: Project
+            if sshHost != nil {
+                // SSH workspaces always live in the one SSH group. A state file
+                // written before the group existed filed them under whatever
+                // local folder they spawned from; this is the migration.
+                owner = sshGroupProject()
+            } else {
+                owner = ws.projectId.map { foldedProjectIds[$0] ?? $0 }.flatMap(project(withId:))
+                    ?? project(forRoot: folderByWorkspace[ws.legacyWorktreeParentId ?? ws.id] ?? spawnRoot)
+            }
             let workspace = Workspace(
                 id: ws.id,
-                workingDirectory: URL(fileURLWithPath: ws.workingDirectoryPath),
+                projectId: owner.id,
+                workingDirectory: spawnRoot,
                 root: root
             )
             workspace.customTitle = ws.customTitle
-            workspace.worktreeParentId = ws.worktreeParentId
             workspace.worktreeBranch = ws.worktreeBranch
+            // A worktree row's spawn root is the worktree folder itself, so a
+            // state file missing `worktreePath` still restores as a worktree.
             workspace.worktreePath = ws.worktreePath.map { URL(fileURLWithPath: $0) }
+                ?? (ws.legacyWorktreeParentId == nil ? nil : spawnRoot)
             workspace.sshRemoteHost = sshHost
             // Exactly one of the two colour fields is ever written, so each
             // maps to its own case. An unknown preset (a colour a newer kooky
@@ -2052,6 +2321,25 @@ final class WorkspaceStore {
             }
             workspaces.append(workspace)
         }
+        // Drop folders the migration emptied. An SSH row used to be filed
+        // under whatever local folder it spawned from — that folder is not
+        // what the row is about, so once the row joins the group its old
+        // project has nothing left to show. Projects derived from a legacy
+        // (pre-project) file get the same treatment even with no members at
+        // all, because nothing but a workspace path ever created them. A
+        // project the user emptied themselves is untouched: it is a folder
+        // they opened, and it outlives its workspaces.
+        let used = Set(workspaces.map(\.projectId))
+        projects.removeAll { project in
+            // The SSH group is not a folder: it exists to hold remote rows, so
+            // it goes with the last one (a window that only ever held remotes
+            // is a window with nothing in it).
+            if project.isSSHGroup { return !used.contains(project.id) }
+            guard !used.contains(project.id) else { return false }
+            if state.projects == nil { return true }
+            return sshMembers[project.id, default: 0] > 0
+                && localMembers[project.id, default: 0] == 0
+        }
         activeWorkspaceId = workspaces.contains(where: { $0.id == state.activeWorkspaceId })
             ? state.activeWorkspaceId
             : workspaces.first?.id
@@ -2066,6 +2354,11 @@ final class WorkspaceStore {
             .map { AgentOverviewSidebar.clampWidth(CGFloat($0)) }
             ?? AgentOverviewSidebar.fullWidth
         collapsedInfoSections = Set(state.collapsedInfoSections ?? [])
+        // Folded rows carry their fold over to the row that survived them, or
+        // a folder the user kept shut reopens just because its old state file
+        // spelled the path twice.
+        collapsedProjectIds = Set((state.collapsedProjectIds ?? []).map { foldedProjectIds[$0] ?? $0 })
+            .intersection(Set(projects.map(\.id)))
     }
 
     private func restorePane(_ persisted: PersistedPaneNode, fm: FileManager, sshRemoteHost: String? = nil) -> PaneNode? {
@@ -2230,7 +2523,7 @@ final class WorkspaceStore {
         engine.isRemoteSessionProvider = { [weak session] in
             session?.sshWorkspaceHost != nil || session?.remoteHost != nil
         }
-        engine.onPwdChange = { [weak self, weak session, weak workspace] pwd in
+        engine.onPwdChange = { [weak self, weak session] pwd in
             guard let session else { return }
             let url = URL(fileURLWithPath: pwd)
             // Compare against the URL's normalized path (what actually gets
@@ -2240,11 +2533,6 @@ final class WorkspaceStore {
             let cwdChanged = session.currentDirectory.path != path
             if cwdChanged {
                 session.currentDirectory = url
-            }
-            var workspaceCwdChanged = false
-            if let workspace, workspace.activeSession?.id == session.id, workspace.workingDirectory.path != path {
-                workspace.workingDirectory = url
-                workspaceCwdChanged = true
             }
             // Git status AND the watcher hub refresh on EVERY prompt, even an
             // unchanged cwd — neither is safe to gate on cwdChanged:
@@ -2262,12 +2550,10 @@ final class WorkspaceStore {
             // Environment + persistence DO only move with the cwd. venv / node
             // changes are pushed by the separate `_kooky_env_status` precmd IPC
             // (which updates shellEnvironment → refreshEnvironment), and the only
-            // state this closure persists is the two cwd fields — so on an
+            // state this closure persists is the session's cwd — so on an
             // unchanged cwd both refreshEnvironment and scheduleSave are redundant.
             if cwdChanged {
                 self?.refreshEnvironment(for: session)
-            }
-            if cwdChanged || workspaceCwdChanged {
                 self?.scheduleSave()
             }
         }
@@ -2761,6 +3047,7 @@ final class WorkspaceStore {
     private func snapshot() -> PersistedState {
         PersistedState(
             workspaces: workspaces.map(PersistedWorkspace.init),
+            projects: projects.map(PersistedProject.init),
             activeWorkspaceId: activeWorkspaceId,
             sidebarMode: sidebarMode,
             rightSidebarMode: rightSidebarMode,
@@ -2770,7 +3057,14 @@ final class WorkspaceStore {
             rightSidebarWidth: Double(rightSidebarWidth),
             collapsedInfoSections: collapsedInfoSections.isEmpty
                 ? nil
-                : collapsedInfoSections.sorted()
+                : collapsedInfoSections.sorted(),
+            // Filtered against the live list so ids from a folder the user
+            // removed can never accumulate in state.json.
+            collapsedProjectIds: collapsedProjectIds.isEmpty
+                ? nil
+                : collapsedProjectIds
+                    .filter { id in projects.contains { $0.id == id } }
+                    .sorted { $0.uuidString < $1.uuidString }
         )
     }
 

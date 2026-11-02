@@ -153,7 +153,7 @@ final class PersistenceTests: XCTestCase {
     // MARK: - Worktree fields
 
     func testPersistedWorkspaceRoundtripsWorktreeFields() throws {
-        let parentId = UUID()
+        let projectId = UUID()
         let dir = "/tmp/parent-feat-x"
         let tab = PersistedTab(id: UUID(), agentId: "terminal", currentDirectoryPath: dir)
         let pane = PersistedPane(id: UUID(), tabs: [tab], activeTabId: tab.id)
@@ -162,15 +162,39 @@ final class PersistenceTests: XCTestCase {
             id: UUID(),
             workingDirectoryPath: dir,
             root: node,
-            worktreeParentId: parentId,
+            projectId: projectId,
             worktreeBranch: "feat-x",
             worktreePath: dir
         )
         let data = try JSONEncoder().encode(ws)
         let decoded = try JSONDecoder().decode(PersistedWorkspace.self, from: data)
-        XCTAssertEqual(decoded.worktreeParentId, parentId)
+        XCTAssertEqual(decoded.projectId, projectId)
         XCTAssertEqual(decoded.worktreeBranch, "feat-x")
         XCTAssertEqual(decoded.worktreePath, dir)
+    }
+
+    func testPersistedWorkspaceDecodesLegacyWorktreeParentId() throws {
+        // Pre-project state.json files identified a worktree by its parent
+        // workspace. Decode must surface it so `restore` can group the row
+        // under the project derived from that parent's folder.
+        let json = """
+        {
+          "id": "\(UUID().uuidString)",
+          "workingDirectoryPath": "/tmp/parent-feat-x",
+          "worktreeParentId": "\(UUID().uuidString)",
+          "worktreeBranch": "feat-x",
+          "root": {
+            "id": "\(UUID().uuidString)",
+            "kind": { "pane": { "id": "\(UUID().uuidString)", "tabs": [] } }
+          }
+        }
+        """
+        let decoded = try JSONDecoder().decode(
+            PersistedWorkspace.self,
+            from: Data(json.utf8)
+        )
+        XCTAssertNotNil(decoded.legacyWorktreeParentId)
+        XCTAssertEqual(decoded.worktreeBranch, "feat-x")
     }
 
     // MARK: - Sidebar content
@@ -255,7 +279,7 @@ final class PersistenceTests: XCTestCase {
             PersistedWorkspace.self,
             from: Data(json.utf8)
         )
-        XCTAssertNil(decoded.worktreeParentId)
+        XCTAssertNil(decoded.projectId)
         XCTAssertNil(decoded.worktreeBranch)
         XCTAssertNil(decoded.worktreePath)
     }

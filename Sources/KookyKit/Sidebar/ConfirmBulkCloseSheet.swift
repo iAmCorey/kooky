@@ -41,10 +41,13 @@ struct ConfirmBulkCloseSheet: View {
                 .frame(width: 32, height: 1)
                 .padding(.vertical, 22)
 
-            worktreeList
-                .padding(.bottom, 14)
-
-            alsoDeleteCheckbox
+            // Nothing to list and nothing to delete when no worktree is in
+            // the batch — a project removal is then just "close these rows".
+            if !worktreesAmong.isEmpty {
+                worktreeList
+                    .padding(.bottom, 14)
+                alsoDeleteCheckbox
+            }
 
             if let errorMessage {
                 Text(errorMessage)

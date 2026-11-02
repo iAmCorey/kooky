@@ -192,11 +192,6 @@ struct SidebarWorkspaceRow: View {
     /// Disclosure state for a source workspace that owns worktree children.
     /// `toggle` is wired by the sidebar's parent — the row only renders the
     /// chevron and forwards the click.
-    struct WorktreeDisclosure {
-        let isCollapsed: Bool
-        let toggle: () -> Void
-    }
-
     let workspace: Workspace
     let isActive: Bool
     let isCompact: Bool
@@ -207,17 +202,6 @@ struct SidebarWorkspaceRow: View {
     let onDuplicate: () -> Void
     let onRename: (String) -> Void
     let onSetTag: (WorkspaceTag?) -> Void
-    var disclosure: WorktreeDisclosure? = nil
-    /// Non-nil for source (top-level, non-worktree) workspaces — the
-    /// right-click menu surfaces a "Create Worktree…" entry that the
-    /// sidebar wires to a sheet. Nil on worktree rows so worktree
-    /// nesting stays disabled.
-    var onCreateWorktree: (() -> Void)? = nil
-    /// Non-nil for worktree rows — jumps the active selection back to the
-    /// source workspace this worktree was forked from. Cheap navigation
-    /// shortcut when the user is deep in a worktree and wants the main
-    /// repo's tab back.
-    var onGoToSource: (() -> Void)? = nil
 
     @State private var isHovered = false
     @State private var isContextMenuOpen = false
@@ -244,8 +228,8 @@ struct SidebarWorkspaceRow: View {
         .popover(isPresented: $isContextMenuOpen, arrowEdge: .trailing) {
             VStack(alignment: .leading, spacing: 0) {
                 KookyMenuRow(
-                    title: workspace.worktreeParentId == nil ? "Close Workspace" : "Close Worktree…",
-                    shortcut: workspace.worktreeParentId == nil ? "⌘⇧W" : nil
+                    title: workspace.isWorktree ? "Close Worktree…" : "Close Workspace",
+                    shortcut: workspace.isWorktree ? nil : "⌘⇧W"
                 ) {
                     isContextMenuOpen = false
                     onClose()
@@ -262,21 +246,6 @@ struct SidebarWorkspaceRow: View {
                 KookyMenuRow(title: "Duplicate Workspace") {
                     isContextMenuOpen = false
                     onDuplicate()
-                }
-                if let onCreateWorktree {
-                    KookyMenuRow(title: "Create Worktree…") {
-                        isContextMenuOpen = false
-                        // Defer one runloop tick so the menu popover finishes
-                        // dismissing before the sheet anchors — back-to-back
-                        // popovers/sheets off the same view glitch otherwise.
-                        DispatchQueue.main.async { onCreateWorktree() }
-                    }
-                }
-                if let onGoToSource {
-                    KookyMenuRow(title: "Go to Source Workspace") {
-                        isContextMenuOpen = false
-                        onGoToSource()
-                    }
                 }
                 KookyMenuDivider()
                 ColorTagStrip(current: workspace.tag) { tag in
@@ -355,35 +324,14 @@ struct SidebarWorkspaceRow: View {
                     .font(Theme.display(13, weight: isActive ? .medium : .regular))
                     .foregroundStyle(isActive ? Theme.chromeForeground : Theme.chromeForeground.opacity(0.78))
                     .lineLimit(1)
-                subtitleRow
+                if hasSubtitle {
+                    subtitleRow
+                }
             }
             Spacer(minLength: 0)
             // Activity dot lives at the trailing edge — visible at all times
             // when not idle, eats the close-button slot only on hover.
             HStack(spacing: Theme.chromeControlSpacing) {
-                if let disclosure {
-                    HoverableIconButton(
-                        systemName: "chevron.right",
-                        fontSize: 10,
-                        size: Theme.chromeContextButtonSize,
-                        help: disclosure.isCollapsed ? "Show worktrees" : "Hide worktrees",
-                        action: disclosure.toggle,
-                        rotation: disclosure.isCollapsed ? 0 : 90
-                    )
-                    // Hierarchy is a primary interaction, so keep the
-                    // disclosure affordance discoverable even off-hover.
-                    .opacity(isHovered ? 1 : 0.48)
-                }
-                if let onCreateWorktree {
-                    HoverableIconButton(
-                        systemName: "arrow.triangle.branch",
-                        fontSize: 10,
-                        size: Theme.chromeContextButtonSize,
-                        help: "Create worktree",
-                        action: onCreateWorktree
-                    )
-                    .revealed(isHovered)
-                }
                 ZStack {
                     if let dotColor {
                         Circle().fill(dotColor).frame(width: 6, height: 6)
@@ -393,7 +341,7 @@ struct SidebarWorkspaceRow: View {
                         systemName: "xmark",
                         fontSize: 10,
                         size: Theme.chromeContextButtonSize,
-                        help: workspace.worktreeParentId == nil ? "Close workspace" : "Close worktree",
+                        help: workspace.isWorktree ? "Close worktree" : "Close workspace",
                         action: onClose
                     )
                     .revealed(isHovered)
@@ -428,13 +376,21 @@ struct SidebarWorkspaceRow: View {
         .padding(.vertical, 9)
     }
 
-    /// Subtitle below the workspace title. Source workspaces show their
-    /// cwd path (tilde-abbreviated); worktree rows show the branch glyph
+    /// True when the row carries a second line. A plain workspace sits at its
+    /// project's root, and the project header above it already names that
+    /// folder — repeating the path would duplicate it on every row. Worktree
+    /// and SSH rows still need the line: branch name / remote host is nothing
+    /// the header can say.
+    private var hasSubtitle: Bool {
+        workspace.worktreeBranch?.isEmpty == false || workspace.sshRemoteHost != nil
+    }
+
+    /// Subtitle below the workspace title. Worktree rows show the branch glyph
     /// + branch name — more informative than the path (which is usually
     /// `<repo>-<branch>` and just repeats the title) and the inline glyph
-    /// makes the worktree-vs-source distinction obvious without any
-    /// extra chrome. Cwd path still reaches the user via the row-level
-    /// `.help(...)` tooltip.
+    /// makes the worktree-vs-source distinction obvious without any extra
+    /// chrome. The cwd path still reaches the user via the project header and
+    /// the row-level `.help(...)` tooltip.
     @ViewBuilder
     private var subtitleRow: some View {
         if let branch = workspace.worktreeBranch, !branch.isEmpty {
@@ -450,12 +406,6 @@ struct SidebarWorkspaceRow: View {
             // SSH workspace — same badge language, network glyph. The host
             // replaces the local path: these tabs live on the remote.
             subtitleBadge(glyph: "network", glyphSize: 7, text: host)
-        } else {
-            Text((workspace.workingDirectory.path as NSString).abbreviatingWithTildeInPath)
-                .font(Theme.mono(10.5))
-                .foregroundStyle(Theme.chromeMuted)
-                .lineLimit(1)
-                .truncationMode(.head)
         }
     }
 
@@ -478,15 +428,11 @@ struct SidebarWorkspaceRow: View {
         }
     }
 
-    /// Trailing hover icon strip min width — accommodates each optional
-    /// hover button (chevron, create-worktree) plus the always-present
-    /// close × slot so the trailing edge doesn't shift when a hover
-    /// icon appears.
+    /// Trailing hover icon strip min width — the close × slot plus room for
+    /// the hover-only buttons so the trailing edge doesn't shift when they
+    /// appear.
     private var trailingHoverMinWidth: CGFloat {
-        var width: CGFloat = 20
-        if disclosure != nil { width += 22 }
-        if onCreateWorktree != nil { width += 22 }
-        return width
+        42
     }
 
     @ViewBuilder

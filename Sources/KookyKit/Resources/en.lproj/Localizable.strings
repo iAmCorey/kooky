@@ -2,3 +2,9 @@
 "Restart Kooky" = "Restart Kooky";
 "Follow System" = "System";
 "Clear Glass" = "Clear";
+/* Projects */
+"REMOVE-PROJECT" = "REMOVE PROJECT";
+"removing %@" = "removing %@";
+"New workspace" = "New workspace";
+"Remove project" = "Remove project";
+"SSH workspaces" = "SSH workspaces";

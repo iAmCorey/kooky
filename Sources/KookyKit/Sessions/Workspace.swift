@@ -4,10 +4,19 @@ import Foundation
 @Observable
 final class Workspace: Identifiable {
     let id: UUID
-    /// Project root. New tabs spawn here; the active pane's active tab's OSC 7
-    /// reports keep this in sync — `cd` in any visible terminal updates the
-    /// workspace, the next new pane / tab inherits the latest path.
-    var workingDirectory: URL
+    /// Owning project (a folder). Fixed at creation — re-parenting a workspace
+    /// between projects would contradict its frozen `workingDirectory`, so the
+    /// only way to "move" a workspace is to close it and open the folder as
+    /// another project.
+    let projectId: UUID
+    /// Folder this workspace's terminals start in: the owning project's root,
+    /// or — for a worktree — the directory `git worktree add` produced. Fixed
+    /// for the workspace's lifetime: `cd` inside a shell moves that shell, not
+    /// the workspace, so "+" always lands the next tab at the root the user
+    /// opened rather than wherever the previous tab wandered to. (Views that
+    /// want to follow the live shell cwd read `activeSession?.currentDirectory`
+    /// instead.)
+    let workingDirectory: URL
     /// Single split tree per workspace. Always non-nil; a fresh workspace
     /// holds one Pane with one Session.
     var root: PaneNode
@@ -40,23 +49,20 @@ final class Workspace: Identifiable {
     /// rename popover, and resets the flag. Runtime-only.
     var renameRequested = false
 
-    /// When non-nil, this workspace is a git worktree whose source workspace
-    /// has this id. Sidebar groups worktrees under their source via a
-    /// disclosure triangle. Set at creation and never changes for the
-    /// workspace's lifetime — re-parenting a worktree is not a supported op.
-    var worktreeParentId: UUID? = nil
     /// Branch the worktree was created on, shown next to its sidebar row.
     /// Captured at creation; the pane status bar still owns the live branch
     /// readout if the user checks out something else inside the worktree.
     var worktreeBranch: String? = nil
-    /// Disk root of this worktree, captured at creation. Distinct from
-    /// `workingDirectory` because the latter follows OSC 7 cwd reports —
-    /// `cd ~/Downloads` inside a worktree tab drifts `workingDirectory`
-    /// off the worktree, but `worktreePath` stays pinned to the directory
-    /// `git worktree add` produced. The close / reconcile paths must use
-    /// this, not `workingDirectory`, so `git worktree remove` doesn't
-    /// target the wrong path.
+    /// Disk root of this worktree, captured at creation and equal to
+    /// `workingDirectory`. Non-nil is what marks a workspace as a project
+    /// worktree — the sidebar shows the branch beside it, and the project's
+    /// close/worktree-removal paths treat this directory as generated output
+    /// rather than user data.
     var worktreePath: URL? = nil
+
+    /// True when this workspace is a `git worktree` of its project's root
+    /// (whether kooky created it or adopted one already on disk).
+    var isWorktree: Bool { worktreePath != nil }
 
     /// SSH destination this workspace connects to (`user@host` or bare
     /// `host`). Non-nil marks an SSH workspace: every new plain-terminal tab
@@ -75,13 +81,21 @@ final class Workspace: Identifiable {
     /// rather than failing the restore.
     var tag: WorkspaceTag? = nil
 
-    /// Single source of truth for "where the worktree actually lives on
-    /// disk." For worktree workspaces `worktreePath` wins (pinned at
-    /// create time); upgraded state.json files written before the field
-    /// existed fall through to `workingDirectory` and behave as before.
-    /// Use this everywhere `git worktree remove` / `reconcile` /
-    /// confirm-sheet subtitle needs the disk root.
-    var diskPath: URL { worktreePath ?? workingDirectory }
+    /// True when every pane's tab bar is empty. `Project` is what keeps an
+    /// empty workspace alive now: closing the last terminal of the last
+    /// workspace under a project leaves the project (and thus the window)
+    /// standing, ready to spawn a fresh tab.
+    var hasNoTabs: Bool {
+        root.allPanes.allSatisfy { $0.tabs.isEmpty }
+    }
+
+    /// Single source of truth for "where this workspace lives on disk" — the
+    /// project root, or the worktree directory for a worktree workspace. Same
+    /// value as `workingDirectory`; kept as a named alias because the close /
+    /// reconcile / confirm-sheet paths read it as "the disk root" rather than
+    /// "the spawn root", and the distinction is what keeps `git worktree
+    /// remove` aimed at the right directory.
+    var diskPath: URL { workingDirectory }
 
     /// True when closing this workspace's one remaining tab would cascade
     /// into worktree removal (`closeTab` reroutes to the workspace-removal
@@ -91,7 +105,7 @@ final class Workspace: Identifiable {
     /// confirmation. (`closePane` has its own, DIFFERENT pane-level cascade
     /// condition; this models only the closeTab shape.)
     var closingLastTabCascadesIntoWorktreeRemoval: Bool {
-        worktreeParentId != nil
+        isWorktree
             && root.allPanes.count == 1
             && root.allPanes.first?.tabs.count == 1
     }
@@ -201,8 +215,9 @@ final class Workspace: Identifiable {
         }
     }
 
-    init(id: UUID = UUID(), workingDirectory: URL, root: PaneNode) {
+    init(id: UUID = UUID(), projectId: UUID, workingDirectory: URL, root: PaneNode) {
         self.id = id
+        self.projectId = projectId
         self.workingDirectory = workingDirectory
         self.root = root
         self.activePaneId = root.firstPane?.id

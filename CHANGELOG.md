@@ -2,6 +2,15 @@
 
 Notable changes per release. Tagged commits use `vX.Y.Z` shortform.
 
+## Unreleased
+
+- New: projects. A project is a folder. Workspaces nest under it in the sidebar, the `+` in a workspace's tab bar opens at the project folder, and `git worktree` is now a project action — a worktree becomes one more workspace under its project rather than a nested child. Add a project from the new button left of Open Recent, File → New Project…, or by adding a workspace in any folder (the folder becomes its project). Removing a project closes the workspaces it holds, asking first when worktrees are involved. Because the project owns the folder, a workspace's directory no longer drifts with `cd`. Existing state.json files migrate on first launch: workspaces are grouped by the folder they were opened in.
+- Changed: removing a project asks first whenever it still holds workspaces — the sheet lists the worktree checkouts it would drop and only offers "also delete" when there are any. Only an empty project closes without asking.
+- New: SSH workspaces live in one SSH group instead of being filed under whichever local folder was active when they were created. The group's `+` opens the SSH connection sheet, and state.json files from before the group existed migrate the SSH rows into it on first launch.
+- Fixed: a collapsed project stays collapsed across sidebar hides, file-tree switches, and relaunches.
+- Changed: a project cannot be renamed — the folder's name is the project's name, so two rows can never claim the same folder.
+- Changed: Open Recent (File menu and ⌘P) is project-oriented. Picking a folder you already have shows the project it already is — unfolding it and focusing its first workspace — instead of adding a duplicate row; a new folder becomes a project with one workspace.
+
 ## v0.51.12 — 2026-10-12
 
 - New: keyboard shortcuts that match Ghostty, Warp and cmux. ⌥⌘ + arrow moves focus to the split in that direction, ⌃⌘ + arrow moves the nearest divider, and ⌘Home / ⌘End / ⌘Page Up / ⌘Page Down scroll the terminal to the top, to the bottom, or by a page — following your Ghostty config if you've rebound them.

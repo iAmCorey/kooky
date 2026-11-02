@@ -117,7 +117,12 @@ final class GitWatcher {
     /// top level). Nil when `cwd` isn't inside any repo. Looser than
     /// `findGitDir != nil` on purpose: an unparseable `.git` file still
     /// marks the project boundary, it just isn't watchable.
+    ///
+    /// Non-file URLs (the SSH group's `kooky-ssh://remote` sentinel) never
+    /// walk: `deletingLastPathComponent` is a no-op on them, so a `path != "/"`
+    /// loop would spin forever.
     nonisolated static func worktreeRoot(near cwd: URL) -> URL? {
+        guard cwd.isFileURL, !cwd.path.isEmpty else { return nil }
         var dir = cwd.standardizedFileURL
         while dir.path != "/" {
             if FileManager.default.fileExists(atPath: dir.appendingPathComponent(".git").path) {

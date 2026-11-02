@@ -59,6 +59,30 @@ final class WorkspaceStoreTests: XCTestCase {
         return pane
     }
 
+    /// Owner of a workspace's folder. Every workspace has one — projects
+    /// outlive the workspaces they hold.
+    private func project(of workspace: Workspace, in store: WorkspaceStore) -> Project {
+        guard let project = store.project(withId: workspace.projectId) else {
+            preconditionFailure("workspace lost its project")
+        }
+        return project
+    }
+
+    /// Mints a worktree workspace the way `createWorktree` does once git has
+    /// produced the checkout — no git involved.
+    private func addWorktree(
+        _ store: WorkspaceStore,
+        of source: Workspace,
+        at path: String,
+        branch: String
+    ) -> Workspace {
+        store.addWorktreeWorkspace(
+            in: project(of: source, in: store),
+            path: URL(fileURLWithPath: path),
+            branch: branch
+        )
+    }
+
     func testRequestRenameActiveTabSetsFlag() {
         let store = makeStore()
         XCTAssertEqual(store.active?.activeSession?.renameRequested, false)
@@ -113,16 +137,16 @@ final class WorkspaceStoreTests: XCTestCase {
         XCTAssertEqual(ws.title, "sample-project")
     }
 
-    func testAddWorkspaceWithWorktreeParentSetsRelationship() {
+    func testAddWorktreeWorkspaceJoinsTheSourceProject() {
+        // A worktree workspace is a workspace like any other — same project,
+        // its own folder. That is what keeps the sidebar two levels deep.
         let store = makeStore()
         let source = store.workspaces[0]
-        let wt = store.addWorkspace(
-            workingDirectory: URL(fileURLWithPath: "/tmp/projectA-feat-x"),
-            worktreeParent: source,
-            worktreeBranch: "feat-x"
-        )
-        XCTAssertEqual(wt.worktreeParentId, source.id)
+        let wt = addWorktree(store, of: source, at: "/tmp/projectA-feat-x", branch: "feat-x")
+        XCTAssertEqual(wt.projectId, source.projectId)
         XCTAssertEqual(wt.worktreeBranch, "feat-x")
+        XCTAssertTrue(wt.isWorktree)
+        XCTAssertEqual(wt.workingDirectory.path, "/tmp/projectA-feat-x")
     }
 
     func testWorktreeWorkspaceTitleUsesCwdBasename() {
@@ -131,11 +155,7 @@ final class WorkspaceStoreTests: XCTestCase {
         // (`⎇ <branch>`), so the title doesn't need to carry it too.
         let store = makeStore()
         let source = store.workspaces[0]
-        let wt = store.addWorkspace(
-            workingDirectory: URL(fileURLWithPath: "/tmp/projectA-feat-y"),
-            worktreeParent: source,
-            worktreeBranch: "feat-y"
-        )
+        let wt = addWorktree(store, of: source, at: "/tmp/projectA-feat-y", branch: "feat-y")
         XCTAssertEqual(wt.title, "projectA-feat-y")
     }
 
@@ -160,35 +180,26 @@ final class WorkspaceStoreTests: XCTestCase {
         // does NOT happen until the sheet's `confirm` action runs.
         let store = makeStore()
         let source = store.workspaces[0]
-        let wt = store.addWorkspace(
-            workingDirectory: URL(fileURLWithPath: "/tmp/projectA-feat-x"),
-            worktreeParent: source,
-            worktreeBranch: "feat-x"
-        )
+        let wt = addWorktree(store, of: source, at: "/tmp/projectA-feat-x", branch: "feat-x")
         store.requestCloseWorkspace(wt)
         XCTAssertTrue(store.workspaces.contains { $0.id == wt.id },
                       "worktree workspace must remain until the sheet confirms")
         XCTAssertEqual(store.pendingRemovalRequest?.id, wt.id)
     }
 
-    func testCloseOtherWorkspacesKeepsWorktreeFamilyIntact() {
-        // Repro of the "close-other on a worktree row strands the family"
-        // bug: closing siblings while keeping a worktree must also retain
-        // its source workspace — otherwise the sidebar's parent-id lookup
-        // can't render the orphaned worktree.
+    func testCloseOtherWorkspacesKeepsTheProjectOpen() {
+        // Keeping a worktree row closes its project siblings — rows are
+        // independent folders now, so nothing strands the survivor: the
+        // project header stays and still owns the row.
         let store = makeStore()
         let source = store.workspaces[0]
-        let wt = store.addWorkspace(
-            workingDirectory: URL(fileURLWithPath: "/tmp/projectA-wt"),
-            worktreeParent: source, worktreeBranch: "feat"
-        )
+        let wt = addWorktree(store, of: source, at: "/tmp/projectA-wt", branch: "feat")
         let unrelated = store.addWorkspace(workingDirectory: projectB)
 
         store.closeOtherWorkspaces(keeping: wt)
-        let ids = store.workspaces.map(\.id)
-        XCTAssertTrue(ids.contains(wt.id))
-        XCTAssertTrue(ids.contains(source.id), "source must stay so the worktree has a parent to nest under")
-        XCTAssertFalse(ids.contains(unrelated.id))
+
+        XCTAssertEqual(store.workspaces.map(\.id), [wt.id, unrelated.id])
+        XCTAssertNotNil(store.project(withId: wt.projectId), "the project outlives its rows")
     }
 
     func testCreateWorktreeAdoptKindAddsOneWorkspacePerPickedPath() async {
@@ -206,10 +217,10 @@ final class WorkspaceStoreTests: XCTestCase {
             kind: .adopt(worktrees: picked),
             template: .terminal
         )
-        let outcome = await store.createWorktree(source: source, request: request)
+        let outcome = await store.createWorktree(project: project(of: source, in: store), request: request)
         XCTAssertEqual(outcome, .success)
         XCTAssertEqual(store.workspaces.count, before + 2)
-        let adopted = store.workspaces.filter { $0.worktreeParentId == source.id }
+        let adopted = store.workspaces.filter { ($0.isWorktree && $0.projectId == source.projectId) }
         XCTAssertEqual(adopted.count, 2)
         XCTAssertEqual(adopted.map(\.worktreeBranch).compactMap { $0 }.sorted(), ["feat-a", "feat-b"])
     }
@@ -221,13 +232,13 @@ final class WorkspaceStoreTests: XCTestCase {
         // "auto-adopted entries are noise I can't easily dismiss."
         let store = makeStore()
         let source = store.workspaces[0]
-        XCTAssertTrue(store.workspaces.filter { $0.worktreeParentId == source.id }.isEmpty)
-        store.reconcile(source: source, diskWorktrees: [
+        XCTAssertTrue(store.workspaces.filter { ($0.isWorktree && $0.projectId == source.projectId) }.isEmpty)
+        store.reconcile(project: project(of: source, in: store), diskWorktrees: [
             WorktreeManager.Info(path: source.workingDirectory, branch: "main"),
             WorktreeManager.Info(path: URL(fileURLWithPath: "/tmp/source-feat-x"), branch: "feat-x")
         ])
         XCTAssertTrue(
-            store.workspaces.filter { $0.worktreeParentId == source.id }.isEmpty,
+            store.workspaces.filter { ($0.isWorktree && $0.projectId == source.projectId) }.isEmpty,
             "reconcile must not auto-adopt disk-only worktrees in v0.19.0"
         )
     }
@@ -237,52 +248,30 @@ final class WorkspaceStoreTests: XCTestCase {
         // is now a zombie. Disk is truth, drop the row.
         let store = makeStore()
         let source = store.workspaces[0]
-        _ = store.addWorkspace(
-            workingDirectory: URL(fileURLWithPath: "/tmp/source-stale"),
-            worktreeParent: source, worktreeBranch: "stale"
-        )
-        XCTAssertEqual(store.workspaces.filter { $0.worktreeParentId == source.id }.count, 1)
-        store.reconcile(source: source, diskWorktrees: [
+        _ = addWorktree(store, of: source, at: "/tmp/source-stale", branch: "stale")
+        XCTAssertEqual(store.workspaces.filter { ($0.isWorktree && $0.projectId == source.projectId) }.count, 1)
+        store.reconcile(project: project(of: source, in: store), diskWorktrees: [
             WorktreeManager.Info(path: source.workingDirectory, branch: "main")
         ])
-        XCTAssertTrue(store.workspaces.filter { $0.worktreeParentId == source.id }.isEmpty)
+        XCTAssertTrue(store.workspaces.filter { ($0.isWorktree && $0.projectId == source.projectId) }.isEmpty)
     }
 
-    func testWorktreePathIsPinnedAndIndependentOfWorkingDirectoryDrift() {
-        // Repro of the "not a working tree" bug: tab cd's off the worktree,
-        // workingDirectory drifts via OSC 7, but worktreePath stays pinned
-        // to the disk root that `git worktree add` produced.
+    func testWorktreeWorkspaceKeepsItsCheckoutAsWorkingDirectory() {
+        // `workingDirectory` is immutable: a tab cd-ing around the checkout
+        // moves the session's cwd, never the workspace's root. That root is
+        // what reconcile matches against and where `+` spawns.
         let store = makeStore()
         let source = store.workspaces[0]
-        let wt = store.addWorkspace(
-            workingDirectory: URL(fileURLWithPath: "/tmp/projectA-feat"),
-            worktreeParent: source, worktreeBranch: "feat"
-        )
+        let wt = addWorktree(store, of: source, at: "/tmp/projectA-feat", branch: "feat")
         XCTAssertEqual(wt.worktreePath?.path, "/tmp/projectA-feat")
-        // Simulate OSC 7 cd to a sibling.
-        wt.workingDirectory = URL(fileURLWithPath: "/tmp/elsewhere")
-        XCTAssertEqual(wt.worktreePath?.path, "/tmp/projectA-feat",
-                       "worktreePath must not drift with workingDirectory")
-    }
-
-    func testReconcileMatchesByWorktreePathNotWorkingDirectory() {
-        // A worktree whose cwd drifted off the disk root should still
-        // match its disk satellite — reconcile must key on worktreePath,
-        // not the drifted workingDirectory, otherwise the user's tab
-        // gets killed every relaunch.
-        let store = makeStore()
-        let source = store.workspaces[0]
-        let wt = store.addWorkspace(
-            workingDirectory: URL(fileURLWithPath: "/tmp/projectA-feat"),
-            worktreeParent: source, worktreeBranch: "feat"
-        )
-        wt.workingDirectory = URL(fileURLWithPath: "/tmp/elsewhere")  // cd drift
-        store.reconcile(source: source, diskWorktrees: [
+        XCTAssertEqual(wt.workingDirectory.path, "/tmp/projectA-feat")
+        XCTAssertEqual(wt.diskPath.path, "/tmp/projectA-feat")
+        store.reconcile(project: project(of: source, in: store), diskWorktrees: [
             WorktreeManager.Info(path: source.workingDirectory, branch: "main"),
             WorktreeManager.Info(path: URL(fileURLWithPath: "/tmp/projectA-feat"), branch: "feat")
         ])
         XCTAssertTrue(store.workspaces.contains { $0.id == wt.id },
-                      "drifted-cwd worktree must not be treated as a zombie")
+                      "the checkout on disk keeps its row")
     }
 
     func testReconcileUsesStableSourceRootForExistingWorktreeZombieCheck() {
@@ -293,21 +282,15 @@ final class WorkspaceStoreTests: XCTestCase {
         // worktreePath, not the drifted source cwd) survives.
         let store = makeStore()
         let source = store.addWorkspace(workingDirectory: URL(fileURLWithPath: "/tmp/projectA/sub"))
-        let stillThere = store.addWorkspace(
-            workingDirectory: URL(fileURLWithPath: "/tmp/projectA-feat"),
-            worktreeParent: source, worktreeBranch: "feat"
-        )
-        _ = store.addWorkspace(
-            workingDirectory: URL(fileURLWithPath: "/tmp/projectA-zombie"),
-            worktreeParent: source, worktreeBranch: "zombie"
-        )
+        let stillThere = addWorktree(store, of: source, at: "/tmp/projectA-feat", branch: "feat")
+        _ = addWorktree(store, of: source, at: "/tmp/projectA-zombie", branch: "zombie")
 
-        store.reconcile(source: source, sourceRoot: projectA, diskWorktrees: [
+        store.reconcile(project: project(of: source, in: store), sourceRoot: projectA, diskWorktrees: [
             WorktreeManager.Info(path: projectA, branch: "main"),
             WorktreeManager.Info(path: URL(fileURLWithPath: "/tmp/projectA-feat"), branch: "feat")
         ])
 
-        let surviving = store.workspaces.filter { $0.worktreeParentId == source.id }
+        let surviving = store.workspaces.filter { ($0.isWorktree && $0.projectId == source.projectId) }
         XCTAssertEqual(surviving.count, 1)
         XCTAssertEqual(surviving.first?.id, stillThere.id,
                        "matched-disk worktree survives; missing-from-disk one drops")
@@ -316,98 +299,116 @@ final class WorkspaceStoreTests: XCTestCase {
     func testReconcileLeavesMatchedPairsUntouched() {
         let store = makeStore()
         let source = store.workspaces[0]
-        let wt = store.addWorkspace(
-            workingDirectory: URL(fileURLWithPath: "/tmp/source-feat"),
-            worktreeParent: source, worktreeBranch: "feat"
-        )
-        store.reconcile(source: source, diskWorktrees: [
+        let wt = addWorktree(store, of: source, at: "/tmp/source-feat", branch: "feat")
+        store.reconcile(project: project(of: source, in: store), diskWorktrees: [
             WorktreeManager.Info(path: source.workingDirectory, branch: "main"),
             WorktreeManager.Info(path: URL(fileURLWithPath: "/tmp/source-feat"), branch: "feat")
         ])
-        let after = store.workspaces.filter { $0.worktreeParentId == source.id }
+        let after = store.workspaces.filter { ($0.isWorktree && $0.projectId == source.projectId) }
         XCTAssertEqual(after.count, 1)
         XCTAssertEqual(after.first?.id, wt.id, "matched pair must keep its original id")
     }
 
-    func testRequestCloseSourceWithWorktreesParksForConfirm() {
-        // Closing a top-level workspace that owns worktrees would either
-        // strand them as orphan rows or vanish them silently. Either way
-        // is wrong — the request parks in `pendingCloseSourceRequest` so
-        // the sheet can ask about deleting all of them in one shot.
+    func testRequestRemoveProjectWithWorktreesParksForConfirm() {
+        // Removing a project closes every workspace under it, worktrees
+        // included. Deleting those checkout directories is a disk decision,
+        // so the request parks in `pendingCloseProjectRequest` and the sheet
+        // asks about it before anything closes.
         let store = makeStore()
         let source = store.addWorkspace(workingDirectory: projectA)
-        let wtA = store.addWorkspace(
-            workingDirectory: URL(fileURLWithPath: "/tmp/projectA-a"),
-            worktreeParent: source, worktreeBranch: "a"
-        )
-        let wtB = store.addWorkspace(
-            workingDirectory: URL(fileURLWithPath: "/tmp/projectA-b"),
-            worktreeParent: source, worktreeBranch: "b"
-        )
-        store.requestCloseWorkspace(source)
+        let project = project(of: source, in: store)
+        let wtA = addWorktree(store, of: source, at: "/tmp/projectA-a", branch: "a")
+        let wtB = addWorktree(store, of: source, at: "/tmp/projectA-b", branch: "b")
+        store.requestRemoveProject(project)
         XCTAssertTrue(store.workspaces.contains { $0.id == source.id },
-                      "source must stay until the sheet confirms")
-        let req = store.pendingCloseSourceRequest
-        XCTAssertEqual(req?.source.id, source.id)
+                      "nothing closes until the sheet confirms")
+        XCTAssertTrue(store.projects.contains { $0.id == project.id })
+        let req = store.pendingCloseProjectRequest
+        XCTAssertEqual(req?.project.id, project.id)
+        XCTAssertEqual(Set(req?.workspaces.map(\.id) ?? []), Set([source.id, wtA.id, wtB.id]))
         XCTAssertEqual(Set(req?.worktrees.map(\.id) ?? []), Set([wtA.id, wtB.id]))
     }
 
-    func testRequestCloseSourceWithoutWorktreesClosesInline() {
-        // A top-level workspace with no worktree children still closes
-        // immediately — only the worktree-owning case needs the sheet.
+    func testRequestRemoveProjectWithWorkspacesParksWithoutAskingAboutDisk() async {
+        // No worktree checkouts means no disk decision, but the rows still
+        // hold live terminals: the request parks for confirmation and the
+        // sheet's worktree list stays empty.
         let store = makeStore()
         let solo = store.addWorkspace(workingDirectory: projectB)
-        store.requestCloseWorkspace(solo)
+        let project = project(of: solo, in: store)
+        store.requestRemoveProject(project)
+        XCTAssertTrue(store.workspaces.contains { $0.id == solo.id },
+                      "nothing closes until the sheet confirms")
+        let req = store.pendingCloseProjectRequest
+        XCTAssertEqual(req?.project.id, project.id)
+        XCTAssertEqual(req?.workspaces.map(\.id), [solo.id])
+        XCTAssertEqual(req?.worktrees.count, 0, "a plain workspace is not a worktree")
+
+        let message = await store.performCloseProject(req!, alsoDelete: false)
+        XCTAssertNil(message)
         XCTAssertFalse(store.workspaces.contains { $0.id == solo.id })
-        XCTAssertNil(store.pendingCloseSourceRequest)
+        XCTAssertFalse(store.projects.contains { $0.id == project.id })
     }
 
-    func testPerformCloseSourceAlsoDeleteFalseSkipsGitRemoveEntirely() async {
+    func testRequestRemoveProjectWithNoWorkspacesClosesInline() {
+        // An empty project is the only case with nothing to lose: no sheet.
+        let store = makeStore()
+        let empty = store.project(forRoot: projectB)
+        store.requestRemoveProject(empty)
+        XCTAssertFalse(store.projects.contains { $0.id == empty.id })
+        XCTAssertNil(store.pendingCloseProjectRequest)
+    }
+
+    func testPerformCloseProjectAlsoDeleteFalseSkipsGitRemoveEntirely() async {
         // v0.19.0 default — close drops sidebar entries only, never
         // touches disk. The fake worktree path used in the failure test
         // would normally bomb on `git worktree remove`; with alsoDelete
         // false, we skip the subprocess entirely so the close succeeds.
         let store = makeStore()
         let source = store.addWorkspace(workingDirectory: projectA)
+        let project = project(of: source, in: store)
         let fakePath = FileManager.default.temporaryDirectory
             .appendingPathComponent("kooky-fake-wt-\(UUID().uuidString)", isDirectory: true)
         try? FileManager.default.createDirectory(at: fakePath, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: fakePath) }
-        let wt = store.addWorkspace(
-            workingDirectory: fakePath,
-            worktreeParent: source, worktreeBranch: "feat"
+        let wt = addWorktree(store, of: source, at: fakePath.path, branch: "feat")
+        let request = WorkspaceStore.CloseProjectRequest(
+            project: project,
+            workspaces: [source, wt]
         )
-        let request = WorkspaceStore.CloseSourceRequest(source: source, worktrees: [wt])
-        let message = await store.performCloseSource(request, alsoDelete: false)
+        let message = await store.performCloseProject(request, alsoDelete: false)
         XCTAssertNil(message, "no git invocation means no error to surface")
         XCTAssertFalse(store.workspaces.contains { $0.id == source.id })
         XCTAssertFalse(store.workspaces.contains { $0.id == wt.id })
+        XCTAssertFalse(store.projects.contains { $0.id == project.id })
         XCTAssertTrue(
             FileManager.default.fileExists(atPath: fakePath.path),
             "disk dir must survive alsoDelete=false close"
         )
-        XCTAssertNil(store.pendingCloseSourceRequest)
+        XCTAssertNil(store.pendingCloseProjectRequest)
     }
 
-    func testPerformCloseSourceAbortsWhenGitRemoveFails() async {
+    func testPerformCloseProjectAbortsWhenGitRemoveFails() async {
         // A fake existing directory that is not a git worktree causes
-        // `git worktree remove` to fail; abort means source + worktrees
+        // `git worktree remove` to fail; abort means project + workspaces
         // stay (sidebar = disk preserved).
         let store = makeStore()
         let source = store.addWorkspace(workingDirectory: projectA)
+        let project = project(of: source, in: store)
         let fakePath = FileManager.default.temporaryDirectory
             .appendingPathComponent("kooky-fake-wt-\(UUID().uuidString)", isDirectory: true)
         try? FileManager.default.createDirectory(at: fakePath, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: fakePath) }
-        let wt = store.addWorkspace(
-            workingDirectory: fakePath,
-            worktreeParent: source, worktreeBranch: "feat"
+        let wt = addWorktree(store, of: source, at: fakePath.path, branch: "feat")
+        let request = WorkspaceStore.CloseProjectRequest(
+            project: project,
+            workspaces: [source, wt]
         )
-        let request = WorkspaceStore.CloseSourceRequest(source: source, worktrees: [wt])
-        let message = await store.performCloseSource(request, alsoDelete: true)
+        let message = await store.performCloseProject(request, alsoDelete: true)
         XCTAssertNotNil(message, "git remove must fail on fake worktree path")
         XCTAssertTrue(store.workspaces.contains { $0.id == source.id })
         XCTAssertTrue(store.workspaces.contains { $0.id == wt.id })
+        XCTAssertTrue(store.projects.contains { $0.id == project.id })
     }
 
     func testCloseLastTabOfWorktreeRoutesThroughConfirmInsteadOfCascading() {
@@ -417,10 +418,7 @@ final class WorkspaceStoreTests: XCTestCase {
         // and leave the tab in place so the sheet's cancel can roll back.
         let store = makeStore()
         let source = store.workspaces[0]
-        let wt = store.addWorkspace(
-            workingDirectory: URL(fileURLWithPath: "/tmp/projectA-feat-x"),
-            worktreeParent: source, worktreeBranch: "feat-x"
-        )
+        let wt = addWorktree(store, of: source, at: "/tmp/projectA-feat-x", branch: "feat-x")
         let onlyTab = firstPane(wt).tabs[0]
         store.closeTab(onlyTab, in: wt)
         XCTAssertTrue(store.workspaces.contains { $0.id == wt.id },
@@ -430,14 +428,17 @@ final class WorkspaceStoreTests: XCTestCase {
     }
 
     func testCloseOtherWithoutWorktreesRunsInline() {
-        // No worktrees in `others` → close runs immediately, no sheet.
+        // No worktrees in `others` → close runs immediately, no sheet, and
+        // only rows inside the same project are touched.
         let store = makeStore()
-        let kept = store.workspaces[0]
+        let kept = store.addWorkspace(workingDirectory: projectA)
         _ = store.addWorkspace(workingDirectory: projectA)
-        _ = store.addWorkspace(workingDirectory: projectB)
+        let otherProject = store.addWorkspace(workingDirectory: projectB)
         store.closeOtherWorkspaces(keeping: kept)
-        XCTAssertEqual(store.workspaces.count, 1)
-        XCTAssertEqual(store.workspaces.first?.id, kept.id)
+        XCTAssertEqual(store.workspaces.count, 3, "the home row and the other project survive")
+        XCTAssertEqual(store.workspaces(in: project(of: kept, in: store)).map(\.id), [kept.id])
+        XCTAssertTrue(store.workspaces.contains { $0.id == otherProject.id },
+                      "another project's rows are not 'others'")
         XCTAssertNil(store.pendingCloseOthersRequest)
     }
 
@@ -446,14 +447,11 @@ final class WorkspaceStoreTests: XCTestCase {
         // ask about the directories. No workspace closes until the sheet
         // calls performCloseOthers.
         let store = makeStore()
-        let kept = store.workspaces[0]
         let other = store.addWorkspace(workingDirectory: projectA)
-        let wt = store.addWorkspace(
-            workingDirectory: URL(fileURLWithPath: "/tmp/projectA-wt"),
-            worktreeParent: other, worktreeBranch: "feat"
-        )
+        let kept = store.addWorkspace(workingDirectory: projectA)
+        let wt = addWorktree(store, of: other, at: "/tmp/projectA-wt", branch: "feat")
         store.closeOtherWorkspaces(keeping: kept)
-        XCTAssertEqual(store.workspaces.count, 3, "nothing closed yet, awaiting sheet")
+        XCTAssertEqual(store.workspaces.count, 4, "nothing closed yet, awaiting sheet")
         let req = store.pendingCloseOthersRequest
         XCTAssertEqual(req?.keeping.id, kept.id)
         XCTAssertEqual(req?.worktreeOthers.count, 1)
@@ -465,14 +463,13 @@ final class WorkspaceStoreTests: XCTestCase {
         // for every worktree in the request. If there are no worktrees in
         // `others`, no git is invoked — pure close path.
         let store = makeStore()
-        let kept = store.workspaces[0]
         let p1 = store.addWorkspace(workingDirectory: projectA)
-        let p2 = store.addWorkspace(workingDirectory: projectB)
+        let p2 = store.addWorkspace(workingDirectory: projectA)
+        let kept = store.addWorkspace(workingDirectory: projectA)
         let request = WorkspaceStore.BulkRemovalRequest(keeping: kept, others: [p1, p2])
         let message = await store.performCloseOthers(request, alsoDelete: false)
         XCTAssertNil(message)
-        XCTAssertEqual(store.workspaces.count, 1)
-        XCTAssertEqual(store.workspaces.first?.id, kept.id)
+        XCTAssertEqual(store.workspaces(in: project(of: kept, in: store)).map(\.id), [kept.id])
         XCTAssertNil(store.pendingCloseOthersRequest)
     }
 
@@ -481,16 +478,13 @@ final class WorkspaceStoreTests: XCTestCase {
         // worktree remove` bombs. Abort means no workspace closes —
         // sidebar = disk holds.
         let store = makeStore()
-        let kept = store.workspaces[0]
         let other = store.addWorkspace(workingDirectory: projectA)
+        let kept = store.addWorkspace(workingDirectory: projectA)
         let fakePath = FileManager.default.temporaryDirectory
             .appendingPathComponent("kooky-fake-wt-\(UUID().uuidString)", isDirectory: true)
         try? FileManager.default.createDirectory(at: fakePath, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: fakePath) }
-        let wt = store.addWorkspace(
-            workingDirectory: fakePath,
-            worktreeParent: other, worktreeBranch: "feat"
-        )
+        let wt = addWorktree(store, of: other, at: fakePath.path, branch: "feat")
         let request = WorkspaceStore.BulkRemovalRequest(keeping: kept, others: [other, wt])
         let message = await store.performCloseOthers(request, alsoDelete: true)
         XCTAssertNotNil(message, "git remove must fail on fake worktree path")
@@ -498,53 +492,49 @@ final class WorkspaceStoreTests: XCTestCase {
         XCTAssertTrue(store.workspaces.contains { $0.id == wt.id })
     }
 
-    func testCloseOtherWorkspacesKeepsAllWorktreesUnderKeptSource() {
-        // Symmetric case: closing others while keeping a source workspace
-        // should also keep every worktree hanging off it — otherwise the
-        // sidebar tree degenerates into a bunch of useless empty parents.
+    func testCloseOtherWorkspacesWithWorktreesAsksBeforeClosing() {
+        // Siblings include worktree checkouts → their directories are at
+        // stake, so the sheet decides. Nothing closes until it answers, and
+        // other projects' rows are never candidates.
         let store = makeStore()
         let source = store.workspaces[0]
-        let wtA = store.addWorkspace(
-            workingDirectory: URL(fileURLWithPath: "/tmp/projectA-a"),
-            worktreeParent: source, worktreeBranch: "a"
-        )
-        let wtB = store.addWorkspace(
-            workingDirectory: URL(fileURLWithPath: "/tmp/projectA-b"),
-            worktreeParent: source, worktreeBranch: "b"
-        )
+        let wtA = addWorktree(store, of: source, at: "/tmp/projectA-a", branch: "a")
+        let wtB = addWorktree(store, of: source, at: "/tmp/projectA-b", branch: "b")
         let unrelated = store.addWorkspace(workingDirectory: projectB)
 
         store.closeOtherWorkspaces(keeping: source)
-        let ids = store.workspaces.map(\.id)
-        XCTAssertTrue(ids.contains(source.id))
-        XCTAssertTrue(ids.contains(wtA.id))
-        XCTAssertTrue(ids.contains(wtB.id))
-        XCTAssertFalse(ids.contains(unrelated.id))
+
+        XCTAssertEqual(store.pendingCloseOthersRequest?.worktreeOthers.map(\.id).sorted { $0.uuidString < $1.uuidString },
+                       [wtA.id, wtB.id].sorted { $0.uuidString < $1.uuidString })
+        XCTAssertTrue(store.workspaces.contains { $0.id == wtA.id })
+        XCTAssertTrue(store.workspaces.contains { $0.id == unrelated.id })
     }
 
-    func testMoveWorkspaceMovesWorktreeFamilyTogether() {
-        // Compact mode renders store.workspaces directly, so source + child
-        // worktrees must remain contiguous after a drag reorder.
+    func testMoveWorkspaceReordersInsideItsProject() {
+        // Drag reorders this project's slots; other projects keep theirs.
         let store = makeStore()
-        let home = store.workspaces[0]
-        let source = store.addWorkspace(workingDirectory: projectA)
-        let wtA = store.addWorkspace(
-            workingDirectory: URL(fileURLWithPath: "/tmp/projectA-a"),
-            worktreeParent: source, worktreeBranch: "a"
-        )
-        let wtB = store.addWorkspace(
-            workingDirectory: URL(fileURLWithPath: "/tmp/projectA-b"),
-            worktreeParent: source, worktreeBranch: "b"
-        )
-        let unrelated = store.addWorkspace(workingDirectory: projectB)
+        let first = store.addWorkspace(workingDirectory: projectA)
+        let moved = store.addWorkspace(workingDirectory: projectA)
+        let last = store.addWorkspace(workingDirectory: projectA)
 
-        let from = store.workspaces.firstIndex { $0.id == source.id }!
-        let to = store.workspaces.firstIndex { $0.id == unrelated.id }!
-        store.moveWorkspace(from: from, to: to)
+        store.moveWorkspace(last, to: first)
 
-        XCTAssertEqual(store.workspaces.map(\.id), [
-            home.id, unrelated.id, source.id, wtA.id, wtB.id
-        ])
+        XCTAssertEqual(
+            store.workspaces(in: project(of: first, in: store)).map(\.id),
+            [last.id, first.id, moved.id]
+        )
+    }
+
+    func testMoveWorkspaceRefusesToChangeProjects() {
+        // The project owns the folder; a row cannot change parents by drag.
+        let store = makeStore()
+        let a = store.addWorkspace(workingDirectory: projectA)
+        let b = store.addWorkspace(workingDirectory: projectB)
+
+        store.moveWorkspace(a, to: b)
+
+        XCTAssertEqual(store.workspaces(in: project(of: a, in: store)).map(\.id), [a.id])
+        XCTAssertEqual(store.workspaces(in: project(of: b, in: store)).map(\.id), [b.id])
     }
 
     func testRemoveWorktreeDirectoryAllowsAlreadyGoneOrphanToClose() async {
@@ -553,12 +543,12 @@ final class WorkspaceStoreTests: XCTestCase {
         // to delete; the confirm path should let the row close.
         let store = makeStore()
         let source = store.workspaces[0]
-        let wt = store.addWorkspace(
-            workingDirectory: URL(fileURLWithPath: "/tmp/kooky-missing-worktree-\(UUID().uuidString)"),
-            worktreeParent: source,
-            worktreeBranch: "gone"
+        let wt = addWorktree(
+            store,
+            of: source,
+            at: "/tmp/kooky-missing-worktree-\(UUID().uuidString)",
+            branch: "gone"
         )
-        wt.worktreeParentId = UUID()
 
         let message = await store.removeWorktreeDirectory(wt)
 
@@ -575,13 +565,16 @@ final class WorkspaceStoreTests: XCTestCase {
         XCTAssertEqual(engine(session).startedConfigs.last?.workingDirectory, projectA.path)
     }
 
-    func testActiveTabPwdReportSyncsToWorkspace() {
+    func testPwdReportMovesTheSessionNotTheWorkspaceRoot() {
+        // The row owns a folder; a `cd` moves the tab, never the row. New
+        // tabs and worktree reconciliation key off the row's root.
         let store = makeStore()
         let ws = store.addWorkspace(workingDirectory: projectA)
         let pane = firstPane(ws)
         let session = pane.tabs[0]
         engine(session).emitPwd("/tmp/projectA/sub")
-        XCTAssertEqual(ws.workingDirectory.path, "/tmp/projectA/sub")
+        XCTAssertEqual(session.currentDirectory.path, "/tmp/projectA/sub")
+        XCTAssertEqual(ws.workingDirectory.path, projectA.path)
     }
 
     func testCommandFinishedUpdatesSessionStatus() {
@@ -921,13 +914,16 @@ final class WorkspaceStoreTests: XCTestCase {
         XCTAssertEqual(engine(session).startedConfigs.last?.workingDirectory, projectC.path)
     }
 
-    func testNewTabInheritsLatestPwd() {
+    func testNewTabSpawnsAtTheWorkspaceRootNotTheLatestPwd() {
+        // The workspace root is immutable, so `+` always lands on the
+        // project (or worktree) folder — a tab that cd-ed into a
+        // subdirectory does not move the next tab there.
         let store = makeStore()
         let ws = store.addWorkspace(workingDirectory: projectA)
         let pane = firstPane(ws)
         engine(pane.tabs[0]).emitPwd("/tmp/projectA/sub")
         let session = store.addTab(in: ws)
-        XCTAssertEqual(engine(session).startedConfigs.last?.workingDirectory, "/tmp/projectA/sub")
+        XCTAssertEqual(engine(session).startedConfigs.last?.workingDirectory, projectA.path)
     }
 
     func testAddTabRespectsTemplate() {
@@ -1012,6 +1008,30 @@ final class WorkspaceStoreTests: XCTestCase {
         XCTAssertEqual(pane.activeTabId, b.id)
     }
 
+    func testCycleWorkspaceAdvancesAndWrapsAroundEnd() {
+        let store = makeStore()
+        let first = store.workspaces[0]
+        let second = store.addWorkspace(workingDirectory: projectA)
+        let third = store.addWorkspace(workingDirectory: projectB)
+        XCTAssertEqual(store.activeWorkspaceId, third.id)
+
+        store.cycleWorkspace(direction: 1)  // third → first (wrap)
+        XCTAssertEqual(store.activeWorkspaceId, first.id)
+
+        store.cycleWorkspace(direction: 1)  // first → second
+        XCTAssertEqual(store.activeWorkspaceId, second.id)
+    }
+
+    func testCycleWorkspaceBackwardsWrapsAtStart() {
+        let store = makeStore()
+        let first = store.workspaces[0]
+        let second = store.addWorkspace(workingDirectory: projectA)
+        store.activateWorkspace(first)
+
+        store.cycleWorkspace(direction: -1)  // first → second (wrap backward)
+        XCTAssertEqual(store.activeWorkspaceId, second.id)
+    }
+
     func testClosingActiveTabActivatesNeighbor() {
         let store = makeStore()
         let ws = store.workspaces[0]
@@ -1032,6 +1052,122 @@ final class WorkspaceStoreTests: XCTestCase {
         store.closeTab(pane.tabs[0], in: ws)
         XCTAssertTrue(store.workspaces.isEmpty)
         XCTAssertNil(store.activeWorkspaceId)
+    }
+
+    func testAddWorkspaceReusesTheProjectForTheSameFolder() {
+        // A project IS its folder: opening the same path twice joins the
+        // existing project instead of minting a duplicate section. A
+        // subdirectory is a different folder, hence its own project.
+        let store = makeStore()
+        let first = store.addWorkspace(workingDirectory: projectA)
+        let second = store.addWorkspace(workingDirectory: projectA)
+        XCTAssertEqual(second.projectId, first.projectId)
+        XCTAssertEqual(store.workspaces(in: project(of: first, in: store)).count, 2)
+
+        let nested = store.addWorkspace(workingDirectory: projectA.appendingPathComponent("sub"))
+        XCTAssertNotEqual(nested.projectId, first.projectId)
+        XCTAssertEqual(store.project(withId: nested.projectId)?.rootPath.path, "/tmp/projectA/sub")
+    }
+
+    func testClosingLastWorkspaceKeepsItsProject() {
+        // The project is the durable thing; the windows' folders survive
+        // their rows. Closing the last row must not orphan the section.
+        let store = makeStore()
+        let project = store.project(forRoot: projectA)
+        let ws = store.addWorkspace(in: project)
+        store.activateWorkspace(ws)
+        store.closeWorkspace(ws)
+        XCTAssertNotNil(store.project(withId: project.id))
+        XCTAssertFalse(store.workspaces.contains { $0.id == ws.id })
+        XCTAssertNotEqual(store.activeWorkspaceId, ws.id)
+    }
+
+    func testNewWorkspaceInProjectSpawnsAtItsRoot() {
+        // `+` on a project row (and this is exactly what adding a tab
+        // inherits) spawns at the project root, not at whatever the active
+        // workspace's tab cd'd to.
+        let store = makeStore()
+        let project = store.project(forRoot: projectA)
+        let ws = store.addWorkspace(in: project)
+        XCTAssertEqual(ws.workingDirectory.path, projectA.path)
+        XCTAssertEqual(engine(firstPane(ws).tabs[0]).startedConfigs.last?.workingDirectory, projectA.path)
+    }
+
+    func testEmptyProjectDisappearsOnlyWhenExplicitlyRemoved() {
+        // Nothing else prunes projects — not closing workspaces, not
+        // cycling. Removal is the one explicit door.
+        let store = makeStore()
+        let project = store.project(forRoot: projectA)
+        let ws = store.addWorkspace(in: project)
+        store.closeWorkspace(ws)
+        XCTAssertNotNil(store.project(withId: project.id))
+        store.removeProject(project)
+        XCTAssertNil(store.project(withId: project.id))
+    }
+
+    func testRemoveProjectClosesEveryWorkspaceItHolds() {
+        let store = makeStore()
+        let project = store.project(forRoot: projectA)
+        let plain = store.addWorkspace(in: project)
+        let wt = store.addWorktreeWorkspace(in: project, path: URL(fileURLWithPath: "/tmp/projectA-feat"), branch: "feat")
+        store.removeProject(project)
+
+        XCTAssertTrue(store.workspaces(in: project).isEmpty)
+        XCTAssertEqual(engine(firstPane(plain).tabs[0]).terminateCount, 1)
+        XCTAssertEqual(engine(firstPane(wt).tabs[0]).terminateCount, 1)
+    }
+
+    func testRemovingProjectLeavesOtherProjectsAlone() {
+        let store = makeStore()
+        let doomed = store.project(forRoot: projectA)
+        let kept = store.project(forRoot: projectB)
+        _ = store.addWorkspace(in: doomed)
+        let survivor = store.addWorkspace(in: kept)
+
+        store.removeProject(doomed)
+
+        XCTAssertNil(store.project(withId: doomed.id))
+        XCTAssertEqual(store.workspaces(in: kept).map(\.id), [survivor.id])
+        XCTAssertEqual(store.activeWorkspaceId, survivor.id)
+    }
+
+    func testRestoreGroupsLegacyWorktreesUnderTheirParentFolder() {
+        // Pre-project state.json carries no projects: every top-level
+        // workspace owns its folder, and `worktreeParentId` worktrees hang
+        // off that owner's folder.
+        let rootPath = "/tmp/legacy-project"
+        let worktreePath = "/tmp/legacy-project-feat"
+        func node(_ dir: String) -> PersistedPaneNode {
+            let tab = PersistedTab(id: UUID(), agentId: "terminal", currentDirectoryPath: dir)
+            let pane = PersistedPane(id: UUID(), tabs: [tab], activeTabId: tab.id)
+            return PersistedPaneNode(id: pane.id, kind: .pane(pane))
+        }
+        let source = PersistedWorkspace(
+            id: UUID(), workingDirectoryPath: rootPath, root: node(rootPath)
+        )
+        let legacyWorktree = PersistedWorkspace(
+            id: UUID(),
+            workingDirectoryPath: worktreePath,
+            root: node(worktreePath),
+            worktreeBranch: "feat",
+            legacyWorktreeParentId: source.id
+        )
+        let state = PersistedState(
+            workspaces: [source, legacyWorktree],
+            activeWorkspaceId: source.id
+        )
+
+        let store = makeStore(initial: state)
+
+        XCTAssertEqual(store.projects.count, 1)
+        let project = store.projects[0]
+        XCTAssertEqual(project.rootPath.path, rootPath)
+        let rows = store.workspaces(in: project)
+        XCTAssertEqual(rows.count, 2)
+        XCTAssertFalse(rows[0].isWorktree)
+        XCTAssertTrue(rows[1].isWorktree)
+        XCTAssertEqual(rows[1].worktreePath?.path, worktreePath)
+        XCTAssertEqual(rows[1].worktreeBranch, "feat")
     }
 
     func testClosingMiddleWorkspaceActivatesNextNeighbor() {
@@ -1150,7 +1286,7 @@ final class WorkspaceStoreTests: XCTestCase {
         XCTAssertEqual(engine(originalSession).terminateCount, 0)
     }
 
-    func testCrossPaneMoveSyncsWorkspaceWorkingDirectory() {
+    func testCrossPaneMoveLeavesTheWorkspaceRootAlone() {
         let store = makeStore()
         let ws = store.addWorkspace(workingDirectory: projectA)
         let source = firstPane(ws)
@@ -1161,7 +1297,8 @@ final class WorkspaceStoreTests: XCTestCase {
         // the move into dest is the thing that has to sync the cwd.
         store.focusPane(source, in: ws)
         store.moveTab(session, to: dest, at: dest.tabs.count, in: ws)
-        XCTAssertEqual(ws.workingDirectory.path, "/tmp/projectA/sub")
+        XCTAssertEqual(session.currentDirectory.path, "/tmp/projectA/sub")
+        XCTAssertEqual(ws.workingDirectory.path, projectA.path)
     }
 
     // MARK: Persistence
@@ -1309,6 +1446,30 @@ final class WorkspaceStoreTests: XCTestCase {
         store.toggleInfoSection("Runtime")
         store.flushPersistence()
         XCTAssertNil(persistence.saved?.collapsedInfoSections)
+    }
+
+    /// A folded project is UI state the sidebar cannot own: it unmounts on
+    /// every hide / content switch, and a relaunch used to reopen everything.
+    func testCollapsedProjectIdsPersistAndRestore() throws {
+        let persistence = InMemoryPersistence()
+        let store = WorkspaceStore(persistence: persistence, engineFactory: { TestEngine() })
+        store.addWorkspace(workingDirectory: projectA)
+        store.addWorkspace(workingDirectory: projectB)
+        let folded = try XCTUnwrap(store.projects.first(where: {
+            $0.rootPath.standardizedFileURL == projectA.standardizedFileURL
+        }))
+        store.toggleProjectCollapsed(folded.id)
+        store.flushPersistence()
+        XCTAssertEqual(persistence.saved?.collapsedProjectIds, [folded.id])
+
+        let restored = makeStore(initial: persistence.saved)
+        XCTAssertEqual(restored.collapsedProjectIds, [folded.id])
+
+        // Removing the folder must not leave its id behind in state.json.
+        let survivor = try XCTUnwrap(store.project(withId: folded.id))
+        store.removeProject(survivor)
+        store.flushPersistence()
+        XCTAssertNil(persistence.saved?.collapsedProjectIds)
     }
 
     func testSidebarWidthPersistsAndRestoresClamped() throws {
@@ -1769,15 +1930,23 @@ final class WorkspaceStoreTests: XCTestCase {
                       "terminate() must release every session's engine")
     }
 
-    func testOnBecameEmptyFiresWhenLastWorkspaceCloses() {
-        let store = makeStore()   // starts with one workspace
+    func testOnBecameEmptyWaitsForTheLastProject() {
+        // A project outlives its workspaces, so an empty store is one with no
+        // projects left — closing rows alone leaves the window standing.
+        let store = makeStore()   // starts with one workspace under one project
         var fired = 0
         store.onBecameEmpty = { fired += 1 }
         let extra = store.addWorkspace(workingDirectory: projectA)
         store.closeWorkspace(extra)
         XCTAssertEqual(fired, 0, "one workspace still open — store is not empty")
-        store.closeWorkspace(store.workspaces[0])
-        XCTAssertEqual(fired, 1, "closing the last workspace empties the store")
+        for workspace in store.workspaces {
+            store.closeWorkspace(workspace)
+        }
+        XCTAssertEqual(fired, 0, "the projects are still there to reopen a terminal from")
+        for project in store.projects {
+            store.removeProject(project)
+        }
+        XCTAssertEqual(fired, 1, "removing the last project empties the store")
     }
 
     // MARK: - Cross-window tab drag
@@ -1821,8 +1990,9 @@ final class WorkspaceStoreTests: XCTestCase {
         // The engine's callbacks must now drive window B, not the window the
         // tab was dragged out of.
         engine(moved).emitPwd("/tmp/projectC")
-        XCTAssertEqual(wsB.workingDirectory.path, "/tmp/projectC", "pwd change reaches window B")
-        XCTAssertNotEqual(wsA.workingDirectory.path, "/tmp/projectC", "window A is untouched")
+        XCTAssertEqual(moved.currentDirectory.path, "/tmp/projectC", "pwd change reaches the moved tab")
+        XCTAssertEqual(wsB.workingDirectory.path, NSHomeDirectory())
+        XCTAssertEqual(wsA.workingDirectory.path, NSHomeDirectory(), "window A is untouched")
     }
 
     func testCrossWindowDropOfLastTabEmptiesSourceWindow() {
@@ -1835,7 +2005,8 @@ final class WorkspaceStoreTests: XCTestCase {
         b.handleTabDrop(droppedId: onlyTab.id, to: firstPane(wsB), at: firstPane(wsB).tabs.count, in: wsB)
 
         XCTAssertTrue(a.workspaces.isEmpty, "window A's last tab left — its workspace collapsed away")
-        XCTAssertEqual(aBecameEmpty, 1, "store A signalled empty so its window can close")
+        XCTAssertEqual(aBecameEmpty, 0, "the project keeps window A standing")
+        XCTAssertEqual(a.projects.count, 1, "its folder survives the row")
         XCTAssertTrue(firstPane(wsB).tabs.contains { $0 === onlyTab })
         XCTAssertEqual(engine(onlyTab).terminateCount, 0, "engine survives the source window emptying")
     }
@@ -2041,29 +2212,15 @@ final class WorkspaceStoreTests: XCTestCase {
     // MARK: - onPwdChange refresh gating (issue #29 follow-up: env/save run only
     // on a real cwd change; git status still refreshes every prompt)
 
-    func testPwdChangeUpdatesSessionAndWorkspaceDirectories() {
+    func testPwdChangeUpdatesSessionNotWorkspaceRoot() {
         let store = makeStore()
         guard let ws = store.active, let session = ws.activeSession else {
             return XCTFail("expected an active session")
         }
+        let root = ws.workingDirectory.path
         engine(session).emitPwd("/tmp/projectB")
         XCTAssertEqual(session.currentDirectory.path, "/tmp/projectB")
-        XCTAssertEqual(ws.workingDirectory.path, "/tmp/projectB",
-                       "active session's cwd drives the workspace working directory")
-    }
-
-    func testSamePwdLeavesDirectoriesUnchanged() {
-        let store = makeStore()
-        guard let ws = store.active, let session = ws.activeSession else {
-            return XCTFail("expected an active session")
-        }
-        let e = engine(session)
-        e.emitPwd("/tmp/projectA")
-        // Re-emitting the same cwd (every prompt re-fires OSC 7) must be a no-op
-        // on the directories — the gate keys off this exact comparison.
-        e.emitPwd("/tmp/projectA")
-        XCTAssertEqual(session.currentDirectory.path, "/tmp/projectA")
-        XCTAssertEqual(ws.workingDirectory.path, "/tmp/projectA")
+        XCTAssertEqual(ws.workingDirectory.path, root, "the row's folder is immutable")
     }
 
     func testPwdChangeIsStillPersisted() {
@@ -2081,7 +2238,8 @@ final class WorkspaceStoreTests: XCTestCase {
         store.flushPersistence()
         // Gating scheduleSave on cwd-change must NOT drop the new directory from
         // persistence, otherwise a restored tab would reopen in the wrong place.
-        XCTAssertEqual(persistence.saved?.workspaces.first?.workingDirectoryPath, "/tmp/projectB")
+        // The workspace root stays where it was: only the tab moved.
+        XCTAssertEqual(persistence.saved?.workspaces.first?.workingDirectoryPath, NSHomeDirectory())
         XCTAssertEqual(persistence.saved?.workspaces.first?.root.allTabs.first?.currentDirectoryPath,
                        "/tmp/projectB")
     }
@@ -2140,6 +2298,399 @@ final class WorkspaceStoreTests: XCTestCase {
         guard let session = ws.activeSession else { return XCTFail("expected initial session") }
         XCTAssertNil(session.sshWorkspaceHost)
         XCTAssertNil(engine(session).startedConfigs.last?.environment["KOOKY_AGENT"])
+        // Whitespace normalizes to nil, so the row must not land in the SSH
+        // group — it is an ordinary local workspace.
+        XCTAssertFalse(store.projects.contains { $0.isSSHGroup })
+    }
+
+    /// Every SSH workspace shares one group, whatever local folder was active
+    /// when it was created — a remote has no folder to be filed under.
+    /// File → Open Recent and the ⌘P recents entries both name a folder, and a
+    /// folder that is already a project must not grow a second identical row:
+    /// it unfolds and focuses its first workspace instead.
+    func testOpenRecentFolderUnfoldsTheExistingProjectAndFocusesItsFirstWorkspace() {
+        let store = makeStore()
+        let first = store.addWorkspace(workingDirectory: projectA)
+        let second = store.addWorkspace(workingDirectory: projectA)
+        store.setProjectCollapsed(first.projectId, true)
+        store.activateWorkspace(second)
+        let rowCount = store.workspaces.count
+
+        let opened = store.openRecentFolder(projectA)
+
+        XCTAssertEqual(opened.id, first.id)
+        XCTAssertEqual(store.activeWorkspaceId, first.id)
+        XCTAssertFalse(store.collapsedProjectIds.contains(first.projectId))
+        XCTAssertEqual(store.workspaces.count, rowCount, "opening a known folder must not add a row")
+    }
+
+    func testOpenRecentFolderCreatesAProjectWithAWorkspaceForANewFolder() {
+        let store = makeStore()
+
+        let opened = store.openRecentFolder(projectB)
+
+        let owner = store.project(withId: opened.projectId)
+        XCTAssertEqual(owner?.rootPath.standardizedFileURL, projectB.standardizedFileURL)
+        XCTAssertEqual(opened.workingDirectory.standardizedFileURL, projectB.standardizedFileURL)
+        XCTAssertEqual(store.activeWorkspaceId, opened.id)
+    }
+
+    /// A folder can stay open with no workspace left; opening it from recents
+    /// has to refill it rather than leaving an empty header selected.
+    func testOpenRecentFolderGivesAnEmptyProjectItsFirstWorkspace() {
+        let store = makeStore()
+        let emptied = store.project(forRoot: projectC)
+
+        let opened = store.openRecentFolder(projectC)
+
+        XCTAssertEqual(opened.projectId, emptied.id)
+        XCTAssertEqual(store.workspaces(in: emptied).map(\.id), [opened.id])
+    }
+
+    /// Closing every workspace leaves the project. Relaunch must restore that
+    /// empty project, not mint a Home workspace over it.
+    func testRestoreKeepsAProjectTheUserEmptiedOnPurpose() {
+        let kept = UUID()
+        let state = PersistedState(
+            workspaces: [],
+            projects: [PersistedProject(id: kept, rootPath: "/tmp/projectA")],
+            activeWorkspaceId: nil
+        )
+
+        let store = makeStore(initial: state)
+
+        XCTAssertEqual(store.projects.map(\.id), [kept])
+        XCTAssertTrue(store.workspaces.isEmpty)
+    }
+
+    func testProjectForRootTreatsTmpAndPrivateTmpAsTheSameFolder() {
+        let store = makeStore()
+        let viaTmp = store.project(forRoot: URL(fileURLWithPath: "/tmp/projectA"))
+        let viaPrivate = store.project(forRoot: URL(fileURLWithPath: "/private/tmp/projectA"))
+        XCTAssertEqual(viaTmp.id, viaPrivate.id)
+    }
+
+    func testOpenRecentFolderMatchesSymlinkSpellingOfAnOpenProject() {
+        let store = makeStore()
+        let first = store.addWorkspace(workingDirectory: URL(fileURLWithPath: "/tmp/projectA"))
+        let count = store.workspaces.count
+
+        let opened = store.openRecentFolder(URL(fileURLWithPath: "/private/tmp/projectA"))
+
+        XCTAssertEqual(opened.id, first.id)
+        XCTAssertEqual(store.workspaces.count, count, "symlink spelling must not add a row")
+    }
+
+    /// An SSH row used to be filed under the local folder it spawned from.
+    /// After migration that folder has nothing left, and an empty folder row
+    /// the user never created is noise — but a project the user emptied on
+    /// purpose stays.
+    func testRestoreDropsTheFolderProjectAnSSHOnlyRowLeftBehind() {
+        let emptied = UUID()
+        let kept = UUID()
+        func node(_ dir: String) -> PersistedPaneNode {
+            let tab = PersistedTab(id: UUID(), agentId: "terminal", currentDirectoryPath: dir)
+            let pane = PersistedPane(id: UUID(), tabs: [tab], activeTabId: tab.id)
+            return PersistedPaneNode(id: pane.id, kind: .pane(pane))
+        }
+        let remote = PersistedWorkspace(
+            id: UUID(),
+            workingDirectoryPath: "/tmp/ssh-spawn-folder",
+            root: node("/tmp/ssh-spawn-folder"),
+            projectId: emptied,
+            sshRemoteHost: "deploy@example.com"
+        )
+        let state = PersistedState(
+            workspaces: [remote],
+            projects: [
+                PersistedProject(id: emptied, rootPath: "/tmp/ssh-spawn-folder"),
+                PersistedProject(id: kept, rootPath: "/tmp/never-had-a-workspace"),
+            ],
+            activeWorkspaceId: remote.id
+        )
+
+        let store = makeStore(initial: state)
+
+        XCTAssertNil(store.project(withId: emptied))
+        XCTAssertNotNil(store.project(withId: kept))
+        XCTAssertEqual(store.projects.filter(\.isSSHGroup).count, 1)
+        XCTAssertEqual(store.workspaces.first?.projectId, store.projects.first(where: \.isSSHGroup)?.id)
+    }
+
+    func testSSHWorkspacesCollectInOneGroup() {
+        let store = makeStore()
+        let localA = store.addWorkspace(workingDirectory: projectA)
+        let first = store.addWorkspace(workingDirectory: projectA, sshRemoteHost: "a@one")
+        store.activateWorkspace(localA)
+        let second = store.addWorkspace(workingDirectory: projectB, sshRemoteHost: "b@two")
+
+        let groups = store.projects.filter(\.isSSHGroup)
+        XCTAssertEqual(groups.count, 1)
+        let group = groups[0]
+        XCTAssertEqual(store.workspaces(in: group).map(\.id), [first.id, second.id])
+        XCTAssertEqual(store.project(withId: localA.projectId)?.isSSHGroup, false)
+        // The local rows keep their own folders.
+        XCTAssertEqual(store.workspaces(in: store.project(forRoot: projectB)).count, 0)
+    }
+
+    func testSSHGroupPersistsAndRestores() {
+        let persistence = InMemoryPersistence()
+        let store = WorkspaceStore(persistence: persistence, engineFactory: { TestEngine() })
+        let remote = store.addWorkspace(workingDirectory: projectA, sshRemoteHost: "a@one")
+        store.flushPersistence()
+
+        let saved = persistence.saved
+        XCTAssertEqual(saved?.projects?.filter { $0.isSSHGroup == true }.count, 1)
+        let restored = makeStore(initial: saved)
+        let group = try? XCTUnwrap(restored.projects.first(where: \.isSSHGroup))
+        XCTAssertEqual(group?.rootPath, Project.sshGroupRoot)
+        XCTAssertEqual(group?.title, "SSH")
+        XCTAssertEqual(group.map { restored.workspaces(in: $0).map(\.id) } ?? [], [remote.id])
+    }
+
+    /// A state file written before the SSH group existed filed SSH rows under
+    /// whatever local folder they spawned from. Restoring must move them into
+    /// the group and drop the folder project that migration emptied.
+    func testRestoreMigratesSSHWorkspacesIntoGroup() {
+        let localRoot = "/tmp/legacy-local-project"
+        let remoteRoot = "/tmp/legacy-remote-parent"
+        func node(_ dir: String) -> PersistedPaneNode {
+            let tab = PersistedTab(id: UUID(), agentId: "terminal", currentDirectoryPath: dir)
+            let pane = PersistedPane(id: UUID(), tabs: [tab], activeTabId: tab.id)
+            return PersistedPaneNode(id: pane.id, kind: .pane(pane))
+        }
+        let local = PersistedWorkspace(
+            id: UUID(), workingDirectoryPath: localRoot, root: node(localRoot)
+        )
+        let remote = PersistedWorkspace(
+            id: UUID(),
+            workingDirectoryPath: remoteRoot,
+            root: node(remoteRoot),
+            sshRemoteHost: "deploy@example.com"
+        )
+        let state = PersistedState(workspaces: [local, remote], activeWorkspaceId: local.id)
+
+        let store = makeStore(initial: state)
+
+        let group = store.projects.first { $0.isSSHGroup }
+        XCTAssertEqual(group.map { store.workspaces(in: $0).map(\.id) } ?? [], [remote.id])
+        // The folder project the migration emptied is gone; only the local
+        // folder and the SSH group remain.
+        XCTAssertEqual(
+            store.projects.filter { !$0.isSSHGroup }.map(\.rootPath.path), [localRoot]
+        )
+        XCTAssertFalse(store.projects.contains { $0.rootPath.path == remoteRoot })
+        let localRow = store.workspaces.first { $0.id == local.id }
+        XCTAssertEqual(localRow?.projectId, store.projects.first { !$0.isSSHGroup }?.id)
+    }
+
+    /// The group is not a folder, so it does not outlive its rows the way a
+    /// folder project does — an empty "SSH" header is nothing the user can act
+    /// on (its `+` would open a connection sheet for no one).
+    func testClosingTheLastSSHWorkspaceDropsTheGroup() {
+        let store = makeStore()
+        let local = store.addWorkspace(workingDirectory: projectA)
+        let remote = store.addWorkspace(workingDirectory: projectA, sshRemoteHost: "a@one")
+        XCTAssertEqual(store.projects.filter(\.isSSHGroup).count, 1)
+
+        store.closeWorkspace(remote)
+
+        XCTAssertTrue(store.projects.filter(\.isSSHGroup).isEmpty)
+        XCTAssertFalse(store.workspaces.contains { $0.id == remote.id })
+        XCTAssertNotNil(store.project(withId: local.projectId), "a folder project survives its last row")
+    }
+
+    /// A state file can still carry an SSH group with no rows (written by a
+    /// build that let the last remote row close without pruning). Restoring it
+    /// must not leave a window with nothing to type into.
+    func testRestoreDropsAnSSHGroupWithNoRows() {
+        let kept = UUID()
+        let state = PersistedState(
+            workspaces: [],
+            projects: [
+                PersistedProject(id: UUID(), rootPath: "", isSSHGroup: true),
+                PersistedProject(id: kept, rootPath: "/tmp/projectA"),
+            ],
+            activeWorkspaceId: nil
+        )
+
+        let store = makeStore(initial: state)
+
+        XCTAssertTrue(store.projects.filter(\.isSSHGroup).isEmpty)
+        XCTAssertEqual(store.projects.map(\.id), [kept])
+    }
+
+    /// Only the SSH group left means nothing survived the restore at all, so
+    /// the window falls back to a fresh Home workspace instead of opening
+    /// empty.
+    func testRestoreWithOnlyASSHGroupOpensAHomeWorkspace() {
+        let state = PersistedState(
+            workspaces: [],
+            projects: [PersistedProject(id: UUID(), rootPath: "", isSSHGroup: true)],
+            activeWorkspaceId: nil
+        )
+
+        let store = makeStore(initial: state)
+
+        XCTAssertTrue(store.projects.filter(\.isSSHGroup).isEmpty)
+        XCTAssertEqual(store.workspaces.count, 1)
+        XCTAssertEqual(store.workspaces.first?.title, "Home")
+    }
+
+    /// Project rows reorder by drag, and the order is what the state file
+    /// carries — a relaunch that reshuffled the sidebar would make the gesture
+    /// pointless.
+    func testMoveProjectReordersAndPersists() throws {
+        let persistence = InMemoryPersistence()
+        let store = makeStore(persistence: persistence)
+        // Home (seeded) + A + B, in creation order at the end of the list.
+        let a = store.project(forRoot: projectA)
+        let b = store.project(forRoot: projectB)
+        XCTAssertEqual(store.projects.map(\.id), [store.projects[0].id, a.id, b.id])
+        let home = store.projects[0]
+
+        store.moveProject(b, to: home)
+
+        XCTAssertEqual(store.projects.map(\.id), [b.id, home.id, a.id], "the dragged row takes the destination slot")
+        store.flushPersistence()
+        let saved = try XCTUnwrap(persistence.saved)
+        XCTAssertEqual(saved.projects?.map(\.id), [b.id, home.id, a.id])
+
+        let restored = makeStore(initial: saved)
+        XCTAssertEqual(restored.projects.map(\.id), [b.id, home.id, a.id])
+    }
+
+    func testMoveProjectRefusesItself() {
+        let store = makeStore()
+        let a = store.project(forRoot: projectA)
+        let order = store.projects.map(\.id)
+        store.moveProject(a, to: a)
+        XCTAssertEqual(store.projects.map(\.id), order)
+    }
+
+    /// An SSH-only window that removes its group must report the window empty
+    /// exactly once. The group prunes itself with its last row, so an unmuted
+    /// `closeWorkspace` would already report emptiness from inside
+    /// `removeProject`'s loop — then again when the method finishes, on a
+    /// window the first report already asked to close.
+    func testRemovingTheSSHGroupReportsTheWindowEmptyOnce() {
+        let store = makeStore()
+        var fired = 0
+        store.onBecameEmpty = { fired += 1 }
+        store.addWorkspace(workingDirectory: projectA, sshRemoteHost: "a@one")
+        store.addWorkspace(workingDirectory: projectB, sshRemoteHost: "b@two")
+        // Strip the store down to the group: the seeded Home row and the local
+        // project holding it both have to go before "only remotes are open"
+        // means anything.
+        for workspace in store.workspaces where workspace.sshRemoteHost == nil {
+            store.closeWorkspace(workspace)
+        }
+        for project in store.projects where !project.isSSHGroup {
+            store.removeProject(project)
+        }
+        guard let group = store.projects.first(where: \.isSSHGroup) else {
+            return XCTFail("expected the SSH group to outlive its locals")
+        }
+        XCTAssertEqual(store.workspaces(in: group).count, 2)
+        XCTAssertEqual(fired, 0, "two remote rows still open")
+
+        store.removeProject(group)
+
+        XCTAssertEqual(fired, 1, "one window close, not one per member plus one for the removal")
+        XCTAssertTrue(store.workspaces.isEmpty)
+        XCTAssertTrue(store.projects.isEmpty)
+    }
+
+    /// A state file written before roots were canonicalized can hold the same
+    /// folder twice (`/tmp/x` and `/private/tmp/x`). Restore folds them into
+    /// one project and repoints the rows, otherwise the sidebar shows two
+    /// identical headers and only one of them is reachable by lookup.
+    func testRestoreFoldsTwoProjectRowsForTheSameFolder() {
+        let kept = UUID()
+        let duplicate = UUID()
+        func node(_ dir: String) -> PersistedPaneNode {
+            let tab = PersistedTab(id: UUID(), agentId: "terminal", currentDirectoryPath: dir)
+            let pane = PersistedPane(id: UUID(), tabs: [tab], activeTabId: tab.id)
+            return PersistedPaneNode(id: pane.id, kind: .pane(pane))
+        }
+        let viaTmp = PersistedWorkspace(
+            id: UUID(),
+            workingDirectoryPath: "/tmp/projectA",
+            root: node("/tmp/projectA"),
+            projectId: kept
+        )
+        let viaPrivate = PersistedWorkspace(
+            id: UUID(),
+            workingDirectoryPath: "/private/tmp/projectA",
+            root: node("/private/tmp/projectA"),
+            projectId: duplicate
+        )
+        let state = PersistedState(
+            workspaces: [viaTmp, viaPrivate],
+            projects: [
+                PersistedProject(id: kept, rootPath: "/tmp/projectA"),
+                PersistedProject(id: duplicate, rootPath: "/private/tmp/projectA"),
+            ],
+            activeWorkspaceId: viaTmp.id
+        )
+
+        let store = makeStore(initial: state)
+
+        let folders = store.projects.filter { !$0.isSSHGroup }
+        XCTAssertEqual(folders.count, 1)
+        XCTAssertEqual(folders.first?.id, kept)
+        XCTAssertEqual(Set(store.workspaces.map(\.projectId)), [kept], "the folded row joins the keeper")
+        XCTAssertEqual(store.workspaces.count, 2, "no workspace is dropped by the fold")
+
+        // The fold the user left on the row that lost out moves to the survivor
+        // — otherwise the folder reopens simply because the state file spelled
+        // its path twice.
+        var foldedState = state
+        foldedState.collapsedProjectIds = [duplicate]
+        XCTAssertEqual(makeStore(initial: foldedState).collapsedProjectIds, [kept])
+    }
+
+    /// The spawn root keeps the caller's spelling while `rootPath` is
+    /// canonical, so the recent-folders hand-off must resolve both sides or
+    /// the same folder is filed under two paths.
+    func testRecentFolderIsRecordedOncePerProjectDespiteSymlinkSpelling() {
+        var noted: [String] = []
+        let store = makeStore(noteRecentFolder: { noted.append($0.path) })
+        noted.removeAll()
+
+        let first = store.addWorkspace(workingDirectory: URL(fileURLWithPath: "/tmp/projectA"))
+        store.addWorkspace(workingDirectory: URL(fileURLWithPath: "/private/tmp/projectA"))
+
+        XCTAssertEqual(Set(noted).count, 1, "one folder, one spelling")
+        XCTAssertEqual(
+            Set(noted),
+            [store.project(withId: first.projectId)?.rootPath.path ?? "missing project"]
+        )
+    }
+
+    func testDuplicateSSHWorkspaceStaysRemote() {
+        let store = makeStore()
+        let remote = store.addWorkspace(workingDirectory: projectA, sshRemoteHost: "a@one")
+
+        let copy = store.duplicateWorkspace(remote)
+
+        XCTAssertEqual(copy.sshRemoteHost, "a@one")
+        XCTAssertEqual(copy.projectId, remote.projectId)
+    }
+
+    /// ⌘N on an SSH workspace inherits its spawn folder as a LOCAL row — the
+    /// SSH group must only ever hold remote workspaces.
+    func testNewWorkspaceWhileSSHActiveStaysLocal() {
+        let store = makeStore()
+        let ssh = store.addWorkspace(workingDirectory: projectA, sshRemoteHost: "a@one")
+        store.activateWorkspace(ssh)
+
+        let local = store.addWorkspace()
+
+        XCTAssertNil(local.sshRemoteHost)
+        XCTAssertNotEqual(local.projectId, ssh.projectId)
+        XCTAssertEqual(store.project(withId: local.projectId)?.isSSHGroup, false)
+        XCTAssertEqual(store.project(withId: local.projectId)?.rootPath, projectA)
     }
 
     func testSSHWorkspaceAgentTabLaunchesAgentBehindDoubleDash() {
@@ -2237,7 +2788,7 @@ final class WorkspaceStoreTests: XCTestCase {
         XCTAssertEqual(noted, ["/tmp/projectA"], "a plain workspace records its folder")
 
         let source = store.workspaces[0]
-        store.addWorkspace(workingDirectory: projectB, worktreeParent: source, worktreeBranch: "feat")
+        addWorktree(store, of: source, at: projectB.path, branch: "feat")
         XCTAssertEqual(noted, ["/tmp/projectA"], "worktree children must not be recorded — their dir dies with the worktree")
 
         store.addWorkspace(workingDirectory: projectC, sshRemoteHost: "deploy@example.com")
@@ -2252,18 +2803,20 @@ final class WorkspaceStoreTests: XCTestCase {
         // Duplicate on a worktree: the dir is path-matched to the worktree
         // workspace, so its exclusion rides along.
         let source = store.addWorkspace(workingDirectory: projectA)
-        let worktree = store.addWorkspace(workingDirectory: projectB, worktreeParent: source, worktreeBranch: "feat")
+        let worktree = addWorktree(store, of: source, at: projectB.path, branch: "feat")
         noted.removeAll()
         store.duplicateWorkspace(worktree)
         XCTAssertTrue(noted.isEmpty, "duplicating a worktree must not record its dying dir")
 
         // ⌘N (no explicit dir) while an SSH workspace is active inherits its
-        // cwd — and must inherit its exclusion too.
+        // local cwd. That folder is a project root for the new row, so it IS
+        // recordable — the SSH row itself never is.
         let ssh = store.addWorkspace(workingDirectory: projectC, sshRemoteHost: "deploy@example.com")
+        XCTAssertEqual(noted, [], "the SSH row's own folder is not recorded")
         store.activateWorkspace(ssh)
         noted.removeAll()
         store.addWorkspace()
-        XCTAssertTrue(noted.isEmpty, "a dir inherited from an SSH workspace is not a local project")
+        XCTAssertEqual(noted, ["/tmp/projectC"], "the inherited folder is a plain project root")
     }
 
     func testManualSshMarkerKeepsStatusBarButNotPasteRouting() {
@@ -2361,8 +2914,7 @@ final class WorkspaceStoreTests: XCTestCase {
     /// hover only offered a path.
     func testSidebarTooltipLeadsWithTheReportedTitle() {
         let store = makeStore()
-        guard let ws = store.active else { return XCTFail("expected a seed workspace") }
-        ws.workingDirectory = projectA
+        let ws = store.addWorkspace(workingDirectory: projectA)
         firstPane(ws).activeTab?.terminalTitle = "System Testing"
 
         XCTAssertEqual(ws.sidebarTooltip(agents: []), "System Testing\n/tmp/projectA")
@@ -2374,8 +2926,7 @@ final class WorkspaceStoreTests: XCTestCase {
     /// earn their line.
     func testSidebarTooltipNamesTheAgentsOnlyWhenTheBadgeIsAmbiguous() {
         let store = makeStore()
-        guard let ws = store.active else { return XCTFail("expected a seed workspace") }
-        ws.workingDirectory = projectA
+        let ws = store.addWorkspace(workingDirectory: projectA)
 
         XCTAssertEqual(ws.sidebarTooltip(agents: [.claudeCode]), "projectA\n/tmp/projectA",
                        "one agent is what the icon already shows")
@@ -2387,8 +2938,7 @@ final class WorkspaceStoreTests: XCTestCase {
     /// — renaming a workspace must not hide where it lives.
     func testSidebarTooltipHonoursACustomTitleWithoutDroppingThePath() {
         let store = makeStore()
-        guard let ws = store.active else { return XCTFail("expected a seed workspace") }
-        ws.workingDirectory = projectA
+        let ws = store.addWorkspace(workingDirectory: projectA)
         ws.customTitle = "Scroll fix"
 
         XCTAssertEqual(ws.sidebarTooltip(agents: []), "Scroll fix\n/tmp/projectA")
@@ -2401,8 +2951,7 @@ final class WorkspaceStoreTests: XCTestCase {
     /// tooltip is documented as carrying it.
     func testSidebarTooltipLocationTracksWorktreeAndSSH() {
         let store = makeStore()
-        guard let ws = store.active else { return XCTFail("expected a seed workspace") }
-        ws.workingDirectory = projectA
+        let ws = store.addWorkspace(workingDirectory: projectA)
 
         ws.worktreeBranch = "fix-scroll"
         XCTAssertEqual(ws.sidebarTooltip(agents: []), "projectA\nbranch fix-scroll\n/tmp/projectA")
@@ -2426,8 +2975,7 @@ final class WorkspaceStoreTests: XCTestCase {
     /// — the agent names must survive the collapse, in both orderings.
     func testSidebarTooltipKeepsAgentNamesWhenTheSSHTitleCollapses() {
         let store = makeStore()
-        guard let ws = store.active else { return XCTFail("expected a seed workspace") }
-        ws.workingDirectory = projectA
+        let ws = store.addWorkspace(workingDirectory: projectA)
         ws.sshRemoteHost = "corey@prod"
 
         XCTAssertEqual(ws.sidebarTooltip(agents: [.claudeCode, .codex]),
@@ -2444,8 +2992,7 @@ final class WorkspaceStoreTests: XCTestCase {
     /// newline would add a line to a string whose line count is the structure.
     func testSidebarTooltipFlattensNewlinesInsideATitle() {
         let store = makeStore()
-        guard let ws = store.active else { return XCTFail("expected a seed workspace") }
-        ws.workingDirectory = projectA
+        let ws = store.addWorkspace(workingDirectory: projectA)
         ws.customTitle = "Scroll\nfix"
         ws.worktreeBranch = "topic\nbranch"
 
@@ -2524,8 +3071,7 @@ final class WorkspaceStoreTests: XCTestCase {
     /// show the colour but never what the user meant by it.
     func testNamedTagAddsAHashLineToTheTooltip() {
         let store = makeStore()
-        guard let ws = store.active else { return XCTFail("expected a seed workspace") }
-        ws.workingDirectory = projectA
+        let ws = store.addWorkspace(workingDirectory: projectA)
         store.setTag(WorkspaceTag(color: .custom(hex: "FF8800"), name: "urgent"), for: ws)
 
         XCTAssertEqual(ws.sidebarTooltip(agents: []), "projectA\n#urgent\n/tmp/projectA")

@@ -95,6 +95,17 @@ struct ContentView: View {
                     store.setSidebarMode(store.sidebarMode.next)
                 }
             }
+            // New Project — a project is a folder, so its picker belongs in
+            // the chrome with the other window-level toggles rather than in
+            // the sidebar it creates rows for.
+            HoverableIconButton(
+                systemName: "rectangle.stack.badge.plus",
+                fontSize: 12,
+                size: Theme.chromeToolbarButtonSize,
+                help: "New Project"
+            ) {
+                NSApp.sendAction(#selector(AppDelegate.handleNewProject), to: nil, from: nil)
+            }
             WindowDragHandle()
                 .overlay {
                     GeometryReader { proxy in
