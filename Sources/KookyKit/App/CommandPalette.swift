@@ -52,7 +52,7 @@ enum FuzzyMatcher {
 enum PaletteItemKind: Hashable, Sendable {
     case workspace(workspaceId: UUID, windowId: UUID)
     case tab(sessionId: UUID, workspaceId: UUID, windowId: UUID)
-    case createWorktree(workspaceId: UUID, windowId: UUID)
+    case createWorktree(projectId: UUID, windowId: UUID)
     /// Spawn a new tab with this agent / preset in the active workspace.
     case agent(templateId: String)
     /// Open the SSH-workspace destination sheet in the active window.
@@ -100,19 +100,6 @@ enum PaletteIndex {
                     symbol: "folder",
                     iconAsset: nil
                 ))
-                if ws.worktreeParentId == nil, GitWatcher.findGitDir(near: ws.workingDirectory) != nil {
-                    items.append(PaletteItem(
-                        id: "create-worktree-\(ws.id.uuidString)",
-                        title: String.localizedStringWithFormat(
-                            String(localized: "Create Worktree for %@", bundle: bundle),
-                            ws.title
-                        ),
-                        subtitle: String(localized: "worktree", bundle: bundle) + winLabel,
-                        kind: .createWorktree(workspaceId: ws.id, windowId: controller.windowId),
-                        symbol: "arrow.triangle.branch",
-                        iconAsset: nil
-                    ))
-                }
                 for pane in ws.root.allPanes {
                     for tab in pane.tabs {
                         items.append(PaletteItem(
@@ -128,6 +115,25 @@ enum PaletteIndex {
                         ))
                     }
                 }
+            }
+            // Worktrees are a project capability: a project folder that is a
+            // git repo can branch off another checkout, which lands in the
+            // sidebar as one more workspace row under the same project. The
+            // SSH group has no folder to branch off (its root is a sentinel,
+            // not a path), so it is not a candidate at all.
+            for project in controller.store.projects
+            where !project.isSSHGroup && GitWatcher.findGitDir(near: project.rootPath) != nil {
+                items.append(PaletteItem(
+                    id: "create-worktree-\(project.id.uuidString)",
+                    title: String.localizedStringWithFormat(
+                        String(localized: "Create Worktree for %@", bundle: bundle),
+                        project.title
+                    ),
+                    subtitle: String(localized: "worktree", bundle: bundle) + winLabel,
+                    kind: .createWorktree(projectId: project.id, windowId: controller.windowId),
+                    symbol: "arrow.triangle.branch",
+                    iconAsset: nil
+                ))
             }
         }
         for template in AgentTemplate.visibleOrdered(model: model) {

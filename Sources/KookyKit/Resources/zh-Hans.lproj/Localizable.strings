@@ -256,7 +256,6 @@
 "Close Other Workspaces" = "关闭其他工作区";
 "Duplicate Workspace" = "复制工作区";
 "Create Worktree…" = "创建工作树…";
-"Go to Source Workspace" = "前往源工作区";
 "Custom Tag…" = "自定义标签…";
 "Edit Tag…" = "编辑标签…";
 "No color" = "无颜色";
@@ -412,6 +411,7 @@
 "recent" = "最近";
 "Clear Menu" = "清除菜单";
 "%d workspace(s) will close · %d worktree(s)" = "将关闭 %d 个工作区 · 其中 %d 个工作树";
+"%d workspace(s) will close" = "将关闭 %d 个工作区";
 "Open on %@" = "在 %@ 上打开";
 "No nvm versions found" = "未找到 nvm 版本";
 "No local branches found" = "未找到本地分支";
@@ -432,3 +432,15 @@
 "DEEP-LINK" = "深层链接";
 "Can't open this link" = "无法打开这个链接";
 "ok" = "好";
+
+/* Projects */
+"New Project" = "新建项目";
+"New Project…" = "新建项目…";
+"Choose a folder to use as a project root." = "选择一个文件夹作为项目根目录。";
+"Remove Project…" = "移除项目…";
+"Show workspaces" = "展开工作区";
+"Hide workspaces" = "收起工作区";
+"Remove project" = "移除项目";
+"REMOVE-PROJECT" = "移除项目";
+"removing %@" = "正在移除 %@";
+"SSH workspaces" = "SSH 工作区";

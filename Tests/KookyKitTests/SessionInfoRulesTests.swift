@@ -71,7 +71,7 @@ final class SessionInfoRulesTests: XCTestCase {
 
         XCTAssertNil(SessionInfoRules.visibleRepoRoot(session))
         XCTAssertFalse(
-            SessionInfoRules.hasSourceInfo(session: session, worktreeParent: nil),
+            SessionInfoRules.hasSourceInfo(session: session, isWorktree: false),
             "repo root alone, and it's the directory above — nothing left to show"
         )
     }
@@ -92,23 +92,23 @@ final class SessionInfoRulesTests: XCTestCase {
         )
 
         XCTAssertEqual(SessionInfoRules.visibleRepoRoot(session), "/tmp/project")
-        XCTAssertTrue(SessionInfoRules.hasSourceInfo(session: session, worktreeParent: nil))
+        XCTAssertTrue(SessionInfoRules.hasSourceInfo(session: session, isWorktree: false))
     }
 
     func testSourceSurvivesOnBranchOrDiffOrWorktreeAlone() {
         session.gitStatus = GitStatus(
             branch: "main", repoRoot: nil, filesChanged: 0, insertions: 0, deletions: 0
         )
-        XCTAssertTrue(SessionInfoRules.hasSourceInfo(session: session, worktreeParent: nil))
+        XCTAssertTrue(SessionInfoRules.hasSourceInfo(session: session, isWorktree: false))
 
         session.gitStatus = GitStatus(
             branch: nil, repoRoot: nil, filesChanged: 2, insertions: 5, deletions: 1
         )
-        XCTAssertTrue(SessionInfoRules.hasSourceInfo(session: session, worktreeParent: nil))
+        XCTAssertTrue(SessionInfoRules.hasSourceInfo(session: session, isWorktree: false))
 
         session.gitStatus = .empty
-        XCTAssertFalse(SessionInfoRules.hasSourceInfo(session: session, worktreeParent: nil))
-        XCTAssertTrue(SessionInfoRules.hasSourceInfo(session: session, worktreeParent: workspace))
+        XCTAssertFalse(SessionInfoRules.hasSourceInfo(session: session, isWorktree: false))
+        XCTAssertTrue(SessionInfoRules.hasSourceInfo(session: session, isWorktree: true))
     }
 
     // MARK: Helpers

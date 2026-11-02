@@ -1181,6 +1181,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
             selfRow("New Tab", #selector(handleNewTab), "t"),
             selfRow("New Workspace", #selector(handleNewWorkspace), "n"),
             selfRow("New SSH Workspace…", #selector(handleNewSSHWorkspace)),
+            selfRow("New Project…", #selector(handleNewProject)),
             selfRow("New Window", #selector(handleNewWindow), "n", modifiers: [.command, .shift]),
             .separator,
             selfRow("Quick Open…", #selector(handleQuickOpen), "p"),
@@ -1473,13 +1474,13 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
         menu.addItem(clear)
     }
 
-    /// One seam for both open-recent entry points (menu item + ⌘P palette)
-    /// so a future behavior change — say, jump to an existing workspace
-    /// instead of adding a duplicate — can't land in one and not the other
-    /// (the `revealTab` precedent).
+    /// One seam for both open-recent entry points (menu item + ⌘P palette).
+    /// Recents are project folders, so the store decides whether that means
+    /// unfold-and-focus or create-the-project; neither entry point can drift
+    /// from the other (the `revealTab` precedent).
     private func openRecentFolder(atPath path: String) {
         revealHiddenWindow()
-        activeStore?.addWorkspace(workingDirectory: URL(fileURLWithPath: path, isDirectory: true))
+        activeStore?.openRecentFolder(URL(fileURLWithPath: path, isDirectory: true))
     }
 
     @objc private func handleOpenRecentFolder(_ sender: NSMenuItem) {
@@ -1533,12 +1534,14 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
                   let pane = ws.root.pane(containingSessionId: sId),
                   let session = pane.tabs.first(where: { $0.id == sId }) else { return }
             revealTab(session, in: ws, controller: target)
-        case .createWorktree(let wsId, let winId):
+        case .createWorktree(let projectId, let winId):
             guard let target = windowControllers.first(where: { $0.windowId == winId }),
-                  let ws = target.store.workspaces.first(where: { $0.id == wsId }) else { return }
+                  let project = target.store.project(withId: projectId) else { return }
             if let window = target.window { front(window) }
-            target.store.activateWorkspace(ws)
-            target.store.pendingCreateWorktreeRequest = ws
+            if let first = target.store.workspaces(in: project).first {
+                target.store.activateWorkspace(first)
+            }
+            target.store.pendingCreateWorktreeRequest = project
             if target.store.sidebarMode == .hidden {
                 // Matches ContentView / View menu's reveal behaviour — without
                 // the animation wrap the sidebar snaps from 0 to 220pt the moment
@@ -1556,6 +1559,42 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
             handleNewSSHWorkspace()
         case .openRecentFolder(let path):
             openRecentFolder(atPath: path)
+        }
+    }
+
+    /// File → New Project… / the top strip's stack button. Picking a folder
+    /// mints the project (or reuses the one already rooted there) and opens a
+    /// first workspace inside it, so a folder chosen from this panel is usable
+    /// immediately instead of showing a header with nothing under it.
+    @objc func handleNewProject() {
+        revealHiddenWindow()
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = true
+        panel.title = String(localized: "New Project", bundle: .kookyResources)
+        panel.message = String(
+            localized: "Choose a folder to use as a project root.",
+            bundle: .kookyResources
+        )
+
+        let controller = activeController
+        let store = controller?.store
+        panel.directoryURL = store?.active?.workingDirectory
+
+        let openPicked: () -> Void = {
+            for url in panel.urls {
+                guard let store else { continue }
+                let project = store.project(forRoot: url)
+                store.addWorkspace(in: project)
+            }
+        }
+        if let window = controller?.window {
+            panel.beginSheetModal(for: window) { response in
+                if response == .OK { openPicked() }
+            }
+        } else if panel.runModal() == .OK {
+            openPicked()
         }
     }
 

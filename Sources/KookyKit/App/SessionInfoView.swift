@@ -90,9 +90,10 @@ struct SessionInfoView: View {
                         }
                         // A worktree's branch and path already show above; what
                         // nothing else on this page says is that it IS one, and
-                        // which workspace it was cut from.
-                        if let parent = worktreeParent(of: workspace) {
-                            InlineField(label: "Worktree of", value: parent.title)
+                        // which project it was cut from.
+                        if workspace.isWorktree,
+                           let project = store.project(withId: workspace.projectId) {
+                            InlineField(label: "Worktree of", value: project.title)
                         }
                     }
                 }
@@ -139,7 +140,7 @@ struct SessionInfoView: View {
     }
 
     private func hasSourceInfo(session: Session, workspace: Workspace) -> Bool {
-        SessionInfoRules.hasSourceInfo(session: session, worktreeParent: worktreeParent(of: workspace))
+        SessionInfoRules.hasSourceInfo(session: session, isWorktree: workspace.isWorktree)
     }
 
     private func hasRuntimeInfo(_ session: Session) -> Bool {
@@ -152,11 +153,6 @@ struct SessionInfoView: View {
 
     private func visibleTerminalTitle(_ session: Session) -> String? {
         SessionInfoRules.visibleTerminalTitle(session)
-    }
-
-    private func worktreeParent(of workspace: Workspace) -> Workspace? {
-        guard let parentId = workspace.worktreeParentId else { return nil }
-        return store.workspaces.first { $0.id == parentId }
     }
 
     /// The one-click "hand this failure to an agent" affordance, or nil when
@@ -287,11 +283,11 @@ enum SessionInfoRules {
     static let processesTitle = "Processes"
     static let runtimeTitle = "Runtime"
 
-    static func hasSourceInfo(session: Session, worktreeParent: Workspace?) -> Bool {
+    static func hasSourceInfo(session: Session, isWorktree: Bool) -> Bool {
         session.gitStatus.branch != nil
             || visibleRepoRoot(session) != nil
             || session.gitStatus.filesChanged > 0
-            || worktreeParent != nil
+            || isWorktree
     }
 
     static func hasRuntimeInfo(_ session: Session) -> Bool {

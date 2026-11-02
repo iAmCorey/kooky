@@ -5,18 +5,18 @@ import SwiftUI
 /// when switching directly between modes (create → confirm-remove).
 private enum SidebarSheet: Identifiable {
     case createSSHWorkspace
-    case createWorktree(Workspace)
+    case createWorktree(Project)
     case confirmRemoveWorktree(Workspace)
     case confirmCloseOthers(WorkspaceStore.BulkRemovalRequest)
-    case confirmCloseSource(WorkspaceStore.CloseSourceRequest)
+    case confirmCloseProject(WorkspaceStore.CloseProjectRequest)
 
     var id: String {
         switch self {
         case .createSSHWorkspace: return "create-ssh-workspace"
-        case .createWorktree(let ws): return "create-\(ws.id.uuidString)"
+        case .createWorktree(let project): return "create-worktree-\(project.id.uuidString)"
         case .confirmRemoveWorktree(let ws): return "remove-\(ws.id.uuidString)"
         case .confirmCloseOthers(let req): return "close-others-\(req.keeping.id.uuidString)"
-        case .confirmCloseSource(let req): return "close-source-\(req.source.id.uuidString)"
+        case .confirmCloseProject(let req): return "close-project-\(req.project.id.uuidString)"
         }
     }
 }
@@ -94,15 +94,15 @@ struct SidebarView: View {
     /// on drop. Lets each row compute whether the drag origin is above or
     /// below it so the drop indicator can flip edges.
     @State private var draggingWorkspaceId: UUID?
+    /// Project rows drag on their own axis, and a row is a whole header
+    /// plus its children, so it keeps its own drag/target state — a
+    /// workspace drag must not light up a project header.
+    @State private var draggingProjectId: UUID?
+    @State private var targetedProjectId: UUID?
     /// True while a Finder folder drag is hovering the sidebar — gates the
     /// drop-zone outline so the user sees that releasing here opens a new
     /// workspace.
     @State private var isFolderDropTargeted = false
-    /// Source workspace ids whose worktree subtree the user collapsed.
-    /// Default behaviour is expanded — only ids the user explicitly closed
-    /// land here. Ephemeral by design: a kooky relaunch always shows every
-    /// worktree on first paint so nothing is hidden by stale state.
-    @State private var collapsedParents: Set<UUID> = []
     /// Active modal sheet (create worktree / confirm-delete worktree).
     /// Nil = no sheet. Set by row callbacks and an onChange observer that
     /// watches `store.pendingRemovalRequest` for ⌘⇧W routed via AppDelegate.
@@ -231,92 +231,7 @@ struct SidebarView: View {
             return true
         } isTargeted: { isFolderDropTargeted = $0 && !fileTreeIsMounted }
         .sheet(item: $sheet) { current in
-            switch current {
-            case .createSSHWorkspace:
-                CreateSSHWorkspaceSheet(
-                    create: { host in
-                        store.addWorkspace(sshRemoteHost: host)
-                        dismissCurrentSheet()
-                    },
-                    dismiss: dismissCurrentSheet
-                )
-            case .createWorktree(let source):
-                CreateWorktreeSheet(
-                    source: source,
-                    launchTemplates: AgentTemplate.visibleOrdered(model: KookySettingsModel.shared),
-                    defaultLaunchTemplate: AgentTemplate.defaultLaunchTemplate(model: KookySettingsModel.shared)
-                        ?? .terminal,
-                    // Include every workspace's diskPath, not just worktree
-                    // children — if the user opened a worktree directory as
-                    // a top-level workspace (Finder drop / ⌘O), adopting it
-                    // again would spawn a duplicate row pointing at the same
-                    // dir. Source workspaces (the repo root) also belong in
-                    // the exclusion set because the adopt picker already
-                    // drops them via `sourceRootKey`; including them here is
-                    // belt-and-suspenders against multi-source ⌘O scenarios.
-                    alreadyAdoptedPaths: Set(
-                        store.workspaces.map { $0.diskPath.standardizedFileURL.path }
-                    ),
-                    create: { request in
-                        await store.createWorktree(source: source, request: request)
-                    },
-                    dismiss: dismissCurrentSheet
-                )
-            case .confirmRemoveWorktree(let workspace):
-                ConfirmRemoveWorktreeSheet(
-                    workspace: workspace,
-                    confirm: { alsoDelete in
-                        if alsoDelete {
-                            if let message = await store.removeWorktreeDirectory(workspace) {
-                                return .failure(message)
-                            }
-                        }
-                        store.closeWorkspace(workspace)
-                        return .success
-                    },
-                    dismiss: dismissCurrentSheet
-                )
-            case .confirmCloseOthers(let request):
-                ConfirmBulkCloseSheet(
-                    statusLabel: String(localized: "CLOSE-OTHERS", bundle: .kookyResources),
-                    headlineText: String.localizedStringWithFormat(
-                        String(localized: "keeping %@", bundle: .kookyResources),
-                        request.keeping.title
-                    ),
-                    subtitleText: bulkSubtitle(
-                        closingCount: request.others.count,
-                        worktreeCount: request.worktreeOthers.count
-                    ),
-                    worktreesAmong: request.worktreeOthers,
-                    confirm: { alsoDelete in
-                        if let message = await store.performCloseOthers(request, alsoDelete: alsoDelete) {
-                            return .failure(message)
-                        }
-                        return .success
-                    },
-                    dismiss: dismissCurrentSheet
-                )
-            case .confirmCloseSource(let request):
-                ConfirmBulkCloseSheet(
-                    statusLabel: String(localized: "CLOSE-WORKSPACE", bundle: .kookyResources),
-                    headlineText: String.localizedStringWithFormat(
-                        String(localized: "closing %@", bundle: .kookyResources),
-                        request.source.title
-                    ),
-                    subtitleText: bulkSubtitle(
-                        closingCount: request.worktrees.count + 1,
-                        worktreeCount: request.worktrees.count
-                    ),
-                    worktreesAmong: request.worktrees,
-                    confirm: { alsoDelete in
-                        if let message = await store.performCloseSource(request, alsoDelete: alsoDelete) {
-                            return .failure(message)
-                        }
-                        return .success
-                    },
-                    dismiss: dismissCurrentSheet
-                )
-            }
+            sheetContent(for: current)
         }
         // ⌘⇧W routes through AppDelegate → store.requestCloseWorkspace,
         // which parks worktree workspaces in `pendingRemovalRequest` for
@@ -331,8 +246,8 @@ struct SidebarView: View {
         // sidebar was hidden, `onAppear` below catches the already-parked
         // request after AppDelegate makes the sidebar visible.
         .onChange(of: store.pendingCreateWorktreeRequest?.id) { _, _ in
-            if let workspace = store.pendingCreateWorktreeRequest {
-                sheet = .createWorktree(workspace)
+            if let project = store.pendingCreateWorktreeRequest {
+                sheet = .createWorktree(project)
             }
         }
         // SSH-workspace create request (File menu / command palette). Same
@@ -346,8 +261,8 @@ struct SidebarView: View {
             dismissCurrentSheet()
         }
         .onAppear {
-            if let workspace = store.pendingCreateWorktreeRequest {
-                sheet = .createWorktree(workspace)
+            if let project = store.pendingCreateWorktreeRequest {
+                sheet = .createWorktree(project)
             }
             if store.pendingCreateSSHWorkspaceRequest {
                 sheet = .createSSHWorkspace
@@ -361,12 +276,12 @@ struct SidebarView: View {
                 sheet = .confirmCloseOthers(request)
             }
         }
-        // Close-source-with-worktrees request — keyed off source.id; the
-        // store parks it when ⌘⇧W / × on a top-level workspace would
-        // strand its worktrees.
-        .onChange(of: store.pendingCloseSourceRequest?.source.id) { _, _ in
-            if let request = store.pendingCloseSourceRequest {
-                sheet = .confirmCloseSource(request)
+        // Remove-project-holding-worktrees request — keyed off project.id;
+        // the store parks it when removing the project would strand (or, on
+        // "also delete", delete) its worktree checkouts on disk.
+        .onChange(of: store.pendingCloseProjectRequest?.project.id) { _, _ in
+            if let request = store.pendingCloseProjectRequest {
+                sheet = .confirmCloseProject(request)
             }
         }
     }
@@ -384,8 +299,8 @@ struct SidebarView: View {
             store.pendingRemovalRequest = nil
         case .confirmCloseOthers:
             store.pendingCloseOthersRequest = nil
-        case .confirmCloseSource:
-            store.pendingCloseSourceRequest = nil
+        case .confirmCloseProject:
+            store.pendingCloseProjectRequest = nil
         case nil:
             return
         }
@@ -396,7 +311,13 @@ struct SidebarView: View {
     /// pluralisation into one place so the count never reads as
     /// "1 workspaces" or "1 worktrees".
     private func bulkSubtitle(closingCount: Int, worktreeCount: Int) -> String {
-        String.localizedStringWithFormat(
+        guard worktreeCount > 0 else {
+            return String.localizedStringWithFormat(
+                String(localized: "%d workspace(s) will close", bundle: .kookyResources),
+                closingCount
+            )
+        }
+        return String.localizedStringWithFormat(
             String(
                 localized: "%d workspace(s) will close · %d worktree(s)",
                 bundle: .kookyResources
@@ -406,14 +327,13 @@ struct SidebarView: View {
         )
     }
 
-    /// True when `workspace` is a top-level source workspace *and* its
-    /// cwd is inside a git repo. Worktree rows are excluded (worktree
-    /// nesting isn't supported); non-git workspaces (e.g. `~/Downloads`
-    /// opened as a workspace) hide the menu item so users never see an
-    /// option that can only error.
-    private func canCreateWorktree(from workspace: Workspace) -> Bool {
-        guard workspace.worktreeParentId == nil else { return false }
-        return GitWatcher.findGitDir(near: workspace.workingDirectory) != nil
+    /// True when the project's folder is inside a git repo. Worktrees are a
+    /// project capability, so the gate is the project root — a plain folder
+    /// (e.g. `~/Downloads`) hides the menu item instead of offering an action
+    /// that can only error.
+    private func canCreateWorktree(in project: Project) -> Bool {
+        // The SSH group has no local folder, so there is no repo to branch.
+        !project.isSSHGroup && GitWatcher.findGitDir(near: project.rootPath) != nil
     }
 
     @ViewBuilder
@@ -495,46 +415,125 @@ struct SidebarView: View {
         }
     }
 
+    /// The sheet switch lives in its own `@ViewBuilder` so the body's
+    /// modifier chain type-checks — inlined it exceeds the compiler's budget.
+    @ViewBuilder
+    private func sheetContent(for current: SidebarSheet) -> some View {
+        switch current {
+        case .createSSHWorkspace:
+            CreateSSHWorkspaceSheet(
+                create: { host in
+                    store.addWorkspace(sshRemoteHost: host)
+                    dismissCurrentSheet()
+                },
+                dismiss: dismissCurrentSheet
+            )
+        case .createWorktree(let project):
+            CreateWorktreeSheet(
+                project: project,
+                launchTemplates: AgentTemplate.visibleOrdered(model: KookySettingsModel.shared),
+                defaultLaunchTemplate: AgentTemplate.defaultLaunchTemplate(model: KookySettingsModel.shared)
+                    ?? .terminal,
+                // Include every workspace's diskPath, not just worktree
+                // children — if the user opened a worktree directory as
+                // a top-level workspace (Finder drop / ⌘O), adopting it
+                // again would spawn a duplicate row pointing at the same
+                // dir. Source workspaces (the repo root) also belong in
+                // the exclusion set because the adopt picker already
+                // drops them via `sourceRootKey`; including them here is
+                // belt-and-suspenders against multi-source ⌘O scenarios.
+                alreadyAdoptedPaths: Set(
+                    store.workspaces.map { $0.diskPath.standardizedFileURL.path }
+                ),
+                create: { request in
+                    await store.createWorktree(project: project, request: request)
+                },
+                dismiss: dismissCurrentSheet
+            )
+        case .confirmRemoveWorktree(let workspace):
+            ConfirmRemoveWorktreeSheet(
+                workspace: workspace,
+                confirm: { alsoDelete in
+                    if alsoDelete {
+                        if let message = await store.removeWorktreeDirectory(workspace) {
+                            return .failure(message)
+                        }
+                    }
+                    store.closeWorkspace(workspace)
+                    return .success
+                },
+                dismiss: dismissCurrentSheet
+            )
+        case .confirmCloseOthers(let request):
+            ConfirmBulkCloseSheet(
+                statusLabel: String(localized: "CLOSE-OTHERS", bundle: .kookyResources),
+                headlineText: String.localizedStringWithFormat(
+                    String(localized: "keeping %@", bundle: .kookyResources),
+                    request.keeping.title
+                ),
+                subtitleText: bulkSubtitle(
+                    closingCount: request.others.count,
+                    worktreeCount: request.worktreeOthers.count
+                ),
+                worktreesAmong: request.worktreeOthers,
+                confirm: { alsoDelete in
+                    if let message = await store.performCloseOthers(request, alsoDelete: alsoDelete) {
+                        return .failure(message)
+                    }
+                    return .success
+                },
+                dismiss: dismissCurrentSheet
+            )
+        case .confirmCloseProject(let request):
+            ConfirmBulkCloseSheet(
+                statusLabel: String(localized: "REMOVE-PROJECT", bundle: .kookyResources),
+                headlineText: String.localizedStringWithFormat(
+                    String(localized: "removing %@", bundle: .kookyResources),
+                    request.project.title
+                ),
+                subtitleText: bulkSubtitle(
+                    closingCount: request.workspaces.count,
+                    worktreeCount: request.worktrees.count
+                ),
+                worktreesAmong: request.worktrees,
+                confirm: { alsoDelete in
+                    if let message = await store.performCloseProject(request, alsoDelete: alsoDelete) {
+                        return .failure(message)
+                    }
+                    return .success
+                },
+                dismiss: dismissCurrentSheet
+            )
+        }
+    }
+
     private func list(isCompact: Bool, proxy: ScrollViewProxy) -> some View {
         ScrollView(showsIndicators: false) {
             LazyVStack(spacing: 3) {
                 if isCompact {
-                    // 52pt-wide sidebar can't fit a disclosure triangle next
-                    // to a 28pt icon — fall back to a flat list. The order
-                    // is stable: store.workspaces already places worktrees
-                    // after their source by virtue of being appended at
-                    // creation time.
-                    ForEach(Array(store.workspaces.enumerated()), id: \.element.id) { index, workspace in
-                        // canCreateWorktree walks the fs (`findGitDir`) —
-                        // hoist once per workspace so the two row callbacks
-                        // don't each stat the same ancestor chain.
-                        let canCreate = canCreateWorktree(from: workspace)
-                        let goToSource: (() -> Void)? = workspace.worktreeParentId
-                            .flatMap { id in store.workspaces.first { $0.id == id } }
-                            .map { parent in { store.activateWorkspace(parent) } }
-                        DraggableWorkspaceRow(
-                            workspace: workspace,
-                            store: store,
-                            myIndex: index,
-                            isCompact: isCompact,
-                            draggingId: $draggingWorkspaceId,
-                            onCreateWorktree: canCreate ? { presentCreateWorktree(workspace) } : nil,
-                            onGoToSource: goToSource
-                        )
+                    // A 52pt rail can't host a project header above its rows,
+                    // so it falls back to the flat workspace list — with a
+                    // hairline between projects, the only way the rail can say
+                    // where one folder's rows end and the next begins.
+                    ForEach(Array(store.projects.enumerated()), id: \.element.id) { index, project in
+                        if index > 0 {
+                            Rectangle()
+                                .fill(Theme.chromeSeparator)
+                                .frame(height: 1)
+                                .padding(.horizontal, 10)
+                        }
+                        ForEach(store.workspaces(in: project)) { workspace in
+                            DraggableWorkspaceRow(
+                                workspace: workspace,
+                                store: store,
+                                isCompact: true,
+                                draggingId: $draggingWorkspaceId
+                            )
+                        }
                     }
                 } else {
-                    // A workspace is "top-level" either because it has no
-                    // parent, or because its parent is gone — defensive
-                    // fallback so a bug that strands a worktree (parent
-                    // closed while child kept) still surfaces the row in
-                    // the sidebar instead of vanishing it entirely.
-                    let parentIds = Set(store.workspaces.map(\.id))
-                    let topLevel = store.workspaces.enumerated().filter { _, ws in
-                        guard let parentId = ws.worktreeParentId else { return true }
-                        return !parentIds.contains(parentId)
-                    }
-                    ForEach(Array(topLevel), id: \.element.id) { index, workspace in
-                        workspaceTree(parent: workspace, parentIndex: index)
+                    ForEach(store.projects) { project in
+                        draggableProjectTree(project: project)
                     }
                 }
             }
@@ -562,48 +561,75 @@ struct SidebarView: View {
         }
     }
 
+    /// Project rows reorder by drag, same gesture as workspace rows: the
+    /// dragged project takes the destination's slot. There is no parent to
+    /// change — the order the user builds here is the order `snapshot()`
+    /// writes, so it survives relaunch.
     @ViewBuilder
-    private func workspaceTree(parent: Workspace, parentIndex: Int) -> some View {
-        let worktrees = store.workspaces.filter { $0.worktreeParentId == parent.id }
-        let hasWorktrees = !worktrees.isEmpty
-        let isCollapsed = collapsedParents.contains(parent.id)
+    private func draggableProjectTree(project: Project) -> some View {
+        let order = store.projects
+        let myIndex = order.firstIndex { $0.id == project.id } ?? 0
+        let originIndex = draggingProjectId.flatMap { id in order.firstIndex { $0.id == id } }
+        let dragsDownward = (originIndex ?? Int.max) < myIndex
+        let isSelfDrag = draggingProjectId == project.id
 
-        // canCreateWorktree walks the fs (`findGitDir`) — hoist once so
-        // the two callbacks don't each stat the same ancestor chain.
-        let canCreate = canCreateWorktree(from: parent)
-        DraggableWorkspaceRow(
-            workspace: parent,
-            store: store,
-            myIndex: parentIndex,
-            isCompact: false,
-            draggingId: $draggingWorkspaceId,
-            disclosure: hasWorktrees
-                ? SidebarWorkspaceRow.WorktreeDisclosure(
-                    isCollapsed: isCollapsed,
-                    toggle: { toggleCollapsed(parent.id) }
-                )
-                : nil,
-            onCreateWorktree: canCreate ? { presentCreateWorktree(parent) } : nil
+        projectTree(project: project)
+            .dropIndicator(active: targetedProjectId == project.id && !isSelfDrag,
+                           on: dragsDownward ? .bottom : .top)
+            .onDrag {
+                draggingProjectId = project.id
+                return NSItemProvider(object: "project:\(project.id.uuidString)" as NSString)
+            }
+            .dropDestination(for: String.self) { dropped, _ in
+                defer { draggingProjectId = nil }
+                guard let raw = dropped.first,
+                      raw.hasPrefix("project:"),
+                      let id = UUID(uuidString: String(raw.dropFirst("project:".count))),
+                      let dragged = store.projects.first(where: { $0.id == id })
+                else { return false }
+                withAnimation(.easeInOut(duration: 0.18)) {
+                    store.moveProject(dragged, to: project)
+                }
+                return true
+            } isTargeted: { targetedProjectId = $0 ? project.id : nil }
+    }
+
+    /// One project and the workspaces living in its folder. Two levels by
+    /// construction: a worktree is not a nested workspace but one more
+    /// workspace whose own root is the worktree checkout, so nothing here
+    /// recurses. An empty project still shows its header — a folder added
+    /// before its first tab is a legitimate state, not a row to hide.
+    @ViewBuilder
+    private func projectTree(project: Project) -> some View {
+        let members = store.workspaces(in: project)
+        let isCollapsed = store.collapsedProjectIds.contains(project.id)
+        SidebarProjectRow(
+            project: project,
+            isCollapsed: isCollapsed,
+            canCreateWorktree: canCreateWorktree(in: project),
+            onToggleCollapsed: { toggleCollapsed(project.id) },
+            // A new row in the SSH group is a new remote terminal, not a local
+            // one — the group can only hold SSH workspaces.
+            onNewWorkspace: {
+                if project.isSSHGroup {
+                    sheet = .createSSHWorkspace
+                } else {
+                    store.addWorkspace(in: project)
+                }
+            },
+            onCreateWorktree: { presentCreateWorktree(project) },
+            onRemove: { store.requestRemoveProject(project) }
         )
-
-        if hasWorktrees && !isCollapsed {
-            ForEach(worktrees) { worktree in
-                SidebarWorkspaceRow(
-                    workspace: worktree,
-                    isActive: worktree.id == store.activeWorkspaceId,
+        if !isCollapsed {
+            // Children sit one rhythm step inside their project header so the
+            // hierarchy reads without decoding a badge.
+            ForEach(members) { workspace in
+                DraggableWorkspaceRow(
+                    workspace: workspace,
+                    store: store,
                     isCompact: false,
-                    canCloseOthers: store.workspaces.count > 1,
-                    onActivate: { store.activateWorkspace(worktree) },
-                    onClose: { store.requestCloseWorkspace(worktree) },
-                    onCloseOthers: { store.closeOtherWorkspaces(keeping: worktree) },
-                    onDuplicate: { store.duplicateWorkspace(worktree) },
-                    onRename: { store.renameWorkspace(worktree, to: $0) },
-                    onSetTag: { store.setTag($0, for: worktree) },
-                    onGoToSource: { store.activateWorkspace(parent) }
+                    draggingId: $draggingWorkspaceId
                 )
-                // Source-list hierarchy should be visible without decoding a
-                // badge: worktree children sit one rhythm step inside their
-                // source workspace while keeping the row itself lightweight.
                 .padding(.leading, Theme.space3)
             }
         }
@@ -611,20 +637,16 @@ struct SidebarView: View {
 
     private func toggleCollapsed(_ id: UUID) {
         withAnimation(.easeOut(duration: 0.12)) {
-            if collapsedParents.contains(id) {
-                collapsedParents.remove(id)
-            } else {
-                collapsedParents.insert(id)
-            }
+            store.toggleProjectCollapsed(id)
         }
     }
 
     /// Bring the active workspace's row into the view hierarchy so its rename
     /// popover can anchor, then hand off to the row via `renameRequested`. The
-    /// row may be unmounted — nested under a collapsed worktree parent, or
-    /// scrolled out of the LazyVStack's realized window. Without this the ⌘⇧R
-    /// flag would sit unconsumed and then fire stale when the user later
-    /// scrolled to / expanded that row.
+    /// row may be unmounted — inside a collapsed project, or scrolled out of
+    /// the LazyVStack's realized window. Without this the ⌘⇧R flag would sit
+    /// unconsumed and then fire stale when the user later scrolled to /
+    /// expanded that row.
     private func revealWorkspaceForRename(using proxy: ScrollViewProxy) {
         guard let workspace = store.pendingRenameWorkspace else { return }
         store.pendingRenameWorkspace = nil
@@ -632,51 +654,51 @@ struct SidebarView: View {
         reveal(workspace, anchor: .center, using: proxy)
     }
 
-    /// Expand a collapsed source workspace hiding the row, then scroll to it.
-    /// A nil anchor scrolls the minimum needed, so a row that's already fully
-    /// visible doesn't move the list.
+    /// Unfold the project hiding `workspace`, then scroll to its row. A nil
+    /// anchor scrolls the minimum needed, so a row that's already visible
+    /// doesn't move the list.
     private func reveal(_ workspace: Workspace, anchor: UnitPoint? = nil, using proxy: ScrollViewProxy) {
-        if let parentId = workspace.worktreeParentId, collapsedParents.contains(parentId) {
-            collapsedParents.remove(parentId)
+        if store.collapsedProjectIds.contains(workspace.projectId) {
+            withAnimation(.easeOut(duration: 0.12)) {
+                store.setProjectCollapsed(workspace.projectId, false)
+            }
         }
-        // Defer so a just-expanded subtree is laid out before scrolling to a
+        // Defer so a just-expanded section is laid out before scrolling to a
         // row that may have only now been inserted.
         DispatchQueue.main.async {
             proxy.scrollTo(workspace.id, anchor: anchor)
         }
     }
 
-    private func presentCreateWorktree(_ workspace: Workspace) {
+    private func presentCreateWorktree(_ project: Project) {
         // Single channel: parking on the store triggers the `.onChange`
-        // observer that sets `sheet`. Direct row clicks and command-palette
-        // / AppDelegate routes all go through here, so this stays the one
+        // observer that sets `sheet`. Row clicks and the command-palette /
+        // AppDelegate routes all go through here, so this stays the one
         // mechanism that opens the create sheet.
-        store.pendingCreateWorktreeRequest = workspace
+        store.pendingCreateWorktreeRequest = project
     }
 }
 
 /// Drag source + drop target with a direction-aware edge indicator —
-/// `top` when origin is below (dragging up), `bottom` when origin is above
-/// (dragging down), so the line always shows where the dropped row will land.
+/// `top` when the origin is below (dragging up), `bottom` when the origin is
+/// above (dragging down), so the line always shows where the dropped row will
+/// land. Reordering is project-local: a project owns its folder, so dropping
+/// onto a row of another project is a no-op (`WorkspaceStore.moveWorkspace`
+/// refuses it).
 private struct DraggableWorkspaceRow: View {
     @Bindable var workspace: Workspace
     @Bindable var store: WorkspaceStore
-    let myIndex: Int
     let isCompact: Bool
     @Binding var draggingId: UUID?
-    /// Non-nil only for source workspaces that own at least one worktree.
-    /// Worktree rows themselves render via `SidebarWorkspaceRow` directly,
-    /// without this wrapper, so they don't pick up drag/drop handlers.
-    var disclosure: SidebarWorkspaceRow.WorktreeDisclosure? = nil
-    var onCreateWorktree: (() -> Void)? = nil
-    var onGoToSource: (() -> Void)? = nil
 
     @State private var isTargeted = false
 
     var body: some View {
+        let siblings = store.workspaces(projectId: workspace.projectId)
+        let myIndex = siblings.firstIndex { $0.id == workspace.id } ?? 0
         let originIndex: Int? = {
             guard let id = draggingId, id != workspace.id else { return nil }
-            return store.workspaces.firstIndex(where: { $0.id == id })
+            return siblings.firstIndex { $0.id == id }
         }()
         let dragsDownward = (originIndex ?? Int.max) < myIndex
         let edge: Alignment = dragsDownward ? .bottom : .top
@@ -686,29 +708,28 @@ private struct DraggableWorkspaceRow: View {
             workspace: workspace,
             isActive: workspace.id == store.activeWorkspaceId,
             isCompact: isCompact,
-            canCloseOthers: store.workspaces.count > 1,
+            canCloseOthers: siblings.count > 1,
             onActivate: { store.activateWorkspace(workspace) },
             onClose: { store.requestCloseWorkspace(workspace) },
             onCloseOthers: { store.closeOtherWorkspaces(keeping: workspace) },
             onDuplicate: { store.duplicateWorkspace(workspace) },
             onRename: { store.renameWorkspace(workspace, to: $0) },
-            onSetTag: { store.setTag($0, for: workspace) },
-            disclosure: disclosure,
-            onCreateWorktree: onCreateWorktree,
-            onGoToSource: onGoToSource
+            onSetTag: { store.setTag($0, for: workspace) }
         )
         .dropIndicator(active: isTargeted && !isSelfDrag, on: edge)
         .onDrag {
             draggingId = workspace.id
-            return NSItemProvider(object: workspace.id.uuidString as NSString)
+            return NSItemProvider(object: "workspace:\(workspace.id.uuidString)" as NSString)
         }
         .dropDestination(for: String.self) { dropped, _ in
             defer { draggingId = nil }
-            guard let id = dropped.first.flatMap(UUID.init),
-                  let from = store.workspaces.firstIndex(where: { $0.id == id })
+            guard let raw = dropped.first,
+                  raw.hasPrefix("workspace:"),
+                  let id = UUID(uuidString: String(raw.dropFirst("workspace:".count))),
+                  let dragged = store.workspaces.first(where: { $0.id == id })
             else { return false }
             withAnimation(.easeInOut(duration: 0.18)) {
-                store.moveWorkspace(from: from, to: myIndex)
+                store.moveWorkspace(dragged, to: workspace)
             }
             return true
         } isTargeted: { isTargeted = $0 }

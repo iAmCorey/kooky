@@ -73,4 +73,13 @@ final class GitWatcherTests: XCTestCase {
 
         XCTAssertNil(GitWatcher.findGitDir(near: worktreeRoot))
     }
+
+    func testWorktreeRootReturnsNilForNonFileURL() {
+        // The SSH group's sentinel is kooky-ssh://remote. Walking it never
+        // reaches "/", so this must return without spinning.
+        let sentinel = URL(string: "kooky-ssh://remote")!
+        XCTAssertFalse(sentinel.isFileURL)
+        XCTAssertNil(GitWatcher.worktreeRoot(near: sentinel))
+        XCTAssertNil(GitWatcher.findGitDir(near: sentinel))
+    }
 }

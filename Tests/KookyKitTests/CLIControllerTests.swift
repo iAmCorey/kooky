@@ -776,7 +776,7 @@ final class CLIControllerTests: XCTestCase {
         // refusal must arrive instead of a fake "closed".
         let store = makeStore()
         let workspace = store.workspaces[0]
-        workspace.worktreeParentId = UUID()
+        workspace.worktreePath = workspace.workingDirectory
         let only = workspace.root.allPanes[0].tabs[0]
         let controller = makeController(stores: [store])
         let response = await respond(controller, KookyCLIRequest(verb: .close, tab: only.id.uuidString))

@@ -1,7 +1,7 @@
 import AppKit
 import SwiftUI
 
-/// Brutalist sheet for creating a git worktree from a source workspace.
+/// Brutalist sheet for creating a git worktree in a project's repository.
 /// Same visual language as `UpdatePromptView` / Settings — `Theme.chrome*`
 /// tokens, mono kebab-case labels, sharp corners, 1pt hairlines, bracket
 /// buttons. Form-only: the parent owns the actual git + workspace
@@ -33,7 +33,7 @@ struct CreateWorktreeSheet: View {
         let template: AgentTemplate
     }
 
-    let source: Workspace
+    let project: Project
     let launchTemplates: [AgentTemplate]
     let defaultLaunchTemplate: AgentTemplate
     /// Standardized disk paths of worktrees already on the sidebar —
@@ -79,9 +79,8 @@ struct CreateWorktreeSheet: View {
         let info: WorktreeManager.Info
         let key: String
     }
-    /// Stable git root for the source workspace. `Workspace.workingDirectory`
-    /// follows the active shell cwd, so it may be a nested folder by the time
-    /// the user opens this sheet.
+    /// Stable git root for the project. The project's root is immutable, but
+    /// it may be a subfolder of the repo, so the real root is still resolved.
     @State private var sourceRoot: URL?
     /// User override for the auto-computed `<repo>-<branch>` sibling path.
     /// Empty = use the computed default at submit time. Lives only in
@@ -141,7 +140,7 @@ struct CreateWorktreeSheet: View {
             // sheet starts on `.newBranch` mode so most users never
             // wait on this.
             guard !branchesLoaded else { return }
-            let cwd = source.workingDirectory
+            let cwd = project.rootPath
             // `repoRoot` is the gate; `list` and `localBranches` are
             // independent once it resolves, so kick them off in parallel
             // child tasks. Cuts sheet-open time from ~150-450ms to the
@@ -172,7 +171,7 @@ struct CreateWorktreeSheet: View {
             // Precompute adopt rows: standardize each disk path once, drop
             // the source root and anything already on sidebar. Cached so
             // SwiftUI body re-evals (on every keystroke) don't re-walk.
-            let sourceRootKey = (loaded.root ?? source.workingDirectory).standardizedFileURL.path
+            let sourceRootKey = (loaded.root ?? project.rootPath).standardizedFileURL.path
             adoptableRows = loaded.infos.compactMap { info in
                 let key = info.path.standardizedFileURL.path
                 if key == sourceRootKey || alreadyAdoptedPaths.contains(key) { return nil }
@@ -201,7 +200,7 @@ struct CreateWorktreeSheet: View {
     }
 
     private var headline: some View {
-        Text(source.title)
+        Text(project.title)
             .font(Theme.display(20, weight: .medium))
             .foregroundStyle(Theme.chromeForeground)
     }
@@ -580,7 +579,7 @@ struct CreateWorktreeSheet: View {
     /// Falls back to `<repo-name>-` when no branch has been typed yet so
     /// the placeholder still hints at the path's shape.
     private var defaultPath: String {
-        let root = sourceRoot ?? source.workingDirectory
+        let root = sourceRoot ?? project.rootPath
         let parentDir = root.deletingLastPathComponent()
         let base = root.lastPathComponent
         let name = WorktreeManager.defaultDirectoryName(sourceName: base, branch: currentBranchName)
@@ -594,7 +593,7 @@ struct CreateWorktreeSheet: View {
     }
 
     private var sourcePathForDisplay: URL {
-        sourceRoot ?? source.workingDirectory
+        sourceRoot ?? project.rootPath
     }
 
     private var submitButtonLabel: String {
