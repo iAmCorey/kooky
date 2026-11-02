@@ -230,7 +230,12 @@ struct SidebarView: View {
             }
             return true
         } isTargeted: { isFolderDropTargeted = $0 && !fileTreeIsMounted }
-        .sheet(item: $sheet) { current in
+        // `onDismiss` is the ONLY hook a system-initiated dismissal (Esc /
+        // ⌘.) runs: it nils `sheet` behind our back, so the parked request
+        // must be cleared here too — otherwise the flag stays true, the next
+        // request sets an already-true value, and `onChange` never fires
+        // again (the sheet then never reappears).
+        .sheet(item: $sheet, onDismiss: clearParkedSheetRequest) { current in
             switch current {
             case .createSSHWorkspace:
                 CreateSSHWorkspaceSheet(
@@ -375,21 +380,22 @@ struct SidebarView: View {
     /// the single dismissal path shared by every sheet's cancel button and
     /// the ⌘W `sheetDismissRequest` signal, so the two can't drift.
     private func dismissCurrentSheet() {
-        switch sheet {
-        case .createSSHWorkspace:
-            store.pendingCreateSSHWorkspaceRequest = false
-        case .createWorktree:
-            store.pendingCreateWorktreeRequest = nil
-        case .confirmRemoveWorktree:
-            store.pendingRemovalRequest = nil
-        case .confirmCloseOthers:
-            store.pendingCloseOthersRequest = nil
-        case .confirmCloseSource:
-            store.pendingCloseSourceRequest = nil
-        case nil:
-            return
-        }
+        guard sheet != nil else { return }
+        clearParkedSheetRequest()
         sheet = nil
+    }
+
+    /// Drops every parked sheet request. Unconditional because the
+    /// `.sheet(onDismiss:)` caller runs AFTER SwiftUI has already nil'd
+    /// `sheet` — the pre-nil value is gone, so the request that opened it
+    /// can't be looked up by case. Safe: these flags only ever mean "open
+    /// this sheet", and at most one sheet is up.
+    private func clearParkedSheetRequest() {
+        store.pendingCreateSSHWorkspaceRequest = false
+        store.pendingCreateWorktreeRequest = nil
+        store.pendingRemovalRequest = nil
+        store.pendingCloseOthersRequest = nil
+        store.pendingCloseSourceRequest = nil
     }
 
     /// Shared subtitle string between the two bulk-close flows — folds

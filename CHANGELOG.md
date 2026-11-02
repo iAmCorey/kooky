@@ -2,6 +2,10 @@
 
 Notable changes per release. Tagged commits use `vX.Y.Z` shortform.
 
+## Unreleased
+
+- Fixed: dismissing a sheet with Esc no longer silences every later sheet. The dismissed sheet left its create request parked in the store, so File › New SSH Workspace (same for new worktree and the confirm sheets) stopped opening anything for the rest of the session.
+
 ## v0.51.12 — 2026-10-12
 
 - New: keyboard shortcuts that match Ghostty, Warp and cmux. ⌥⌘ + arrow moves focus to the split in that direction, ⌃⌘ + arrow moves the nearest divider, and ⌘Home / ⌘End / ⌘Page Up / ⌘Page Down scroll the terminal to the top, to the bottom, or by a page — following your Ghostty config if you've rebound them.
