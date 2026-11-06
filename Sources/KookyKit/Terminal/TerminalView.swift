@@ -42,6 +42,10 @@ final class TerminalTabHostView: NSView {
         let tabIds = Set(tabs.map(\.id))
         for session in tabs where session.id == activeTabId || session.spawnsInBackground {
             let view = session.engine.view
+            // A replacement host can adopt the terminal before SwiftUI finishes
+            // updating the old split subtree. Once this host has lost a mounted
+            // view, its stale model must not pull that view out of its new owner.
+            if mountedViews[session.id] != nil, view.superview !== self { continue }
             let isActive = session.id == activeTabId
             // Set mount-time gates before addSubview triggers
             // viewDidMoveToWindow on an already-windowed host.

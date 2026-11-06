@@ -243,11 +243,66 @@ final class PaneTreeHostTests: XCTestCase {
         source.layout()
         XCTAssertEqual(session.engine.view.frame, destination.bounds)
 
+        source.update(tabs: [session], activeTabId: session.id, grabsFocusOnMount: false)
+        XCTAssertTrue(
+            session.engine.view.superview === destination,
+            "a delayed update from the old split must not reclaim the adopted terminal"
+        )
+        XCTAssertEqual(session.engine.view.frame, destination.bounds)
+        XCTAssertTrue(session.engine.grabsFocusOnMount)
+
         source.update(tabs: [], activeTabId: nil, grabsFocusOnMount: false)
         XCTAssertTrue(
             session.engine.view.superview === destination,
             "the old pane must not detach a terminal after the new pane adopted it"
         )
+
+        source.update(tabs: [session], activeTabId: session.id, grabsFocusOnMount: false)
+        XCTAssertTrue(session.engine.view.superview === source, "an explicit transfer back must still work")
+        XCTAssertEqual(session.engine.view.frame, source.bounds)
+    }
+
+    func testClosingLastTabInSplitKeepsSurvivingTerminalMounted() throws {
+        for orientation in [SplitOrientation.horizontal, .vertical] {
+            for closeOriginal in [false, true] {
+                let store = makeStore()
+                defer { store.terminate() }
+                let workspace = try XCTUnwrap(store.active)
+                let original = try XCTUnwrap(workspace.activePane)
+                let added = try XCTUnwrap(store.splitPane(original, orientation: orientation, in: workspace))
+                let surviving = closeOriginal ? added : original
+                let session = try XCTUnwrap(surviving.activeTab)
+                let engine = try XCTUnwrap(session.engine as? TestEngine)
+                let closing = try XCTUnwrap((closeOriginal ? original : added).activeTab)
+                let host = makeHost(store)
+                let window = NSWindow(
+                    contentRect: NSRect(x: 0, y: 0, width: 800, height: 600),
+                    styleMask: [.borderless],
+                    backing: .buffered,
+                    defer: false
+                )
+                window.isReleasedWhenClosed = false
+                window.contentView = host
+                defer { window.close() }
+
+                sync(host)
+                RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.05))
+                XCTAssertTrue(session.engine.view.isDescendant(of: host))
+
+                store.closeTab(closing, in: workspace)
+                sync(host)
+                RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.05))
+                host.layoutSubtreeIfNeeded()
+
+                let view = session.engine.view
+                XCTAssertTrue(view.isDescendant(of: host), "closing a split must keep the surviving terminal mounted")
+                XCTAssertTrue(view.window === window)
+                XCTAssertFalse(view.isHiddenOrHasHiddenAncestor)
+                XCTAssertGreaterThan(view.bounds.width, 0)
+                XCTAssertGreaterThan(view.bounds.height, 0)
+                XCTAssertEqual(engine.terminateCount, 0, "closing the sibling tab must preserve the surviving engine")
+            }
+        }
     }
 
 }
