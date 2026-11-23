@@ -352,6 +352,9 @@ struct KookyRenameField: View {
     let placeholder: String
     @Binding var text: String
     let onSubmit: () -> Void
+    @FocusState private var isFocused: Bool
+    @State private var previousWindow: NSWindow?
+    @State private var previousResponder: NSResponder?
 
     var body: some View {
         TextField(
@@ -368,7 +371,30 @@ struct KookyRenameField: View {
             .padding(.vertical, Theme.space2 + 2)
             .frame(minWidth: 220)
             .background(Theme.chromeBackground)
+            .focused($isFocused)
             .onSubmit(onSubmit)
+            .onAppear {
+                let window = NSApp.mainWindow ?? NSApp.keyWindow
+                previousWindow = window
+                previousResponder = window?.firstResponder
+                requestFocus()
+            }
+            .onDisappear {
+                guard let previousWindow, let previousResponder else { return }
+                DispatchQueue.main.async {
+                    previousWindow.makeFirstResponder(previousResponder)
+                }
+            }
+    }
+
+    private func requestFocus() {
+        isFocused = true
+        DispatchQueue.main.async {
+            isFocused = true
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+            isFocused = true
+        }
     }
 }
 
