@@ -180,23 +180,26 @@ final class PaneTreeHostTests: XCTestCase {
     func testTerminalTabHostRetainsVisitedViews() throws {
         let store = makeStore()
         let workspace = try XCTUnwrap(store.active)
-        let first = try XCTUnwrap(workspace.activeSession)
+        let pane = try XCTUnwrap(workspace.activePane)
+        let first = try XCTUnwrap(pane.activeTab)
         let second = store.addTab(in: workspace)
         let host = TerminalTabHostView()
         host.frame = NSRect(x: 0, y: 0, width: 800, height: 600)
 
-        host.update(tabs: workspace.activePane?.tabs ?? [], activeTabId: second.id, grabsFocusOnMount: true)
+        host.update(pane: pane, grabsFocusOnMount: true)
         XCTAssertTrue(second.engine.view.superview === host)
         XCTAssertNil(first.engine.view.superview, "unvisited tabs stay lazy")
 
-        host.update(tabs: workspace.activePane?.tabs ?? [], activeTabId: first.id, grabsFocusOnMount: true)
+        store.activateTab(first, in: workspace)
+        host.update(pane: pane, grabsFocusOnMount: true)
         XCTAssertTrue(first.engine.view.superview === host)
-        XCTAssertTrue(second.engine.view.superview === host)
+        XCTAssertFalse(first.engine.view.isHidden)
+        XCTAssertTrue(second.engine.view.superview === host, "a visited tab stays mounted when it is switched away from")
         XCTAssertTrue(second.engine.view.isHidden)
-        let firstView = first.engine.view
 
-        host.update(tabs: workspace.activePane?.tabs ?? [], activeTabId: second.id, grabsFocusOnMount: true)
-        XCTAssertTrue(first.engine.view === firstView, "switching back must reuse the mounted NSView")
+        store.activateTab(second, in: workspace)
+        host.update(pane: pane, grabsFocusOnMount: true)
+        XCTAssertTrue(first.engine.view.superview === host)
         XCTAssertTrue(first.engine.view.isHidden)
         XCTAssertFalse(second.engine.view.isHidden)
     }
@@ -204,7 +207,8 @@ final class PaneTreeHostTests: XCTestCase {
     func testTerminalTabHostMountsBackgroundSpawningTabs() throws {
         let store = makeStore()
         let workspace = try XCTUnwrap(store.active)
-        let visible = try XCTUnwrap(workspace.activeSession)
+        let pane = try XCTUnwrap(workspace.activePane)
+        let visible = try XCTUnwrap(pane.activeTab)
         let background = store.addTab(
             in: workspace,
             activate: false,
@@ -213,11 +217,7 @@ final class PaneTreeHostTests: XCTestCase {
         let host = TerminalTabHostView()
         host.frame = NSRect(x: 0, y: 0, width: 800, height: 600)
 
-        host.update(
-            tabs: workspace.activePane?.tabs ?? [],
-            activeTabId: visible.id,
-            grabsFocusOnMount: true
-        )
+        host.update(pane: pane, grabsFocusOnMount: true)
 
         XCTAssertTrue(visible.engine.view.superview === host)
         XCTAssertTrue(
@@ -227,27 +227,185 @@ final class PaneTreeHostTests: XCTestCase {
         XCTAssertTrue(background.engine.view.isHidden)
     }
 
-    func testOldTerminalTabHostCannotMutateAReparentedView() throws {
+    /// A tab dragged to another pane: the destination host can hear about it
+    /// before the source does, and the source must then leave it alone.
+    func testSourcePaneCannotDisturbATabThatMovedToAnotherPane() throws {
         let store = makeStore()
         let workspace = try XCTUnwrap(store.active)
-        let session = try XCTUnwrap(workspace.activeSession)
-        let source = TerminalTabHostView()
-        source.frame = NSRect(x: 0, y: 0, width: 400, height: 300)
-        let destination = TerminalTabHostView()
-        destination.frame = NSRect(x: 0, y: 0, width: 800, height: 600)
+        let a = try XCTUnwrap(workspace.activePane)
+        let moving = store.addTab(in: workspace)
+        let b = try XCTUnwrap(store.splitPane(a, orientation: .horizontal, in: workspace))
+        let hostA = TerminalTabHostView()
+        hostA.frame = NSRect(x: 0, y: 0, width: 400, height: 300)
+        let hostB = TerminalTabHostView()
+        hostB.frame = NSRect(x: 0, y: 0, width: 800, height: 600)
+        hostA.update(pane: a, grabsFocusOnMount: false)
+        hostB.update(pane: b, grabsFocusOnMount: true)
+        XCTAssertTrue(moving.engine.view.superview === hostA)
 
-        source.update(tabs: [session], activeTabId: session.id, grabsFocusOnMount: true)
-        destination.update(tabs: [session], activeTabId: session.id, grabsFocusOnMount: true)
-        XCTAssertTrue(session.engine.view.superview === destination)
+        store.moveTab(moving, to: b, at: b.tabs.count, in: workspace)
+        hostB.update(pane: b, grabsFocusOnMount: true)
+        XCTAssertTrue(moving.engine.view.superview === hostB)
 
-        source.layout()
-        XCTAssertEqual(session.engine.view.frame, destination.bounds)
-
-        source.update(tabs: [], activeTabId: nil, grabsFocusOnMount: false)
+        hostA.layout()
+        XCTAssertEqual(moving.engine.view.frame, hostB.bounds, "the old pane must not size a terminal it no longer owns")
+        hostA.update(pane: a, grabsFocusOnMount: false)
         XCTAssertTrue(
-            session.engine.view.superview === destination,
+            moving.engine.view.superview === hostB,
             "the old pane must not detach a terminal after the new pane adopted it"
         )
+
+        store.moveTab(moving, to: a, at: a.tabs.count, in: workspace)
+        hostA.update(pane: a, grabsFocusOnMount: true)
+        XCTAssertTrue(moving.engine.view.superview === hostA, "a tab must be able to move back to a pane that held it before")
+        XCTAssertEqual(moving.engine.view.frame, hostA.bounds)
+    }
+
+    /// Issue #89 at the host level. Restructuring the split tree makes
+    /// SwiftUI build a new host for a pane and then call the old one once
+    /// more before removing it.
+    func testReplacedHostCannotReclaimItsPanesTerminals() throws {
+        let store = makeStore()
+        let workspace = try XCTUnwrap(store.active)
+        let pane = try XCTUnwrap(workspace.activePane)
+        let session = try XCTUnwrap(pane.activeTab)
+        let old = TerminalTabHostView()
+        old.frame = NSRect(x: 0, y: 0, width: 400, height: 300)
+        let new = TerminalTabHostView()
+        new.frame = NSRect(x: 0, y: 0, width: 800, height: 600)
+
+        old.update(pane: pane, grabsFocusOnMount: false)
+        new.update(pane: pane, grabsFocusOnMount: true)
+        XCTAssertTrue(session.engine.view.superview === new)
+
+        old.update(pane: pane, grabsFocusOnMount: false)
+        XCTAssertTrue(session.engine.view.superview === new, "the host being removed must not take the terminal back")
+        XCTAssertEqual(session.engine.view.frame, new.bounds)
+        XCTAssertTrue(session.engine.grabsFocusOnMount, "nor rewrite the focus gate the new host set")
+
+        // A tab the old host never mounted — one dragged in by the same
+        // change that replaced it. "I held this before" cannot cover it.
+        let arrived = store.addTab(in: workspace)
+        new.update(pane: pane, grabsFocusOnMount: true)
+        old.update(pane: pane, grabsFocusOnMount: false)
+        XCTAssertTrue(arrived.engine.view.superview === new)
+    }
+
+    // MARK: - Split restructuring (issue #89)
+
+    private func makeWindowedHost(_ store: WorkspaceStore) -> (host: PaneTreeHostView, window: NSWindow) {
+        let host = makeHost(store)
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 800, height: 600),
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        window.isReleasedWhenClosed = false
+        window.contentView = host
+        settle(host)
+        return (host, window)
+    }
+
+    /// Hosted SwiftUI applies a model change on its own commit; give it one.
+    private func settle(_ host: PaneTreeHostView) {
+        sync(host)
+        RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.05))
+        host.layoutSubtreeIfNeeded()
+    }
+
+    private func assertOnScreen(
+        _ session: Session,
+        in host: PaneTreeHostView,
+        _ message: String,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        let view = session.engine.view
+        XCTAssertTrue(view.isDescendant(of: host), message, file: file, line: line)
+        XCTAssertTrue(view.window != nil && view.window === host.window, message, file: file, line: line)
+        XCTAssertFalse(view.isHiddenOrHasHiddenAncestor, message, file: file, line: line)
+        XCTAssertGreaterThan(view.bounds.width, 0, message, file: file, line: line)
+        XCTAssertGreaterThan(view.bounds.height, 0, message, file: file, line: line)
+    }
+
+    func testClosingOnePaneOfASplitKeepsTheOtherOnScreen() throws {
+        for orientation in [SplitOrientation.horizontal, .vertical] {
+            for closeOriginal in [false, true] {
+                let store = makeStore()
+                defer { store.terminate() }
+                let workspace = try XCTUnwrap(store.active)
+                let original = try XCTUnwrap(workspace.activePane)
+                let (host, window) = makeWindowedHost(store)
+                defer { window.close() }
+                let added = try XCTUnwrap(store.splitPane(original, orientation: orientation, in: workspace))
+                settle(host)
+                let surviving = try XCTUnwrap((closeOriginal ? added : original).activeTab)
+                let closing = try XCTUnwrap((closeOriginal ? original : added).activeTab)
+                assertOnScreen(surviving, in: host, "both panes of a fresh split are on screen")
+
+                store.closeTab(closing, in: workspace)
+                settle(host)
+
+                assertOnScreen(
+                    surviving, in: host,
+                    "\(orientation) split, closed the \(closeOriginal ? "original" : "new") pane"
+                )
+                XCTAssertEqual((surviving.engine as? TestEngine)?.terminateCount, 0)
+            }
+        }
+    }
+
+    /// Three panes, close the first: the inner split is promoted. With both
+    /// splits on one axis SwiftUI keeps the first slot's host and hands it
+    /// the next pane; across axes everything is rebuilt.
+    func testClosingAPaneBesideANestedSplitKeepsBothSurvivorsOnScreen() throws {
+        for inner in [SplitOrientation.horizontal, .vertical] {
+            let store = makeStore()
+            defer { store.terminate() }
+            let workspace = try XCTUnwrap(store.active)
+            let a = try XCTUnwrap(workspace.activePane)
+            let (host, window) = makeWindowedHost(store)
+            defer { window.close() }
+            let b = try XCTUnwrap(store.splitPane(a, orientation: .horizontal, in: workspace))
+            settle(host)
+            let c = try XCTUnwrap(store.splitPane(b, orientation: inner, in: workspace))
+            settle(host)
+            let inB = try XCTUnwrap(b.activeTab)
+            let inC = try XCTUnwrap(c.activeTab)
+
+            store.closeTab(try XCTUnwrap(a.activeTab), in: workspace)
+            settle(host)
+
+            assertOnScreen(inB, in: host, "inner \(inner) split: first survivor")
+            assertOnScreen(inC, in: host, "inner \(inner) split: second survivor")
+        }
+    }
+
+    /// Dragging a pane's only tab into its neighbour collapses the split and
+    /// hands the neighbour a terminal its old host never mounted.
+    func testMovingAPanesOnlyTabIntoItsNeighbourKeepsItOnScreen() throws {
+        let store = makeStore()
+        defer { store.terminate() }
+        let workspace = try XCTUnwrap(store.active)
+        let a = try XCTUnwrap(workspace.activePane)
+        let (host, window) = makeWindowedHost(store)
+        defer { window.close() }
+        let b = try XCTUnwrap(store.splitPane(a, orientation: .horizontal, in: workspace))
+        settle(host)
+        let resident = try XCTUnwrap(a.activeTab)
+        let moved = try XCTUnwrap(b.activeTab)
+
+        store.moveTab(moved, to: a, at: a.tabs.count, in: workspace)
+        settle(host)
+        assertOnScreen(moved, in: host, "the moved tab is now the neighbour's active tab")
+
+        store.activateTab(resident, in: workspace)
+        settle(host)
+        assertOnScreen(resident, in: host, "the neighbour's own tab still shows when selected")
+        store.activateTab(moved, in: workspace)
+        settle(host)
+        assertOnScreen(moved, in: host, "and the moved tab comes back when reselected")
     }
 
 }

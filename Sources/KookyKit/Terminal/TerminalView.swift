@@ -9,23 +9,39 @@ import SwiftUI
 /// behaviour. CLI `open --no-focus` tabs are the exception: they mount hidden
 /// immediately so their shell can start without becoming the active tab.
 struct TerminalTabHost: NSViewRepresentable {
+    let pane: Pane
+    /// The host reads `pane` itself and never these. They are here so this
+    /// value changes when the pane's tabs do — that is what makes SwiftUI
+    /// call `updateNSView`.
     let tabs: [Session]
     let activeTabId: UUID?
     let grabsFocusOnMount: Bool
 
     func makeNSView(context: Context) -> TerminalTabHostView {
         let host = TerminalTabHostView()
-        host.update(tabs: tabs, activeTabId: activeTabId, grabsFocusOnMount: grabsFocusOnMount)
+        host.update(pane: pane, grabsFocusOnMount: grabsFocusOnMount)
         return host
     }
 
     func updateNSView(_ nsView: TerminalTabHostView, context: Context) {
-        nsView.update(tabs: tabs, activeTabId: activeTabId, grabsFocusOnMount: grabsFocusOnMount)
+        nsView.update(pane: pane, grabsFocusOnMount: grabsFocusOnMount)
     }
 }
 
 @MainActor
 final class TerminalTabHostView: NSView {
+    /// Which host renders each pane right now. Restructuring the split tree
+    /// (⌘D, a split collapsing) makes SwiftUI build a new host for a pane
+    /// that lives on and, in the same commit, call `updateNSView` once more
+    /// on the host it is about to remove — after the new one has taken the
+    /// terminal. With "last update owns the view" the dying host pulled the
+    /// terminal back and took it out of the window with it (#89).
+    private static let currentHosts = NSMapTable<Pane, TerminalTabHostView>(
+        keyOptions: [.weakMemory, .objectPointerPersonality],
+        valueOptions: .weakMemory
+    )
+
+    private weak var pane: Pane?
     private var mountedViews: [UUID: NSView] = [:]
 
     override func layout() {
@@ -38,7 +54,21 @@ final class TerminalTabHostView: NSView {
         }
     }
 
-    func update(tabs: [Session], activeTabId: UUID?, grabsFocusOnMount: Bool) {
+    func update(pane: Pane, grabsFocusOnMount: Bool) {
+        // Taking on a pane makes this host its current one. Per binding, not
+        // per host: when a nested split collapses SwiftUI keeps a host and
+        // hands it a different pane.
+        if self.pane !== pane {
+            self.pane = pane
+            Self.currentHosts.setObject(self, forKey: pane)
+        }
+        guard Self.currentHosts.object(forKey: pane) === self else { return }
+        // The pane, not a snapshot of it: that last call to a host on its way
+        // out can replay the value it held before the model changed, listing
+        // a tab that has since moved to another pane.
+        let tabs = pane.tabs
+        let activeTabId = pane.activeTabId
+
         let tabIds = Set(tabs.map(\.id))
         for session in tabs where session.id == activeTabId || session.spawnsInBackground {
             let view = session.engine.view
