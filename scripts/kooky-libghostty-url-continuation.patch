@@ -1,0 +1,141 @@
+diff --git a/src/Surface.zig b/src/Surface.zig
+index 80baa94..afa5eac 100644
+--- a/src/Surface.zig
++++ b/src/Surface.zig
+@@ -9110,7 +9110,52 @@ test "Surface: markdown path spans unindented hard newlines" {
+     }
+ }
+ 
+-test "Surface: URL spans unindented hard newlines" {
++test "Surface: URL ends at a hard newline but spans a soft wrap at the same column" {
++    if (comptime !@import("terminal_options").oniguruma) return error.SkipZigTest;
++
++    const testing = std.testing;
++    const alloc = testing.allocator;
++    try oni.testing.ensureInit();
++    var config = try configpkg.Config.default(alloc);
++    defer config.deinit();
++    var derived = try DerivedConfig.init(alloc, &config);
++    defer derived.deinit();
++
++    const url = "http://127.0.0.1:5174/";
++    const cases = [_]struct { output: []const u8, full_url: []const u8 }{
++        .{ .output = "9 assets", .full_url = url ++ "9" },
++        .{ .output = "guide.html", .full_url = url ++ "guide.html" },
++        .{ .output = "guide.html for details", .full_url = url ++ "guide.html" },
++    };
++    for (cases) |case| {
++        for ([_]bool{ true, false }) |hard_break| {
++            // The second row starts at column zero in both grids.
++            var term: terminal.Terminal = try .init(std.testing.io, alloc, .{ .cols = url.len, .rows = 3 });
++            defer term.deinit(alloc);
++            var stream = term.vtStream();
++            defer stream.deinit();
++            stream.nextSlice(url);
++            if (hard_break) stream.nextSlice("\r\n");
++            stream.nextSlice(case.output);
++
++            const screen = term.screens.active;
++            const slash = screen.pages.pin(.{ .active = .{ .x = url.len - 1, .y = 0 } }).?;
++            const next_cell = screen.pages.pin(.{ .active = .{ .x = 0, .y = 1 } }).?;
++            const upper = (try linkAtScreenPin(alloc, screen, derived.links, slash, input.ctrlOrSuper(.{}))).?;
++            defer upper.deinit(alloc);
++            try testing.expectEqualStrings(if (hard_break) url else case.full_url, linkActionTarget(upper));
++            const lower = try linkAtScreenPin(alloc, screen, derived.links, next_cell, input.ctrlOrSuper(.{}));
++            defer if (lower) |link| link.deinit(alloc);
++            if (hard_break) {
++                try testing.expect(lower == null);
++            } else {
++                try testing.expectEqualStrings(case.full_url, linkActionTarget(lower.?));
++            }
++        }
++    }
++}
++
++test "Surface: opt-in hard wrapping: URL spans unindented hard newlines" {
+     if (comptime !@import("terminal_options").oniguruma) return error.SkipZigTest;
+ 
+     const testing = std.testing;
+@@ -9123,6 +9168,7 @@ test "Surface: URL spans unindented hard newlines" {
+     try oni.testing.ensureInit();
+     var config = try configpkg.Config.default(alloc);
+     defer config.deinit();
++    config.link.links.items[0].hard_wrap_continuations = true;
+     var derived = try DerivedConfig.init(alloc, &config);
+     defer derived.deinit();
+ 
+@@ -9279,7 +9325,7 @@ test "Surface: wrapped path preserves mapped trailing spaces for copy policy" {
+     }
+ }
+ 
+-test "Surface: wrapped URL hit testing excludes indentation and trailing punctuation" {
++test "Surface: opt-in hard wrapping: wrapped URL hit testing excludes indentation and trailing punctuation" {
+     if (comptime !@import("terminal_options").oniguruma) return error.SkipZigTest;
+ 
+     const testing = std.testing;
+@@ -9292,6 +9338,7 @@ test "Surface: wrapped URL hit testing excludes indentation and trailing punctua
+     try oni.testing.ensureInit();
+     var config = try configpkg.Config.default(alloc);
+     defer config.deinit();
++    config.link.links.items[0].hard_wrap_continuations = true;
+     var derived = try DerivedConfig.init(alloc, &config);
+     defer derived.deinit();
+ 
+@@ -9340,7 +9387,7 @@ test "Surface: wrapped URL hit testing excludes indentation and trailing punctua
+     }
+ }
+ 
+-test "Surface: wrapped URL retains balanced punctuation owned by its regex" {
++test "Surface: opt-in hard wrapping: wrapped URL retains balanced punctuation owned by its regex" {
+     if (comptime !@import("terminal_options").oniguruma) return error.SkipZigTest;
+ 
+     const testing = std.testing;
+@@ -9351,6 +9398,7 @@ test "Surface: wrapped URL retains balanced punctuation owned by its regex" {
+     try oni.testing.ensureInit();
+     var config = try configpkg.Config.default(alloc);
+     defer config.deinit();
++    config.link.links.items[0].hard_wrap_continuations = true;
+     var derived = try DerivedConfig.init(alloc, &config);
+     defer derived.deinit();
+ 
+@@ -9710,7 +9758,7 @@ test "Surface: hard newline does not join across a semantic boundary" {
+     )) == null);
+ }
+ 
+-test "Surface: UTF-8 hard-wrap link accepts wide glyph spacer tails" {
++test "Surface: opt-in hard wrapping: UTF-8 hard-wrap link accepts wide glyph spacer tails" {
+     if (comptime !@import("terminal_options").oniguruma) return error.SkipZigTest;
+ 
+     const testing = std.testing;
+@@ -9720,6 +9768,7 @@ test "Surface: UTF-8 hard-wrap link accepts wide glyph spacer tails" {
+     try oni.testing.ensureInit();
+     var config = try configpkg.Config.default(alloc);
+     defer config.deinit();
++    config.link.links.items[0].hard_wrap_continuations = true;
+     var derived = try DerivedConfig.init(alloc, &config);
+     defer derived.deinit();
+ 
+diff --git a/src/config/Config.zig b/src/config/Config.zig
+index ba23ccf..cf7933e 100644
+--- a/src/config/Config.zig
++++ b/src/config/Config.zig
+@@ -3912,8 +3912,9 @@ pub fn default(alloc_gpa: Allocator) Allocator.Error!Config {
+         .regex = url.scheme_regex,
+         .action = .{ .open = {} },
+         .highlight = .{ .hover_mods = inputpkg.ctrlOrSuper(.{}) },
++        // A URL can span soft-wrapped rows within one logical line.
+         .candidate_scope = .bounded_logical,
+-        .hard_wrap_continuations = true,
++        .hard_wrap_continuations = false,
+     });
+     try result.link.links.append(alloc, .{
+         .regex = url.path_regex,
+@@ -3940,7 +3941,7 @@ test "Config: default URL and path links use owned candidate scopes" {
+         inputpkg.Link.CandidateScope.semantic,
+         config.link.links.items[1].candidate_scope,
+     );
+-    try std.testing.expect(config.link.links.items[0].hard_wrap_continuations);
++    try std.testing.expect(!config.link.links.items[0].hard_wrap_continuations);
+     try std.testing.expect(config.link.links.items[1].hard_wrap_continuations);
+     try std.testing.expect(!config.link.links.items[0].hard_wrap_match_delimiter);
+     try std.testing.expect(config.link.links.items[1].hard_wrap_match_delimiter);

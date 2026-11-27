@@ -41,13 +41,6 @@ verify_app() {
 
 stop_existing_app
 
-# Fresh checkouts lack the gitignored Vendor/ framework and Package.swift's
-# binary target can't resolve without it; the setup script is idempotent,
-# so a self-heal on miss makes Run work out of the box on a new machine.
-if [ ! -d "${ROOT_DIR}/Vendor/GhosttyKit.xcframework" ]; then
-    "${ROOT_DIR}/scripts/setup-libghostty.sh"
-fi
-
 "${ROOT_DIR}/scripts/build-app.sh"
 
 case "${MODE}" in

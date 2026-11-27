@@ -34,6 +34,7 @@ APP_NAME="Kooky"
 APP="dist/${APP_NAME}.app"
 
 echo "==> Building release config"
+"$ROOT/scripts/setup-libghostty.sh"
 swift build -c release
 
 echo "==> Verifying build artifacts"

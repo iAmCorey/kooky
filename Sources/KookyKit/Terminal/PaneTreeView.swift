@@ -79,6 +79,7 @@ private struct PaneView: View {
             Rectangle().fill(Theme.chromeSeparator).frame(height: 1)
             if let active = pane.activeTab {
                 TerminalTabHost(
+                    pane: pane,
                     tabs: pane.tabs,
                     activeTabId: pane.activeTabId,
                     // The workspace-visibility condition is load-bearing in C2:

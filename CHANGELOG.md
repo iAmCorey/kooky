@@ -2,6 +2,14 @@
 
 Notable changes per release. Tagged commits use `vX.Y.Z` shortform.
 
+## v0.51.14 — 2026-11-27
+
+- Fixed: closing one pane of a split no longer leaves the terminals in the remaining panes blank. Dragging a pane's only tab into its neighbour did the same. Thanks @uuuyuqi for the report, the diagnosis and a draft fix. (#89)
+
+## v0.51.13 — 2026-11-26
+
+- Fixed an issue where ⌘-clicking a URL could append text from the next line of terminal output. For example, a dev server URL followed by `9 assets` could open at `/9`. Long URLs that wrap at the edge of the window still open in full.
+
 ## v0.51.12 — 2026-10-12
 
 - New: keyboard shortcuts that match Ghostty, Warp and cmux. ⌥⌘ + arrow moves focus to the split in that direction, ⌃⌘ + arrow moves the nearest divider, and ⌘Home / ⌘End / ⌘Page Up / ⌘Page Down scroll the terminal to the top, to the bottom, or by a page — following your Ghostty config if you've rebound them.
