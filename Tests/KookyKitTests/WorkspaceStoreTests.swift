@@ -415,7 +415,6 @@ final class WorkspaceStoreTests: XCTestCase {
             FileManager.default.fileExists(atPath: fakePath.path),
             "disk dir must survive alsoDelete=false close"
         )
-        XCTAssertNil(store.pendingCloseSourceRequest)
     }
 
     func testPerformCloseSourceAbortsWhenGitRemoveFails() async {
@@ -456,6 +455,44 @@ final class WorkspaceStoreTests: XCTestCase {
                       "worktree workspace must survive until the sheet confirms")
         XCTAssertEqual(firstPane(wt).tabs.count, 1, "tab must stay in place")
         XCTAssertEqual(store.pendingRemovalRequest?.id, wt.id)
+    }
+
+    func testOnlyRequestsThatOpenASheetRevealAHiddenSidebar() {
+        // `SidebarView` hosts the sheets and exists only while the sidebar is
+        // shown, so a request parked behind a hidden sidebar had nobody to
+        // present it (⌘⇧W on a worktree did nothing).
+        let store = makeStore()
+        let seed = store.workspaces[0]
+        let source = store.addWorkspace(workingDirectory: projectA)
+        let wt = store.addWorkspace(
+            workingDirectory: URL(fileURLWithPath: "/tmp/projectA-feat-x"),
+            worktreeParent: source, worktreeBranch: "feat-x"
+        )
+        let plain = store.addWorkspace(workingDirectory: projectB)
+
+        store.setSidebarMode(.hidden)
+        store.requestCloseWorkspace(plain)
+        XCTAssertEqual(store.sidebarMode, .hidden, "a plain close needs no sheet")
+
+        store.requestCloseWorkspace(source)
+        XCTAssertEqual(store.sidebarMode, .full, "closing a source with worktrees asks first")
+
+        store.setSidebarMode(.hidden)
+        store.closeOtherWorkspaces(keeping: seed)
+        XCTAssertEqual(store.sidebarMode, .full, "closing others that include a worktree asks first")
+
+        store.setSidebarMode(.hidden)
+        XCTAssertTrue(wt.closingLastTabCascadesIntoWorktreeRemoval)
+        store.closeTab(firstPane(wt).tabs[0], in: wt)
+        XCTAssertEqual(store.sidebarMode, .full, "closing a worktree's last tab asks first")
+
+        store.setSidebarMode(.hidden)
+        store.requestCreateWorktree(source)
+        XCTAssertEqual(store.sidebarMode, .full, "create worktree")
+
+        store.setSidebarMode(.hidden)
+        store.requestCreateSSHWorkspace()
+        XCTAssertEqual(store.sidebarMode, .full, "new SSH workspace")
     }
 
     func testCloseOtherWithoutWorktreesRunsInline() {
@@ -502,7 +539,6 @@ final class WorkspaceStoreTests: XCTestCase {
         XCTAssertNil(message)
         XCTAssertEqual(store.workspaces.count, 1)
         XCTAssertEqual(store.workspaces.first?.id, kept.id)
-        XCTAssertNil(store.pendingCloseOthersRequest)
     }
 
     func testPerformCloseOthersAbortsWhenGitRemoveFails() async {

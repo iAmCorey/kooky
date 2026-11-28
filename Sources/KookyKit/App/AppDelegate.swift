@@ -1538,14 +1538,10 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
                   let ws = target.store.workspaces.first(where: { $0.id == wsId }) else { return }
             if let window = target.window { front(window) }
             target.store.activateWorkspace(ws)
-            target.store.pendingCreateWorktreeRequest = ws
-            if target.store.sidebarMode == .hidden {
-                // Matches ContentView / View menu's reveal behaviour — without
-                // the animation wrap the sidebar snaps from 0 to 220pt the moment
-                // the palette routes a worktree-create request through.
-                withAnimation(Theme.chromeTransition) {
-                    target.store.setSidebarMode(.full)
-                }
+            // The animation wrap keeps a hidden sidebar's reveal from
+            // snapping (same as `handleNewSSHWorkspace`).
+            withAnimation(Theme.chromeTransition) {
+                target.store.requestCreateWorktree(ws)
             }
         case .agent(let templateId):
             guard let store = activeStore, let ws = store.active else { return }

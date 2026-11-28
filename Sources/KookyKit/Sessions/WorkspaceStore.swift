@@ -341,7 +341,7 @@ final class WorkspaceStore {
     /// handing off to the row via `Workspace.renameRequested`. Reveal a hidden
     /// sidebar first so `SidebarView` exists to observe the parked request.
     func requestRenameActiveWorkspace() {
-        if sidebarMode == .hidden { setSidebarMode(.full) }
+        revealSidebarIfHidden()
         // The rename popover anchors to a workspace row — flip the sidebar
         // back to the list, or the parked request sits unconsumed in files
         // mode and fires stale on the next toggle.
@@ -670,31 +670,35 @@ final class WorkspaceStore {
     /// sidebar can pop the brutalist confirm sheet before anything
     /// destructive runs. Plain workspaces skip the prompt and go
     /// straight to `closeWorkspace`. Set non-nil to mean "user asked to
-    /// close this worktree, sidebar please ask them about the dir";
-    /// cleared by the sheet on dismiss / confirm.
+    /// close this worktree, sidebar please ask them about the dir".
+    /// Like every parked sheet request below, `SidebarView` empties it the
+    /// moment it presents the sheet (`presentParkedSheetRequest`).
     var pendingRemovalRequest: Workspace?
 
-    /// Cross-view create request. Sidebar rows open the sheet directly, but
-    /// global entry points such as the command palette need to ask the
-    /// sidebar to host the sheet, especially when the sidebar was hidden and
-    /// has to be shown first.
+    /// Create-worktree request (sidebar rows, command palette), parked by
+    /// `requestCreateWorktree`.
     var pendingCreateWorktreeRequest: Workspace?
 
-    /// Cross-view SSH-workspace create request — File menu and command
-    /// palette park it here for `SidebarView` to open the destination sheet
-    /// (same seam as `pendingCreateWorktreeRequest`; Bool because the sheet
-    /// needs no payload).
+    /// SSH-workspace create request (File menu, command palette), parked by
+    /// `requestCreateSSHWorkspace`. Bool because the sheet needs no payload.
     var pendingCreateSSHWorkspaceRequest = false
 
-    /// Park the SSH-workspace create request and reveal a hidden sidebar so
-    /// `SidebarView` exists to consume it (mirrors
-    /// `requestRenameActiveWorkspace`). Callers that want the reveal animated
-    /// wrap the call in `withAnimation` — the store stays SwiftUI-free.
+    func requestCreateWorktree(_ workspace: Workspace) {
+        pendingCreateWorktreeRequest = workspace
+        revealSidebarIfHidden()
+    }
+
     func requestCreateSSHWorkspace() {
         pendingCreateSSHWorkspaceRequest = true
-        if sidebarMode == .hidden {
-            setSidebarMode(.full)
-        }
+        revealSidebarIfHidden()
+    }
+
+    /// `SidebarView` hosts the sheets and the ⌘⇧R rename popover and is
+    /// mounted only while the sidebar is shown, so a request parked for it
+    /// reveals a hidden sidebar. Not animated: the store stays SwiftUI-free;
+    /// callers that want the slide wrap the request in `withAnimation`.
+    private func revealSidebarIfHidden() {
+        if sidebarMode == .hidden { setSidebarMode(.full) }
     }
 
     /// ⌘W-on-a-sheet request, parked for `SidebarView` to cancel whichever
@@ -735,6 +739,7 @@ final class WorkspaceStore {
     func requestCloseWorkspace(_ workspace: Workspace) {
         if workspace.worktreeParentId != nil {
             pendingRemovalRequest = workspace
+            revealSidebarIfHidden()
             return
         }
         let worktrees = workspaces.filter { $0.worktreeParentId == workspace.id }
@@ -743,6 +748,7 @@ final class WorkspaceStore {
             return
         }
         pendingCloseSourceRequest = CloseSourceRequest(source: workspace, worktrees: worktrees)
+        revealSidebarIfHidden()
     }
 
     /// Performs the deferred source-with-worktrees close from the sheet.
@@ -761,7 +767,6 @@ final class WorkspaceStore {
         }
         for worktree in request.worktrees { closeWorkspace(worktree) }
         closeWorkspace(request.source)
-        pendingCloseSourceRequest = nil
         return nil
     }
 
@@ -1042,6 +1047,7 @@ final class WorkspaceStore {
         let others = workspaces.filter { !keepIds.contains($0.id) }
         if others.contains(where: { $0.worktreeParentId != nil }) {
             pendingCloseOthersRequest = BulkRemovalRequest(keeping: workspace, others: others)
+            revealSidebarIfHidden()
             return
         }
         for ws in others { closeWorkspace(ws) }
@@ -1062,7 +1068,6 @@ final class WorkspaceStore {
             }
         }
         for ws in request.others { closeWorkspace(ws) }
-        pendingCloseOthersRequest = nil
         return nil
     }
 

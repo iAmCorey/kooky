@@ -100,9 +100,8 @@ struct SidebarView: View {
     /// land here. Ephemeral by design: a kooky relaunch always shows every
     /// worktree on first paint so nothing is hidden by stale state.
     @State private var collapsedParents: Set<UUID> = []
-    /// Active modal sheet (create worktree / confirm-delete worktree).
-    /// Nil = no sheet. Set by row callbacks and an onChange observer that
-    /// watches `store.pendingRemovalRequest` for ⌘⇧W routed via AppDelegate.
+    /// Set only by `presentParkedSheetRequest`; cleared by
+    /// `dismissCurrentSheet` or by SwiftUI itself (Esc / ⌘.).
     @State private var sheet: SidebarSheet?
 
     /// Invisible trailing-edge strip that widens the sidebar by drag —
@@ -293,77 +292,50 @@ struct SidebarView: View {
                 )
             }
         }
-        // ⌘⇧W routes through AppDelegate → store.requestCloseWorkspace,
-        // which parks worktree workspaces in `pendingRemovalRequest` for
-        // the sidebar to pop the confirm sheet on. Identity-keyed so the
-        // observer only fires on a fresh request, not internal renames.
-        .onChange(of: store.pendingRemovalRequest?.id) { _, _ in
-            if let workspace = store.pendingRemovalRequest {
-                sheet = .confirmRemoveWorktree(workspace)
-            }
-        }
-        // Global create requests (currently the command palette). When the
-        // sidebar was hidden, `onAppear` below catches the already-parked
-        // request after AppDelegate makes the sidebar visible.
-        .onChange(of: store.pendingCreateWorktreeRequest?.id) { _, _ in
-            if let workspace = store.pendingCreateWorktreeRequest {
-                sheet = .createWorktree(workspace)
-            }
-        }
-        // SSH-workspace create request (File menu / command palette). Same
-        // parked-while-hidden contract as worktree-create above.
-        .onChange(of: store.pendingCreateSSHWorkspaceRequest) { _, pending in
-            if pending { sheet = .createSSHWorkspace }
-        }
+        // onChange takes a request made while the sidebar is up; onAppear
+        // one parked while it was hidden.
+        .onChange(of: store.pendingRemovalRequest?.id) { _, _ in presentParkedSheetRequest() }
+        .onChange(of: store.pendingCreateWorktreeRequest?.id) { _, _ in presentParkedSheetRequest() }
+        .onChange(of: store.pendingCreateSSHWorkspaceRequest) { _, _ in presentParkedSheetRequest() }
+        .onChange(of: store.pendingCloseOthersRequest?.keeping.id) { _, _ in presentParkedSheetRequest() }
+        .onChange(of: store.pendingCloseSourceRequest?.source.id) { _, _ in presentParkedSheetRequest() }
+        .onAppear { presentParkedSheetRequest() }
         // ⌘W while a sheet is key (AppDelegate can't reach the sheet's
         // `@State` directly) — cancel it exactly like its cancel button.
         .onChange(of: store.sheetDismissRequest) { _, _ in
             dismissCurrentSheet()
         }
-        .onAppear {
-            if let workspace = store.pendingCreateWorktreeRequest {
-                sheet = .createWorktree(workspace)
-            }
-            if store.pendingCreateSSHWorkspaceRequest {
-                sheet = .createSSHWorkspace
-            }
+    }
+
+    /// Present whatever the store parked and empty its slot in the same step
+    /// (the `revealWorkspaceForRename` shape). Esc / ⌘. dismiss through
+    /// SwiftUI without running any kooky code, so a slot left for the
+    /// dismissal to clear would stay filled, and the next same-value request
+    /// would never fire onChange.
+    private func presentParkedSheetRequest() {
+        if store.pendingCreateSSHWorkspaceRequest {
+            store.pendingCreateSSHWorkspaceRequest = false
+            sheet = .createSSHWorkspace
         }
-        // Bulk close-others request — keyed off keeping.id since the
-        // others list can vary in length but each request is anchored
-        // on its keeping workspace.
-        .onChange(of: store.pendingCloseOthersRequest?.keeping.id) { _, _ in
-            if let request = store.pendingCloseOthersRequest {
-                sheet = .confirmCloseOthers(request)
-            }
+        if let workspace = store.pendingCreateWorktreeRequest {
+            store.pendingCreateWorktreeRequest = nil
+            sheet = .createWorktree(workspace)
         }
-        // Close-source-with-worktrees request — keyed off source.id; the
-        // store parks it when ⌘⇧W / × on a top-level workspace would
-        // strand its worktrees.
-        .onChange(of: store.pendingCloseSourceRequest?.source.id) { _, _ in
-            if let request = store.pendingCloseSourceRequest {
-                sheet = .confirmCloseSource(request)
-            }
+        if let workspace = store.pendingRemovalRequest {
+            store.pendingRemovalRequest = nil
+            sheet = .confirmRemoveWorktree(workspace)
+        }
+        if let request = store.pendingCloseOthersRequest {
+            store.pendingCloseOthersRequest = nil
+            sheet = .confirmCloseOthers(request)
+        }
+        if let request = store.pendingCloseSourceRequest {
+            store.pendingCloseSourceRequest = nil
+            sheet = .confirmCloseSource(request)
         }
     }
 
-    /// Cancel whichever sheet is up, clearing its parked store request —
-    /// the single dismissal path shared by every sheet's cancel button and
-    /// the ⌘W `sheetDismissRequest` signal, so the two can't drift.
     private func dismissCurrentSheet() {
-        switch sheet {
-        case .createSSHWorkspace:
-            store.pendingCreateSSHWorkspaceRequest = false
-        case .createWorktree:
-            store.pendingCreateWorktreeRequest = nil
-        case .confirmRemoveWorktree:
-            store.pendingRemovalRequest = nil
-        case .confirmCloseOthers:
-            store.pendingCloseOthersRequest = nil
-        case .confirmCloseSource:
-            store.pendingCloseSourceRequest = nil
-        case nil:
-            return
-        }
         sheet = nil
     }
 
@@ -521,7 +493,7 @@ struct SidebarView: View {
                             myIndex: index,
                             isCompact: isCompact,
                             draggingId: $draggingWorkspaceId,
-                            onCreateWorktree: canCreate ? { presentCreateWorktree(workspace) } : nil,
+                            onCreateWorktree: canCreate ? { store.requestCreateWorktree(workspace) } : nil,
                             onGoToSource: goToSource
                         )
                     }
@@ -591,7 +563,7 @@ struct SidebarView: View {
                     toggle: { toggleCollapsed(parent.id) }
                 )
                 : nil,
-            onCreateWorktree: canCreate ? { presentCreateWorktree(parent) } : nil
+            onCreateWorktree: canCreate ? { store.requestCreateWorktree(parent) } : nil
         )
 
         if hasWorktrees && !isCollapsed {
@@ -653,14 +625,6 @@ struct SidebarView: View {
         DispatchQueue.main.async {
             proxy.scrollTo(workspace.id, anchor: anchor)
         }
-    }
-
-    private func presentCreateWorktree(_ workspace: Workspace) {
-        // Single channel: parking on the store triggers the `.onChange`
-        // observer that sets `sheet`. Direct row clicks and command-palette
-        // / AppDelegate routes all go through here, so this stays the one
-        // mechanism that opens the create sheet.
-        store.pendingCreateWorktreeRequest = workspace
     }
 }
 

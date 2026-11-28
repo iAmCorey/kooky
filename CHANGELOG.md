@@ -2,6 +2,11 @@
 
 Notable changes per release. Tagged commits use `vX.Y.Z` shortform.
 
+## v0.52.1 — 2026-11-28
+
+- Fixed: closing a sheet with Esc no longer stops it from opening again. After pressing Esc on New SSH Workspace, File › New SSH Workspace stopped opening it, and the sheet could pop back up on its own when the sidebar was shown again. New Worktree and the close confirmations had the same problem, so a worktree whose confirmation you closed with Esc couldn't be closed again. Thanks @kaijianding for the report, the diagnosis and a draft fix. (#88)
+- Fixed: closing a worktree while the sidebar is hidden (with ⌘⇧W, with ⌘W on its last tab, or by exiting its last shell) now brings the sidebar back and asks for confirmation instead of doing nothing.
+
 ## v0.52.0 — 2026-11-28
 
 - New: drag a tab onto a workspace in the sidebar to move it there. The tab keeps running, and the window switches to that workspace to show it. Drop the tab on an empty part of the sidebar to give it a workspace of its own. Works from another window too.
