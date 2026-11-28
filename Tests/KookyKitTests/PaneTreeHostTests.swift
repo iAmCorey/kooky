@@ -408,4 +408,51 @@ final class PaneTreeHostTests: XCTestCase {
         assertOnScreen(moved, in: host, "and the moved tab comes back when reselected")
     }
 
+    // MARK: - Tabs dropped on the sidebar
+
+    /// A tab dropped on a workspace that is not on screen leaves its old host
+    /// and has to show through one that never mounted it, inside a container
+    /// that was hidden until the same moment.
+    func testTabDroppedOnAnotherWorkspaceShowsThereAtOnce() throws {
+        let store = makeStore()
+        defer { store.terminate() }
+        let source = try XCTUnwrap(store.active)
+        let stays = try XCTUnwrap(source.activeSession)
+        let dest = store.addWorkspace(activate: false)
+        let (host, window) = makeWindowedHost(store)
+        defer { window.close() }
+        let moved = store.addTab(in: source, template: .terminal)
+        settle(host)
+        assertOnScreen(moved, in: host, "the new tab shows in its own workspace first")
+
+        store.tabDragBegan(moved.id)
+        XCTAssertTrue(store.handleTabDrop(droppedId: moved.id, onto: dest))
+        settle(host)
+        assertOnScreen(moved, in: host, "the window went to its new workspace and shows it")
+
+        store.activateWorkspace(source)
+        settle(host)
+        assertOnScreen(stays, in: host, "back in the source workspace, the tab that stayed shows")
+    }
+
+    /// Dropping a workspace's last tab closes that workspace — and with it
+    /// the container and host the terminal was mounted in.
+    func testWorkspacesLastTabDroppedOnAnotherStaysOnScreen() throws {
+        let store = makeStore()
+        defer { store.terminate() }
+        let source = try XCTUnwrap(store.active)
+        let moved = try XCTUnwrap(source.activeSession)
+        let dest = store.addWorkspace(activate: false)
+        let (host, window) = makeWindowedHost(store)
+        defer { window.close() }
+        assertOnScreen(moved, in: host, "on screen in its own workspace")
+
+        store.tabDragBegan(moved.id)
+        XCTAssertTrue(store.handleTabDrop(droppedId: moved.id, onto: dest))
+        settle(host)
+
+        XCTAssertNil(host.workspaceRootView(for: source.id), "the emptied workspace's container is gone")
+        assertOnScreen(moved, in: host, "the window followed the tab and shows it")
+    }
+
 }

@@ -204,12 +204,34 @@ private struct AddTabButton: View {
             .background(Theme.chromeBackground)
         }
         .dropDestination(for: String.self) { dropped, _ in
-            defer { store.draggingTabId = nil }
+            defer { store.tabDragEnded() }
             guard let id = dropped.first.flatMap(UUID.init) else { return false }
             return withAnimation(.easeInOut(duration: 0.18)) {
                 store.handleTabDrop(droppedId: id, to: pane, at: pane.tabs.count, in: workspace)
             }
         } isTargeted: { isTargeted = $0 }
+    }
+}
+
+/// What a dragged tab carries. Tab bars and workspace rows read the plain id
+/// string. The URL names the same tab for the sidebar's folder drop zone,
+/// which takes URLs only — widening that zone to strings would light it up
+/// under every workspace being reordered across it.
+enum TabDrag {
+    static let scheme = "kooky-tab"
+
+    static func itemProvider(for id: UUID) -> NSItemProvider {
+        let provider = NSItemProvider(object: id.uuidString as NSString)
+        if let url = URL(string: "\(scheme)://\(id.uuidString)") {
+            // Own process only: to any other app a tab is still just text.
+            provider.registerObject(url as NSURL, visibility: .ownProcess)
+        }
+        return provider
+    }
+
+    static func tabId(from url: URL) -> UUID? {
+        guard url.scheme == scheme else { return nil }
+        return url.host(percentEncoded: false).flatMap { UUID(uuidString: $0) }
     }
 }
 
@@ -252,11 +274,11 @@ private struct DraggableTabRow: View {
         )
         .dropIndicator(active: isTargeted && !isSelfDrag, on: edge)
         .onDrag {
-            store.draggingTabId = tab.id
-            return NSItemProvider(object: tab.id.uuidString as NSString)
+            store.tabDragBegan(tab.id)
+            return TabDrag.itemProvider(for: tab.id)
         }
         .dropDestination(for: String.self) { dropped, _ in
-            defer { store.draggingTabId = nil }
+            defer { store.tabDragEnded() }
             guard let id = dropped.first.flatMap(UUID.init) else { return false }
             return withAnimation(.easeInOut(duration: 0.18)) {
                 store.handleTabDrop(droppedId: id, to: pane, at: myIndex, in: workspace)

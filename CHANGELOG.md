@@ -2,6 +2,12 @@
 
 Notable changes per release. Tagged commits use `vX.Y.Z` shortform.
 
+## v0.52.0 — 2026-11-28
+
+- New: drag a tab onto a workspace in the sidebar to move it there. The tab keeps running, and the window switches to that workspace to show it. Drop the tab on an empty part of the sidebar to give it a workspace of its own. Works from another window too.
+- Fixed: closing one pane of a split no longer leaves the terminals in the remaining panes blank. Dragging a pane's only tab into its neighbour did the same. Thanks @uuuyuqi for the report, the diagnosis and a draft fix. (#89)
+- Fixed: a worktree could disappear from the sidebar on the next launch when its source workspace's active tab was sitting inside that worktree, or in a different repository.
+
 ## v0.51.14 — 2026-11-27
 
 - Fixed: closing one pane of a split no longer leaves the terminals in the remaining panes blank. Dragging a pane's only tab into its neighbour did the same. Thanks @uuuyuqi for the report, the diagnosis and a draft fix. (#89)

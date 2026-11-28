@@ -38,7 +38,7 @@ struct TabBarItem: View {
         .padding(.horizontal, 11)
         .padding(.vertical, 8)
         .background(rowBackground)
-        .clipShape(RoundedRectangle(cornerRadius: Theme.chromeSelectionCornerRadius, style: .continuous))
+        .clipShape(Theme.chromeSelectionShape)
         .contentShape(Rectangle())
         .onTapGesture(perform: onActivate)
         .onHover { isHovered = $0 }

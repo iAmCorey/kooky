@@ -121,7 +121,7 @@ final class WorkspaceStore {
     /// Session id currently being dragged in any pane's tab bar. Shared across
     /// all `TabBarView` instances so target panes can show drop indicators
     /// even when the source lives in a different pane.
-    var draggingTabId: UUID?
+    private(set) var draggingTabId: UUID?
     var sidebarMode: SidebarMode = .full
     /// Right-side agent-overview sidebar — per-window collapse state, sharing
     /// the left sidebar's three modes (full / compact / hidden). The content is
@@ -786,64 +786,72 @@ final class WorkspaceStore {
         // Snapshot inputs on the main actor before hopping off — Workspace
         // is @MainActor so the closure can't touch its properties from
         // background tasks.
-        let inputs: [(index: Int, sourceId: UUID, cwd: URL)] = workspaces.enumerated().compactMap { index, source in
+        //
+        // Where to ask git: each worktree's own pinned directory, then the
+        // source's cwd. Not the source's cwd alone — it follows the active
+        // tab, which may sit in another repository, and asked there git
+        // lists none of these worktrees: every one was dropped as a zombie.
+        let inputs: [(index: Int, sourceId: UUID, askFrom: [URL])] = workspaces.enumerated().compactMap { index, source in
             guard source.worktreeParentId == nil else { return nil }
-            return (index, source.id, source.workingDirectory)
+            let worktrees = workspaces.filter { $0.worktreeParentId == source.id }
+            guard !worktrees.isEmpty else { return nil }
+            return (index, source.id, worktrees.map(\.diskPath) + [source.workingDirectory])
         }
         guard !inputs.isEmpty else { return }
 
-        let results: [(index: Int, sourceId: UUID, repoRoot: URL, infos: [WorktreeManager.Info])] = await withTaskGroup(
-            of: (index: Int, sourceId: UUID, repoRoot: URL, infos: [WorktreeManager.Info])?.self
+        let results: [(index: Int, sourceId: UUID, infos: [WorktreeManager.Info])] = await withTaskGroup(
+            of: (index: Int, sourceId: UUID, infos: [WorktreeManager.Info])?.self
         ) { group in
             for input in inputs {
                 group.addTask {
-                    guard let repoRoot = WorktreeManager.repoRoot(near: input.cwd),
-                          case .success(let infos) = WorktreeManager.list(repoPath: repoRoot) else {
-                        return nil
+                    // Not "the first answer wins": a source's worktrees need
+                    // not share one repository (each was created from where
+                    // its active tab sat), and a live worktree is always on
+                    // the list its own directory gives. A directory an
+                    // earlier answer already listed is not asked again.
+                    var infos: [WorktreeManager.Info] = []
+                    var listed: Set<String> = []
+                    for directory in input.askFrom where !listed.contains(directory.standardizedFileURL.path) {
+                        guard case .success(let more) = WorktreeManager.list(repoPath: directory) else { continue }
+                        infos += more
+                        listed.formUnion(more.map { $0.path.standardizedFileURL.path })
                     }
-                    return (input.index, input.sourceId, repoRoot, infos)
+                    return infos.isEmpty ? nil : (input.index, input.sourceId, infos)
                 }
             }
-            var collected: [(index: Int, sourceId: UUID, repoRoot: URL, infos: [WorktreeManager.Info])] = []
+            var collected: [(index: Int, sourceId: UUID, infos: [WorktreeManager.Info])] = []
             for await result in group { if let result { collected.append(result) } }
             return collected.sorted { $0.index < $1.index }
         }
 
         for result in results {
             guard let source = workspaces.first(where: { $0.id == result.sourceId }) else { continue }
-            reconcile(source: source, sourceRoot: result.repoRoot, diskWorktrees: result.infos)
+            reconcile(source: source, diskWorktrees: result.infos)
         }
     }
 
     /// `internal` so tests can drive it with synthetic `diskWorktrees`
     /// without spinning up a real git repo. `reconcileWorktrees` is the
     /// production entry point.
-    func reconcile(source: Workspace, sourceRoot: URL? = nil, diskWorktrees: [WorktreeManager.Info]) {
-        let sourceRootPath = (sourceRoot ?? WorktreeManager.repoRoot(near: source.workingDirectory) ?? source.workingDirectory)
-            .standardizedFileURL
-            .path
-        // Drop the source workspace's own working-tree root so we're
-        // comparing only sibling worktrees against the sidebar. This must
-        // use a stable repo root, not `Workspace.workingDirectory`, because
-        // that property follows the active shell's cwd and may be `/repo/sub`.
+    func reconcile(source: Workspace, diskWorktrees: [WorktreeManager.Info]) {
         let sidebar = workspaces.filter { $0.worktreeParentId == source.id }
         guard !sidebar.isEmpty else { return }
 
-        // Precompute Set of disk satellite paths so the zombie check is
-        // O(M+K) (M sidebar entries, K disk worktrees), not O(M×K) — the
-        // user opens kooky a lot, every microsecond on this path adds up
-        // to perceived launch latency.
-        let satellitePaths: Set<String> = Set(
-            diskWorktrees.lazy
-                .map { $0.path.standardizedFileURL.path }
-                .filter { $0 != sourceRootPath }
-        )
+        // Every tree git lists counts, the source's own included. Carving
+        // that one out takes knowing which it is, and the source's cwd
+        // follows its active tab — into one of these worktrees just as
+        // easily, which then dropped a live worktree as a zombie.
+        //
+        // A Set so the zombie check is O(M+K) (M sidebar entries, K disk
+        // worktrees), not O(M×K) — the user opens kooky a lot, every
+        // microsecond on this path adds up to perceived launch latency.
+        let diskPaths = Set(diskWorktrees.lazy.map { $0.path.standardizedFileURL.path })
 
         // Compare against the pinned worktreePath, not workingDirectory —
         // a sidebar row whose user cd'd to ~/Downloads still matches its
         // disk root via worktreePath. Adopt-on-discovery is deliberately
         // not handled — see method doc comment.
-        for wt in sidebar where !satellitePaths.contains(wt.diskPath.standardizedFileURL.path) {
+        for wt in sidebar where !diskPaths.contains(wt.diskPath.standardizedFileURL.path) {
             closeWorkspace(wt)
         }
     }
@@ -1426,26 +1434,143 @@ final class WorkspaceStore {
         for source in peerStores() where source !== self {
             if let session = source.surrenderSession(id: droppedId) {
                 attachSession(session, to: destPane, at: destIndex, in: workspace)
-                wireSessionCallbacks(engine: session.engine, session: session, workspace: workspace, codexRolloutId: session.conversationId)
+                rewire(session, into: workspace)
                 return true
             }
         }
         return false
     }
 
-    /// Removes the session with `id` from this store and returns it for a
-    /// peer store (another window) to adopt — its engine, libghostty surface,
+    /// Points a live session that just moved in from another workspace or
+    /// window at `workspace`. See `wireSessionCallbacks` for the rollout id.
+    private func rewire(_ session: Session, into workspace: Workspace) {
+        wireSessionCallbacks(engine: session.engine, session: session, workspace: workspace, codexRolloutId: session.conversationId)
+    }
+
+    // MARK: - Tabs dropped on the sidebar
+
+    /// A tab drag starting in this window. A drag released over nothing never
+    /// reports back, so every window's leftover id goes first.
+    func tabDragBegan(_ id: UUID) {
+        tabDragEnded()
+        draggingTabId = id
+    }
+
+    /// No tab is being dragged any more — also what the start of any other
+    /// drag means: a leftover id would make workspace rows offer to take a
+    /// tab while a workspace is being reordered over them.
+    func tabDragEnded() {
+        for store in peerStores() { store.draggingTabId = nil }
+        draggingTabId = nil
+    }
+
+    /// The tab being dragged right now, out of this window or another. It
+    /// can be left over from a cancelled drag, so a drop acts on its payload
+    /// and only checks that payload against this.
+    var tabDragInFlightId: UUID? {
+        draggingTabId ?? peerStores().lazy.compactMap { $0.draggingTabId }.first
+    }
+
+    /// Whether a drop naming the tab `id` is that tab being dragged. The
+    /// payload alone is only text: a string that merely spells an open tab's
+    /// id — dragged out of `kooky-cli list` output, say — must not move it.
+    private func isTabBeingDragged(_ id: UUID) -> Bool {
+        tabDragInFlightId == id
+    }
+
+    /// A workspace closes behind its last tab. True when that would take
+    /// more with it than a tab move may: a worktree's directory on disk, or
+    /// the source its worktrees are listed under.
+    private func mustKeepLastTab(of workspace: Workspace) -> Bool {
+        workspace.closingLastTabCascadesIntoWorktreeRemoval
+            || (workspace.hasSingleTab && workspaces.contains { $0.worktreeParentId == workspace.id })
+    }
+
+    /// The window and workspace holding the tab `id` right now.
+    private func tabOrigin(_ id: UUID) -> (store: WorkspaceStore, workspace: Workspace)? {
+        if let here = location(ofSessionId: id) { return (self, here.workspace) }
+        for peer in peerStores() where peer !== self {
+            if let there = peer.location(ofSessionId: id) { return (peer, there.workspace) }
+        }
+        return nil
+    }
+
+    /// Whether the tab `id` may be dropped on `workspace`'s sidebar row.
+    func canDropTab(_ id: UUID, onto workspace: Workspace) -> Bool {
+        // A row's drop closure can outlive its workspace: the payload
+        // arrives a beat after the release, and the last shell may exit then.
+        guard workspaces.contains(where: { $0 === workspace }),
+              let origin = tabOrigin(id), origin.workspace !== workspace else { return false }
+        // A restart reopens every tab the way its workspace says, so a tab
+        // that crossed between local and SSH would come back as the other kind.
+        guard origin.workspace.sshRemoteHost == workspace.sshRemoteHost else { return false }
+        return !origin.store.mustKeepLastTab(of: origin.workspace)
+    }
+
+    /// A tab dropped on `workspace`'s sidebar row: the live session moves to
+    /// the end of that workspace's active pane, and the window goes there to
+    /// show it.
+    func handleTabDrop(droppedId: UUID, onto workspace: Workspace) -> Bool {
+        guard isTabBeingDragged(droppedId),
+              canDropTab(droppedId, onto: workspace),
+              let origin = tabOrigin(droppedId),
+              let destPane = workspace.activePane,
+              let session = origin.store.surrenderSession(id: droppedId) else { return false }
+        attachSession(session, to: destPane, at: destPane.tabs.count, in: workspace)
+        rewire(session, into: workspace)
+        showDroppedTab(session, in: workspace)
+        return true
+    }
+
+    /// The window goes to a tab that just landed in `workspace`. On screen
+    /// means seen, so whatever the inbox held for it counts as read.
+    private func showDroppedTab(_ session: Session, in workspace: Workspace) {
+        activateWorkspace(workspace)
+        activateTab(session, in: workspace)
+    }
+
+    /// Whether the tab `id` may be dropped on the sidebar outside every row.
+    func canDropTabOnNewWorkspace(_ id: UUID) -> Bool {
+        guard let origin = tabOrigin(id),
+              !origin.store.mustKeepLastTab(of: origin.workspace) else { return false }
+        // Alone in a workspace of this window, there is nothing to split
+        // off. From another window it is a move.
+        return origin.store !== self || !origin.workspace.hasSingleTab
+    }
+
+    /// A tab dropped on the sidebar outside every row: it gets a workspace of
+    /// its own, shown right away like one opened from a Finder folder.
+    func handleTabDropOnNewWorkspace(droppedId: UUID) -> Bool {
+        guard isTabBeingDragged(droppedId),
+              canDropTabOnNewWorkspace(droppedId),
+              let origin = tabOrigin(droppedId) else { return false }
+        let sshRemoteHost = origin.workspace.sshRemoteHost
+        let cameFromWorktree = origin.workspace.worktreeParentId != nil
+        guard let session = origin.store.surrenderSession(id: droppedId) else { return false }
+        let pane = Pane(tabs: [session], activeTabId: session.id)
+        let workspace = Workspace(workingDirectory: session.currentDirectory, root: PaneNode(pane: pane))
+        // Its tabs restart the way the workspace says (see `canDropTab`).
+        workspace.sshRemoteHost = sshRemoteHost
+        rewire(session, into: workspace)
+        workspaces.append(workspace)
+        // Same exclusions as `addWorkspace`: a worktree's directory dies
+        // with it, and an SSH workspace's local cwd is not the project.
+        if sshRemoteHost == nil, !cameFromWorktree {
+            noteRecentFolder(session.currentDirectory)
+        }
+        showDroppedTab(session, in: workspace)
+        return true
+    }
+
+    /// Removes the session with `id` from this store and returns it for
+    /// another workspace or window to adopt — its engine, libghostty surface,
     /// scrollback, PTY and agent state all stay alive. Returns nil when this
-    /// store doesn't own the id. `internal`, not `private`: `handleTabDrop`
-    /// calls it on each peer store.
+    /// store doesn't own the id. `internal`, not `private`: the drop handlers
+    /// call it on each peer store.
     func surrenderSession(id: UUID) -> Session? {
         guard let (workspace, pane) = location(ofSessionId: id),
               let idx = pane.tabs.firstIndex(where: { $0.id == id }) else { return nil }
         let session = pane.tabs[idx]
-        // The drag started in this window, so `onDrag` set our `draggingTabId`
-        // — and the destination store's `dropDestination` defer clears only
-        // its own. Clear ours so this window's drop indicators reset.
-        draggingTabId = nil
         teardownSessionMonitors(session, keepForTransfer: true)
         detachSession(session, from: pane, at: idx, in: workspace)
         return session
@@ -2202,11 +2327,12 @@ final class WorkspaceStore {
     /// `session.resumedConversationId` (the post-gate value `spawnSession`
     /// put on the command line — re-deriving `resumeProvider() ?
     /// conversationId : nil` would miss a forced History-list resume);
-    /// the cross-window attach path passes `session.conversationId` instead,
-    /// because a live Codex tab's rollout predates the DESTINATION store's
-    /// monitor snapshot and would otherwise be excluded as another session's
-    /// file (the id is reliable there: the source window's monitor backfilled
-    /// it while the tab ran).
+    /// `rewire` (a live tab moved in from elsewhere) passes
+    /// `session.conversationId` instead, because a live Codex tab's rollout
+    /// predates the monitor snapshot taken when it is wired again and would
+    /// otherwise be excluded as another session's file (the id is reliable
+    /// there: the monitor it had before the move backfilled it while the tab
+    /// ran).
     private func wireSessionCallbacks(engine: any TerminalEngine, session: Session, workspace: Workspace, codexRolloutId: String?) {
         // Initial refresh — without these, the status bar stays empty until
         // the user `cd`s or runs a command. Both fetchers silently hide

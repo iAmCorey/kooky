@@ -369,6 +369,9 @@ enum Theme {
     static let chromeSplitChevronWidth: CGFloat = 18
     static let chromeButtonCornerRadius: CGFloat = 5
     static let chromeSelectionCornerRadius: CGFloat = 6
+    static var chromeSelectionShape: RoundedRectangle {
+        RoundedRectangle(cornerRadius: chromeSelectionCornerRadius, style: .continuous)
+    }
     static let chromeControlSpacing: CGFloat = 2
     static let chromeBarEdgeInset: CGFloat = space2
     static let chromeBottomBarVerticalPadding: CGFloat = 5

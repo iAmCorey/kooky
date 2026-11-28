@@ -94,10 +94,7 @@ struct SidebarView: View {
     /// on drop. Lets each row compute whether the drag origin is above or
     /// below it so the drop indicator can flip edges.
     @State private var draggingWorkspaceId: UUID?
-    /// True while a Finder folder drag is hovering the sidebar — gates the
-    /// drop-zone outline so the user sees that releasing here opens a new
-    /// workspace.
-    @State private var isFolderDropTargeted = false
+    @State private var dropHover = SidebarDropHover()
     /// Source workspace ids whose worktree subtree the user collapsed.
     /// Default behaviour is expanded — only ids the user explicitly closed
     /// land here. Ephemeral by design: a kooky relaunch always shows every
@@ -196,40 +193,18 @@ struct SidebarView: View {
             if !isCompact { resizeHandle }
         }
         .overlay {
-            // Drop affordance: tinted fill + hairline stroke, inset from the
-            // sidebar edges so the splitter / titlebar don't clip it. Always
-            // in the view tree (alpha-driven) so `easeOut(0.12)` can animate.
-            ZStack {
-                RoundedRectangle(cornerRadius: 8)
-                    .fill(Theme.chromeActive)
-                RoundedRectangle(cornerRadius: 8)
-                    .strokeBorder(Theme.chromeForeground.opacity(0.55), lineWidth: 1)
-            }
-            .padding(Theme.space2)
-            .opacity(isFolderDropTargeted ? 1 : 0)
-            .animation(.easeOut(duration: 0.12), value: isFolderDropTargeted)
-            .allowsHitTesting(false)
+            // Inset from the sidebar edges so the splitter / titlebar don't
+            // clip it.
+            NewWorkspaceDropOutline(store: store, hover: dropHover)
+                .padding(Theme.space2)
         }
         // Files are silently ignored — `GhosttySurfaceView` already handles
         // "drop a file path at the cursor" inside a pane (M5.kk). The outline
         // lights up for any URL drag (SwiftUI's `.dropDestination` can't
         // pre-filter file-vs-folder); file drags release as no-ops.
         .dropDestination(for: URL.self) { urls, _ in
-            // The file tree's rows vend public.file-url drags (a folder row
-            // looks exactly like a Finder drag) and the tree renders inside
-            // this very drop zone — reject drops while it's mounted so a
-            // tree drag released over the sidebar bounces back instead of
-            // minting a workspace. Everywhere the workspace LIST shows —
-            // workspaces mode, compact (the tree never mounts there), any
-            // window — Finder folders still land.
-            guard !fileTreeIsMounted else { return false }
-            let folders = urls.filter(isDirectory)
-            guard !folders.isEmpty else { return false }
-            for folder in folders {
-                store.addWorkspace(workingDirectory: folder)
-            }
-            return true
-        } isTargeted: { isFolderDropTargeted = $0 && !fileTreeIsMounted }
+            handleDroppedURLs(urls, tabOpensWorkspace: true)
+        } isTargeted: { dropHover.outsideList = $0 && !fileTreeIsMounted }
         .sheet(item: $sheet) { current in
             switch current {
             case .createSSHWorkspace:
@@ -495,6 +470,34 @@ struct SidebarView: View {
         }
     }
 
+    /// URLs released on the sidebar. Finder folders open as workspaces. A tab
+    /// (it names itself with a URL too, see `TabDrag`) gets a workspace of
+    /// its own — unless it was released inside the workspace list, where
+    /// just missing a row should do nothing.
+    private func handleDroppedURLs(_ urls: [URL], tabOpensWorkspace: Bool) -> Bool {
+        // The file tree's rows vend public.file-url drags (a folder row
+        // looks exactly like a Finder drag) and the tree renders inside
+        // this very drop zone — reject drops while it's mounted so a
+        // tree drag released over the sidebar bounces back instead of
+        // minting a workspace. Everywhere the workspace LIST shows —
+        // workspaces mode, compact (the tree never mounts there), any
+        // window — Finder folders still land.
+        guard !fileTreeIsMounted else { return false }
+        if let tabId = urls.lazy.compactMap(TabDrag.tabId(from:)).first {
+            defer { store.tabDragEnded() }
+            guard tabOpensWorkspace else { return false }
+            return withAnimation(.easeInOut(duration: 0.18)) {
+                store.handleTabDropOnNewWorkspace(droppedId: tabId)
+            }
+        }
+        let folders = urls.filter(isDirectory)
+        guard !folders.isEmpty else { return false }
+        for folder in folders {
+            store.addWorkspace(workingDirectory: folder)
+        }
+        return true
+    }
+
     private func list(isCompact: Bool, proxy: ScrollViewProxy) -> some View {
         ScrollView(showsIndicators: false) {
             LazyVStack(spacing: 3) {
@@ -544,6 +547,11 @@ struct SidebarView: View {
             // source list, so don't double that gap with extra top padding.
             .padding(.horizontal, Theme.space2)
             .padding(.bottom, Theme.space2)
+            // The gaps and margins around the rows. Same as the rest of the
+            // sidebar for Finder folders; for a tab, see `handleDroppedURLs`.
+            .dropDestination(for: URL.self) { urls, _ in
+                handleDroppedURLs(urls, tabOpensWorkspace: false)
+            } isTargeted: { dropHover.insideList = $0 }
         }
         // ⌘⇧R parks the active workspace on the store; reveal its row so the
         // row's own rename popover can open. onChange catches a request made
@@ -601,6 +609,7 @@ struct SidebarView: View {
                     onSetTag: { store.setTag($0, for: worktree) },
                     onGoToSource: { store.activateWorkspace(parent) }
                 )
+                .modifier(TabDropTarget(workspace: worktree, store: store))
                 // Source-list hierarchy should be visible without decoding a
                 // badge: worktree children sit one rhythm step inside their
                 // source workspace while keeping the row itself lightweight.
@@ -666,7 +675,8 @@ private struct DraggableWorkspaceRow: View {
     @Binding var draggingId: UUID?
     /// Non-nil only for source workspaces that own at least one worktree.
     /// Worktree rows themselves render via `SidebarWorkspaceRow` directly,
-    /// without this wrapper, so they don't pick up drag/drop handlers.
+    /// without this wrapper: they can't be reordered, and take a dropped tab
+    /// through `TabDropTarget`.
     var disclosure: SidebarWorkspaceRow.WorktreeDisclosure? = nil
     var onCreateWorktree: (() -> Void)? = nil
     var onGoToSource: (() -> Void)? = nil
@@ -681,6 +691,9 @@ private struct DraggableWorkspaceRow: View {
         let dragsDownward = (originIndex ?? Int.max) < myIndex
         let edge: Alignment = dragsDownward ? .bottom : .top
         let isSelfDrag = draggingId == workspace.id
+        // A tab over this row goes INTO the workspace; only another workspace
+        // reorders. Nil when the drag isn't a tab.
+        let takesTab = isTargeted ? store.draggedTabFits(workspace) : nil
 
         SidebarWorkspaceRow(
             workspace: workspace,
@@ -697,21 +710,109 @@ private struct DraggableWorkspaceRow: View {
             onCreateWorktree: onCreateWorktree,
             onGoToSource: onGoToSource
         )
-        .dropIndicator(active: isTargeted && !isSelfDrag, on: edge)
+        .dropIndicator(active: isTargeted && !isSelfDrag && takesTab == nil, on: edge)
+        .overlay { DropZoneOutline(shape: Theme.chromeSelectionShape, isActive: takesTab == true) }
         .onDrag {
+            store.tabDragEnded()
             draggingId = workspace.id
             return NSItemProvider(object: workspace.id.uuidString as NSString)
         }
         .dropDestination(for: String.self) { dropped, _ in
             defer { draggingId = nil }
-            guard let id = dropped.first.flatMap(UUID.init),
-                  let from = store.workspaces.firstIndex(where: { $0.id == id })
-            else { return false }
+            guard let id = dropped.first.flatMap(UUID.init) else { return false }
+            guard let from = store.workspaces.firstIndex(where: { $0.id == id }) else {
+                return store.dropTab(id, onto: workspace)
+            }
             withAnimation(.easeInOut(duration: 0.18)) {
                 store.moveWorkspace(from: from, to: myIndex)
             }
             return true
         } isTargeted: { isTargeted = $0 }
+    }
+}
+
+/// Lets a row that isn't a `DraggableWorkspaceRow` — a worktree under its
+/// source — take a dropped tab too.
+private struct TabDropTarget: ViewModifier {
+    let workspace: Workspace
+    let store: WorkspaceStore
+
+    @State private var isTargeted = false
+
+    func body(content: Content) -> some View {
+        content
+            .overlay {
+                DropZoneOutline(shape: Theme.chromeSelectionShape, isActive: isTargeted && store.draggedTabFits(workspace) == true)
+            }
+            .dropDestination(for: String.self) { dropped, _ in
+                guard let id = dropped.first.flatMap(UUID.init) else { return false }
+                return store.dropTab(id, onto: workspace)
+            } isTargeted: { isTargeted = $0 }
+    }
+}
+
+/// "Releasing here does something": tinted fill + hairline stroke. Always in
+/// the view tree (alpha-driven) so the fade can animate.
+private struct DropZoneOutline: View {
+    let shape: RoundedRectangle
+    let isActive: Bool
+
+    var body: some View {
+        shape
+            .fill(Theme.chromeActive)
+            .overlay { shape.strokeBorder(Theme.chromeForeground.opacity(0.55), lineWidth: 1) }
+            .opacity(isActive ? 1 : 0)
+            .animation(.easeOut(duration: 0.12), value: isActive)
+            .allowsHitTesting(false)
+    }
+}
+
+/// Which of the sidebar's two URL drop zones a drag is over. The zones write
+/// it and only `NewWorkspaceDropOutline` reads it: as `@State` read by
+/// `SidebarView.body`, every crossing would re-run each row closure (see
+/// `ActiveWorkspaceRevealer`).
+@MainActor
+@Observable
+private final class SidebarDropHover {
+    /// Over the sidebar but not the workspace list.
+    var outsideList = false
+    /// Over the list's gaps and margins. Kept apart because a tab released
+    /// there, between rows, opens nothing.
+    var insideList = false
+}
+
+/// The sidebar-wide outline: releasing here opens a workspace.
+private struct NewWorkspaceDropOutline: View {
+    let store: WorkspaceStore
+    let hover: SidebarDropHover
+
+    var body: some View {
+        DropZoneOutline(shape: RoundedRectangle(cornerRadius: 8), isActive: opensWorkspace)
+    }
+
+    private var opensWorkspace: Bool {
+        guard hover.outsideList || hover.insideList else { return false }
+        // A tab says what it is through the store; any other URL drag here
+        // comes from Finder. Read only while something hovers, so a drag
+        // elsewhere in the app re-renders nothing here.
+        guard let tabId = store.tabDragInFlightId else { return true }
+        return hover.outsideList && store.canDropTabOnNewWorkspace(tabId)
+    }
+}
+
+private extension WorkspaceStore {
+    /// Whether the tab being dragged may land on `workspace`'s row; nil when
+    /// no tab is being dragged.
+    func draggedTabFits(_ workspace: Workspace) -> Bool? {
+        tabDragInFlightId.map { canDropTab($0, onto: workspace) }
+    }
+
+    /// A drop on `workspace`'s row that turned out to be a tab.
+    func dropTab(_ id: UUID, onto workspace: Workspace) -> Bool {
+        defer { tabDragEnded() }
+        return withAnimation(.easeInOut(duration: 0.18)) {
+            handleTabDrop(droppedId: id, onto: workspace)
+        }
     }
 }
 

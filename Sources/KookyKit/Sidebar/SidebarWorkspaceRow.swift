@@ -236,7 +236,7 @@ struct SidebarWorkspaceRow: View {
             }
         }
         .background(rowBackground)
-        .clipShape(RoundedRectangle(cornerRadius: Theme.chromeSelectionCornerRadius, style: .continuous))
+        .clipShape(Theme.chromeSelectionShape)
         .contentShape(Rectangle())
         .onTapGesture(perform: onActivate)
         .onHover { isHovered = $0 }

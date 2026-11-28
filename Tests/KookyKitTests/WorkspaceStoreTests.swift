@@ -59,6 +59,21 @@ final class WorkspaceStoreTests: XCTestCase {
         return pane
     }
 
+    /// `tab` dragged out of its tab bar and released on `workspace`'s sidebar
+    /// row in `store`'s window.
+    private func dropOnRow(_ tab: Session, of workspace: Workspace, in store: WorkspaceStore, draggedFrom origin: WorkspaceStore? = nil) -> Bool {
+        (origin ?? store).tabDragBegan(tab.id)
+        defer { store.tabDragEnded() }
+        return store.handleTabDrop(droppedId: tab.id, onto: workspace)
+    }
+
+    /// The same, released on the sidebar outside every row.
+    private func dropOnBlankSidebar(_ tab: Session, in store: WorkspaceStore, draggedFrom origin: WorkspaceStore? = nil) -> Bool {
+        (origin ?? store).tabDragBegan(tab.id)
+        defer { store.tabDragEnded() }
+        return store.handleTabDropOnNewWorkspace(droppedId: tab.id)
+    }
+
     func testRequestRenameActiveTabSetsFlag() {
         let store = makeStore()
         XCTAssertEqual(store.active?.activeSession?.renameRequested, false)
@@ -285,12 +300,26 @@ final class WorkspaceStoreTests: XCTestCase {
                       "drifted-cwd worktree must not be treated as a zombie")
     }
 
-    func testReconcileUsesStableSourceRootForExistingWorktreeZombieCheck() {
-        // v0.19.0 no longer adopts disk-only entries, but zombie cleanup
-        // still needs the stable source root: a worktree workspace whose
-        // disk dir is gone (`/tmp/projectA-feat` removed) gets dropped,
-        // while one whose disk dir is still present (matching by
-        // worktreePath, not the drifted source cwd) survives.
+    func testReconcileKeepsAWorktreeTheSourcesActiveTabSitsIn() {
+        // What a tab dragged from the worktree into its source leaves
+        // behind: the source's cwd follows its active tab into the worktree.
+        let store = makeStore()
+        let source = store.addWorkspace(workingDirectory: projectA)
+        let feat = URL(fileURLWithPath: "/tmp/projectA-feat")
+        let wt = store.addWorkspace(workingDirectory: feat, worktreeParent: source, worktreeBranch: "feat")
+        source.workingDirectory = feat
+
+        store.reconcile(source: source, diskWorktrees: [
+            WorktreeManager.Info(path: projectA, branch: "main"),
+            WorktreeManager.Info(path: feat, branch: "feat")
+        ])
+
+        XCTAssertTrue(store.workspaces.contains { $0.id == wt.id }, "a worktree git still lists is not a zombie")
+    }
+
+    func testReconcileDropsOnlyTheWorktreeMissingFromDisk() {
+        // The source's cwd has drifted into a subfolder; its worktrees are
+        // matched by their own pinned paths either way.
         let store = makeStore()
         let source = store.addWorkspace(workingDirectory: URL(fileURLWithPath: "/tmp/projectA/sub"))
         let stillThere = store.addWorkspace(
@@ -302,7 +331,7 @@ final class WorkspaceStoreTests: XCTestCase {
             worktreeParent: source, worktreeBranch: "zombie"
         )
 
-        store.reconcile(source: source, sourceRoot: projectA, diskWorktrees: [
+        store.reconcile(source: source, diskWorktrees: [
             WorktreeManager.Info(path: projectA, branch: "main"),
             WorktreeManager.Info(path: URL(fileURLWithPath: "/tmp/projectA-feat"), branch: "feat")
         ])
@@ -1846,6 +1875,260 @@ final class WorkspaceStoreTests: XCTestCase {
         XCTAssertFalse(b.handleTabDrop(droppedId: UUID(), to: firstPane(wsB), at: 0, in: wsB))
     }
 
+    // MARK: - Tabs dropped on the sidebar
+
+    func testTabDroppedOnAWorkspaceRowMovesThereAndTheWindowFollows() {
+        let store = makeStore()
+        let source = store.workspaces[0]
+        let stays = firstPane(source).tabs[0]
+        let moved = store.addTab(in: source, template: .claudeCode)
+        engine(moved).emitPwd(projectB.path)
+        let dest = store.addWorkspace(workingDirectory: projectA, activate: false)
+        let destTab = firstPane(dest).tabs[0]
+
+        XCTAssertFalse(dropOnRow(moved, of: source, in: store), "it is already there")
+        XCTAssertTrue(dropOnRow(moved, of: dest, in: store))
+
+        XCTAssertEqual(firstPane(dest).tabs.map { $0.id }, [destTab.id, moved.id], "after the tabs already there")
+        XCTAssertEqual(firstPane(source).tabs.map { $0.id }, [stays.id], "the source keeps its other tab")
+        XCTAssertEqual(store.activeWorkspaceId, dest.id, "the window goes with the tab")
+        XCTAssertEqual(firstPane(dest).activeTabId, moved.id, "…and shows it")
+        XCTAssertEqual(dest.workingDirectory.path, projectB.path, "the workspace follows the tab it now shows")
+        XCTAssertEqual(engine(moved).terminateCount, 0, "the session moved, it did not restart")
+
+        engine(moved).emitPwd(projectC.path)
+        XCTAssertEqual(dest.workingDirectory.path, projectC.path, "the engine reports to the workspace it lives in")
+    }
+
+    func testTabDroppedOnTheSidebarCountsAsSeen() {
+        let store = makeStore()
+        let source = store.workspaces[0]
+        let stays = firstPane(source).tabs[0]
+        let onRow = store.addTab(in: source, template: .claudeCode)
+        let onBlank = store.addTab(in: source, template: .claudeCode)
+        // Neither dragged tab is the one on screen: moving one away must not
+        // hand the other the pane, which would not be the drop reading it.
+        store.activateTab(stays, in: source)
+        let dest = store.addWorkspace(workingDirectory: projectA, activate: false)
+        let inbox = NotificationInbox.shared
+        for tab in [onRow, onBlank] {
+            inbox.add(kind: .attention, sessionId: tab.id, agent: .claudeCode, tab: "t", workspace: "w")
+        }
+        func isUnread(_ tab: Session) -> Bool {
+            inbox.events.contains { $0.sessionId == tab.id && !$0.isRead }
+        }
+
+        XCTAssertTrue(dropOnRow(onRow, of: dest, in: store))
+        XCTAssertFalse(isUnread(onRow), "shown by the drop, so read")
+        XCTAssertTrue(isUnread(onBlank), "the tab left behind is still waiting")
+
+        XCTAssertTrue(dropOnBlankSidebar(onBlank, in: store))
+        XCTAssertFalse(isUnread(onBlank))
+    }
+
+    func testDroppingAWorkspacesLastTabClosesItAndTheWindowFollowsTheTab() {
+        let store = makeStore()
+        let source = store.workspaces[0]
+        let onlyTab = firstPane(source).tabs[0]
+        // Next row down — where closing `source` alone would leave the window.
+        let neighbour = store.addWorkspace(workingDirectory: projectA, activate: false)
+        let dest = store.addWorkspace(workingDirectory: projectB, activate: false)
+
+        XCTAssertTrue(dropOnRow(onlyTab, of: dest, in: store))
+
+        XCTAssertEqual(store.workspaces.map { $0.id }, [neighbour.id, dest.id], "the emptied workspace closed")
+        XCTAssertEqual(store.activeWorkspaceId, dest.id, "the window went with the tab")
+        XCTAssertEqual(firstPane(dest).activeTabId, onlyTab.id, "…and shows it")
+    }
+
+    func testAWorktreesLastTabCannotBeDraggedOut() {
+        let store = makeStore()
+        let parent = store.workspaces[0]
+        let worktree = store.addWorkspace(workingDirectory: projectA, worktreeParent: parent, worktreeBranch: "feature")
+        let onlyTab = firstPane(worktree).tabs[0]
+
+        XCTAssertFalse(store.canDropTab(onlyTab.id, onto: parent))
+        XCTAssertFalse(dropOnRow(onlyTab, of: parent, in: store))
+        XCTAssertFalse(dropOnBlankSidebar(onlyTab, in: store))
+        XCTAssertTrue(firstPane(worktree).tabs.contains { $0 === onlyTab }, "the tab stayed put")
+        XCTAssertNil(store.pendingRemovalRequest, "nothing asked to remove the worktree")
+
+        // With a second tab the worktree outlives the move.
+        let second = store.addTab(in: worktree, template: .terminal)
+        XCTAssertTrue(dropOnRow(second, of: parent, in: store))
+        XCTAssertTrue(store.workspaces.contains { $0 === worktree })
+    }
+
+    func testLastTabOfASourceWithWorktreesCannotBeDraggedOut() {
+        let store = makeStore()
+        let source = store.workspaces[0]
+        let onlyTab = firstPane(source).tabs[0]
+        let worktree = store.addWorkspace(workingDirectory: projectA, worktreeParent: source, worktreeBranch: "feature")
+        let dest = store.addWorkspace(workingDirectory: projectB, activate: false)
+
+        XCTAssertFalse(dropOnRow(onlyTab, of: dest, in: store))
+        XCTAssertFalse(dropOnRow(onlyTab, of: worktree, in: store))
+        XCTAssertFalse(dropOnBlankSidebar(onlyTab, in: store))
+        XCTAssertTrue(store.workspaces.contains { $0 === source }, "its worktrees keep their source")
+
+        let second = store.addTab(in: source, template: .terminal)
+        XCTAssertTrue(dropOnRow(second, of: dest, in: store), "with a tab left behind, the source stays")
+    }
+
+    func testTabIsNotDroppedOnAWorkspaceThatClosedMeanwhile() {
+        let store = makeStore()
+        let source = store.workspaces[0]
+        let tab = store.addTab(in: source, template: .terminal)
+        let dest = store.addWorkspace(workingDirectory: projectA, activate: false)
+        store.closeWorkspace(dest)
+
+        XCTAssertFalse(dropOnRow(tab, of: dest, in: store))
+        XCTAssertTrue(firstPane(source).tabs.contains { $0 === tab }, "the tab stayed put")
+        XCTAssertEqual(store.activeWorkspaceId, source.id)
+    }
+
+    func testTextThatSpellsATabsIdIsNotATabBeingDragged() {
+        let store = makeStore()
+        let source = store.workspaces[0]
+        let tab = store.addTab(in: source, template: .terminal)
+        let other = store.addTab(in: source, template: .terminal)
+        let dest = store.addWorkspace(workingDirectory: projectA, activate: false)
+
+        // No tab is being dragged: the id arrived as text from somewhere.
+        XCTAssertFalse(store.handleTabDrop(droppedId: tab.id, onto: dest))
+        XCTAssertFalse(store.handleTabDropOnNewWorkspace(droppedId: tab.id))
+        // A different tab is the one being dragged.
+        store.tabDragBegan(other.id)
+        XCTAssertFalse(store.handleTabDrop(droppedId: tab.id, onto: dest))
+        XCTAssertFalse(store.handleTabDropOnNewWorkspace(droppedId: tab.id))
+
+        XCTAssertEqual(firstPane(source).tabs.count, 3, "nothing moved")
+        XCTAssertEqual(store.workspaces.count, 2)
+    }
+
+    func testTabsDoNotCrossBetweenLocalAndSSHWorkspaces() {
+        let store = makeStore()
+        let local = store.workspaces[0]
+        let localTab = store.addTab(in: local, template: .terminal)
+        let remote = store.addWorkspace(workingDirectory: projectA, sshRemoteHost: "dev@box", activate: false)
+        let sameRemote = store.addWorkspace(workingDirectory: projectB, sshRemoteHost: "dev@box", activate: false)
+        let remoteTab = store.addTab(in: remote, template: .terminal)
+
+        XCTAssertFalse(dropOnRow(localTab, of: remote, in: store))
+        XCTAssertFalse(dropOnRow(remoteTab, of: local, in: store))
+        XCTAssertTrue(firstPane(local).tabs.contains { $0 === localTab })
+        XCTAssertTrue(firstPane(remote).tabs.contains { $0 === remoteTab })
+
+        XCTAssertTrue(dropOnRow(remoteTab, of: sameRemote, in: store), "same host, same kind")
+    }
+
+    func testTabDroppedOnTheSidebarGetsAWorkspaceOfItsOwn() {
+        let store = makeStore()
+        let source = store.workspaces[0]
+        let onlyTab = firstPane(source).tabs[0]
+        XCTAssertFalse(dropOnBlankSidebar(onlyTab, in: store), "already alone in its workspace")
+        XCTAssertEqual(store.workspaces.count, 1)
+
+        let moved = store.addTab(in: source, template: .claudeCode)
+        engine(moved).emitPwd(projectA.path)
+        XCTAssertTrue(dropOnBlankSidebar(moved, in: store))
+
+        XCTAssertEqual(store.workspaces.count, 2)
+        let created = store.workspaces[1]
+        XCTAssertEqual(created.root.allPanes.flatMap { $0.tabs }.map { $0.id }, [moved.id])
+        XCTAssertEqual(created.workingDirectory.path, projectA.path, "it opens where the tab is")
+        XCTAssertEqual(store.activeWorkspaceId, created.id, "and is shown, like a workspace opened from Finder")
+        XCTAssertEqual(firstPane(source).tabs.map { $0.id }, [onlyTab.id])
+        XCTAssertEqual(engine(moved).terminateCount, 0)
+
+        engine(moved).emitPwd(projectC.path)
+        XCTAssertEqual(created.workingDirectory.path, projectC.path, "the engine reports to the new workspace")
+    }
+
+    func testWorkspaceOpenedAroundADroppedTabJoinsRecentFolders() {
+        var noted: [String] = []
+        let store = makeStore(noteRecentFolder: { noted.append($0.path) })
+        let local = store.workspaces[0]
+        let tab = store.addTab(in: local, template: .terminal)
+        engine(tab).emitPwd(projectA.path)
+        noted.removeAll()
+
+        XCTAssertTrue(dropOnBlankSidebar(tab, in: store))
+        XCTAssertEqual(noted, [projectA.path])
+
+        // Not from a worktree (its directory dies with it), nor from an SSH
+        // workspace (its local cwd is not where the project lives).
+        let worktree = store.addWorkspace(workingDirectory: projectB, worktreeParent: local, worktreeBranch: "feature")
+        let remote = store.addWorkspace(workingDirectory: projectC, sshRemoteHost: "dev@box")
+        let fromWorktree = store.addTab(in: worktree, template: .terminal)
+        let fromRemote = store.addTab(in: remote, template: .terminal)
+        noted.removeAll()
+        XCTAssertTrue(dropOnBlankSidebar(fromWorktree, in: store))
+        XCTAssertTrue(dropOnBlankSidebar(fromRemote, in: store))
+        XCTAssertEqual(noted, [])
+    }
+
+    func testWorkspaceOpenedAroundAnSSHTabConnectsToTheSameHost() {
+        let store = makeStore()
+        let remote = store.addWorkspace(workingDirectory: projectA, sshRemoteHost: "dev@box")
+        let tab = store.addTab(in: remote, template: .terminal)
+
+        XCTAssertTrue(dropOnBlankSidebar(tab, in: store))
+
+        XCTAssertEqual(store.workspaces.last?.sshRemoteHost, "dev@box")
+    }
+
+    func testTabDroppedOnAnotherWindowsSidebar() {
+        let (a, b) = makeWindowPair()
+        let wsA = a.workspaces[0]
+        let stays = firstPane(wsA).tabs[0]
+        let moved = a.addTab(in: wsA, template: .terminal)
+        let wsB = b.workspaces[0]
+        let ownTab = firstPane(wsB).tabs[0]
+        let onScreenInB = b.addWorkspace(workingDirectory: projectA)
+        XCTAssertEqual(b.activeWorkspaceId, onScreenInB.id)
+
+        XCTAssertTrue(dropOnRow(moved, of: wsB, in: b, draggedFrom: a))
+        XCTAssertEqual(firstPane(wsB).tabs.map { $0.id }, [ownTab.id, moved.id])
+        XCTAssertEqual(firstPane(wsB).activeTabId, moved.id)
+        XCTAssertEqual(b.activeWorkspaceId, wsB.id, "the window it was dropped on shows it")
+        XCTAssertEqual(a.activeWorkspaceId, wsA.id, "the window it left stays where it was")
+
+        // The last tab of a window's workspace may open a workspace in
+        // another window: that is the workspace moving there.
+        XCTAssertTrue(dropOnBlankSidebar(stays, in: b, draggedFrom: a))
+        XCTAssertTrue(a.workspaces.isEmpty)
+        XCTAssertEqual(b.workspaces.count, 3)
+        XCTAssertEqual(b.activeWorkspaceId, b.workspaces[2].id)
+        XCTAssertEqual(engine(stays).terminateCount, 0)
+    }
+
+    func testAnyNewDragForgetsATabDragLeftOverInAnotherWindow() {
+        let (a, b) = makeWindowPair()
+        let tab = firstPane(a.workspaces[0]).tabs[0]
+
+        a.tabDragBegan(tab.id)
+        XCTAssertEqual(b.tabDragInFlightId, tab.id, "the other window's rows can tell a tab is coming")
+
+        // What a workspace drag starting in window B reports.
+        b.tabDragEnded()
+        XCTAssertNil(a.tabDragInFlightId)
+        XCTAssertNil(b.tabDragInFlightId)
+    }
+
+    func testTabDragNamesItsTabForURLDropZonesAndNothingElseDoes() throws {
+        let id = UUID()
+        let flavours = TabDrag.itemProvider(for: id).registeredTypeIdentifiers
+        XCTAssertEqual(flavours.first, "public.utf8-plain-text", "tab bars and workspace rows still read the plain id")
+        XCTAssertTrue(flavours.contains("public.url"))
+        XCTAssertFalse(flavours.contains("public.file-url"), "a terminal pane must not take it for a dropped file")
+
+        XCTAssertEqual(TabDrag.tabId(from: try XCTUnwrap(URL(string: "kooky-tab://\(id.uuidString)"))), id)
+        XCTAssertNil(TabDrag.tabId(from: URL(fileURLWithPath: "/tmp/\(id.uuidString)")))
+        XCTAssertNil(TabDrag.tabId(from: try XCTUnwrap(URL(string: "https://\(id.uuidString)"))))
+        XCTAssertNil(TabDrag.tabId(from: try XCTUnwrap(URL(string: "kooky-tab://not-a-tab"))))
+    }
+
     func testMoveTabToNewWindowForwardsRequestToInjectedClosure() {
         var captured: UUID?
         let store = WorkspaceStore(
@@ -2754,6 +3037,46 @@ extension WorkspaceStoreTests {
             "git unavailable"
         )
         return repo
+    }
+
+    /// A real repo with one commit and a `feat` worktree beside it.
+    private func makeGitRepoWithWorktree() throws -> (repo: URL, worktree: URL) {
+        let repo = try makeGitRepo()
+        let worktree = repo.deletingLastPathComponent()
+            .appendingPathComponent("kooky-wt-\(UUID().uuidString)", isDirectory: true)
+        let identity = ["-c", "user.name=t", "-c", "user.email=t@example.com", "-c", "commit.gpgsign=false"]
+        XCTAssertNotNil(GitStatusFetcher.runGit(
+            ["-C", repo.path] + identity + ["commit", "-q", "--allow-empty", "-m", "init"], timeout: 10))
+        XCTAssertNotNil(GitStatusFetcher.runGit(
+            ["-C", repo.path, "worktree", "add", "-q", "-b", "feat", worktree.path], timeout: 10))
+        return (repo, worktree)
+    }
+
+    func testReconcileWorktreesAsksEachWorktreesOwnRepository() async throws {
+        let first = try makeGitRepoWithWorktree()
+        let second = try makeGitRepoWithWorktree()
+        let unrelatedRepo = try makeGitRepo()
+        defer {
+            for dir in [first.repo, first.worktree, second.repo, second.worktree, unrelatedRepo] {
+                try? FileManager.default.removeItem(at: dir)
+            }
+        }
+        let store = makeStore()
+        let source = store.addWorkspace(workingDirectory: first.repo)
+        let live = store.addWorkspace(workingDirectory: first.worktree, worktreeParent: source, worktreeBranch: "feat")
+        // Created while the source's active tab sat in the second repository.
+        let liveElsewhere = store.addWorkspace(
+            workingDirectory: second.worktree, worktreeParent: source, worktreeBranch: "feat")
+        let gone = store.addWorkspace(
+            workingDirectory: first.worktree.appendingPathExtension("gone"), worktreeParent: source, worktreeBranch: "gone")
+        // …and has since wandered into a third.
+        source.workingDirectory = unrelatedRepo
+
+        await store.reconcileWorktrees()
+
+        XCTAssertTrue(store.workspaces.contains { $0.id == live.id }, "a worktree on disk is not a zombie")
+        XCTAssertTrue(store.workspaces.contains { $0.id == liveElsewhere.id }, "nor is one of another repository")
+        XCTAssertFalse(store.workspaces.contains { $0.id == gone.id }, "one whose directory is gone still is")
     }
 
     /// Baselines are relative: the seed workspace (home cwd) may or may not

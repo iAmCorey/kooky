@@ -91,9 +91,11 @@ final class Workspace: Identifiable {
     /// confirmation. (`closePane` has its own, DIFFERENT pane-level cascade
     /// condition; this models only the closeTab shape.)
     var closingLastTabCascadesIntoWorktreeRemoval: Bool {
-        worktreeParentId != nil
-            && root.allPanes.count == 1
-            && root.allPanes.first?.tabs.count == 1
+        worktreeParentId != nil && hasSingleTab
+    }
+
+    var hasSingleTab: Bool {
+        root.allPanes.count == 1 && root.allPanes.first?.tabs.count == 1
     }
 
     var title: String {

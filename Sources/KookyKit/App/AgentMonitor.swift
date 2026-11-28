@@ -488,7 +488,7 @@ private struct AgentOverviewRow: View {
         .padding(.horizontal, 14)
         .padding(.vertical, Theme.sidebarRowVerticalPadding)
         .background((isHovered ? Theme.chromeHover : Color.clear).workspaceTagStripe(shownTag))
-        .clipShape(RoundedRectangle(cornerRadius: Theme.chromeSelectionCornerRadius, style: .continuous))
+        .clipShape(Theme.chromeSelectionShape)
         .padding(.horizontal, Theme.space2)
         .contentShape(Rectangle())
         .onHover { isHovered = $0 }
@@ -515,7 +515,7 @@ private struct AgentOverviewCompactRow: View {
                     .overlay(Circle().stroke(Theme.chromeBackground, lineWidth: 1.5))
             }
             .background((isHovered ? Theme.chromeHover : Color.clear).workspaceTagStripe(shownTag))
-            .clipShape(RoundedRectangle(cornerRadius: Theme.chromeSelectionCornerRadius, style: .continuous))
+            .clipShape(Theme.chromeSelectionShape)
             .contentShape(Rectangle())
             .onHover { isHovered = $0 }
             .help(entry.hoverText(tag: shownTag))
